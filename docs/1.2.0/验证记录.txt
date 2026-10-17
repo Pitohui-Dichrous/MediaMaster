@@ -1,0 +1,54 @@
+映序 MediaMaster 1.2.0 验证记录
+日期：2026年10月17日（Pacific/Auckland）
+
+交付：正式签名 universal release，versionName1.2.0，versionCode3。
+最低Android8.0/API26，目标API35；包含 arm64-v8a, armeabi-v7a, x86, x86_64 原生库。
+APK大小：94,761,758 字节。
+SHA-256：bc9f6828bf029ea7cdbccab882660fec3a8e07fbc28a57360bcd13bb05ee22a7
+签名证书SHA-256：750cc62b7d693924960594e22195ec56e929eef597715533d44d19eccf6fa16f
+
+构建与静态检查
+assembleDebug、assembleDebugAndroidTest、assembleRelease、testDebugUnitTest、lintDebug成功。
+7项单元测试通过，0失败/错误/跳过；静态检查 0 errors, 26 warnings。
+正式签名验证通过，RSA3072、APK Signature Scheme v2，与1.0.0/1.1.0同签名。
+原横向滑动GestureSeek.java与1.0.0基线忽略空白后完全一致。
+
+Android14/API34：35项最终设备测试全部通过，耗时84.303秒
+MainFlowTest 8项；MediaRepositoryInstrumentedTest 3项；ThumbnailLoaderTest 5项；
+DirectionalThumbDrawableTest 5项；LongGopSeekTest 1项；PlayerInteractionTest 7项；
+SeamlessLoopTest 1项；SeekPreviewLoaderTest 4项；VlcResumeLoopTest 1项。
+
+本轮验证
+1. 首次新任务自动扫描；真实播放器返回、Home后台恢复、同任务Activity重建均不重写目录缓存。
+   finishAndRemoveTask后新任务会重新扫描，即使进程仍存活。
+2. 短暂缓冲不显示转圈；超过1秒显示，重复Buffering信号不重置等待期限。
+   结束缓冲会取消延迟回调；正在拖动预览时不叠加圆圈。
+3. 横滑时进度条持续显示并跟随目标；持有超过原3600ms自动隐藏时间仍可见，松手才定位。
+4. 用120条目录验证跟手折叠、中途反向滚动不展开、到顶部展开；实际MotionEvent拖快滚越过50条，
+   拖到底看见最后一条且保持正确底边距，拖回顶重新展开。快滚48dp触区、150ms反馈、限频轻触觉。
+5. 两人物图按alpha轮廓等视觉面积缩放，前进图1、后退镜像图2；实绘透明四角和范围正确，
+   140ms转向可中断；关闭系统动画时立即切换并正确恢复系统设置。
+6. 目录JPEG读写已移除；测试旧缓存清理、离屏迟到任务取消、同key去重、有界队列、
+   12MiB LRU及close释放、后台暂停。进度预览另为4MiB内存缓存，无预览图片落盘。
+7. Launcher在160/320/480/640dpi均为真正VectorDrawable，安全区与抗锯齿实绘检查通过。
+
+定位性能与准确性
+最终播放定位仍使用SeekParameters.EXACT；预览使用附近关键帧以减少长GOP完整解码。
+实际seek前取消预览；被播放页覆盖时目录暂停提图；API34+启用MediaCodec decode-only标记，
+减少目标前中间帧的送显开销。播放器实例不随定位重建。
+测试样本：本地生成1920x1080、30fps、30秒H264 MP4，关键帧间隔10秒。
+3.4/18.7/6.3秒跳转均以VideoFrameMetadataListener首个送显PTS及渲染计数验证，误差0微秒。
+耗时日志保存在test-results/long-gop-seek.txt；模拟器首轮为645/1325/1008ms，
+这些数值不代表用户手机，也不作为与VLC App的对照结论。用户未提供慢文件，不能保证所有视频零等待。
+
+原功能回归
+搜索、五字段排序和单独倒序开关、随机入口、扫描、重命名/删除和系统确认路径通过。
+MP4/MKV/AVI/竖屏视频元数据、缩略图通过。
+6秒短片连续3次单集循环无初始就绪后的重缓冲/重建；VLC恢复位置只应用一次。
+
+Android15/API35
+从正式版1.1.0直接覆盖升级到本次1.2.0，无卸载/清数据；签名、目录、读取授权和启动播放检查通过。
+旧版专用缩略图缓存已在启动后清理；升级详情见test-results/release-upgrade-api35.txt。
+
+截图见screenshots；原始关键文本日志见test-results。
+当前没有连接用户手机，设备测试在Android14/15模拟器完成；硬件解码器与文件编码会影响真实表现。

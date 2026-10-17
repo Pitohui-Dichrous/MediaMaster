@@ -1,0 +1,8 @@
+
+io.mediamaster.app.player.DirectionalThumbDrawableTest:.
+
+Time: 1.287
+
+OK (1 test)
+
+

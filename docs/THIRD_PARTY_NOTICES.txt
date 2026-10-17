@@ -1,0 +1,56 @@
+MediaMaster / 映序
+
+AndroidX Media3, RecyclerView, SwipeRefreshLayout and AndroidX test libraries
+Copyright The Android Open Source Project
+License: Apache License, Version 2.0
+Source: https://github.com/androidx/media (Media3 1.8.0)
+Source: https://android.googlesource.com/platform/frameworks/support/
+License text: https://www.apache.org/licenses/LICENSE-2.0.txt
+
+LibVLC Android 3.6.5
+Copyright VideoLAN and VLC authors
+License: GNU Lesser General Public License, version 2.1 or later
+Unmodified binary: org.videolan.android:libvlc-all:3.6.5
+Android bindings and build scripts: https://code.videolan.org/videolan/libvlcjni
+VLC source: https://code.videolan.org/videolan/vlc
+Published corresponding sources/build information: https://code.videolan.org/videolan/libvlcjni/-/tags
+License text: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt
+LibVLC is dynamically linked through its provided Android shared libraries. No modifications to LibVLC were made. Application sources and build configuration accompany this delivery to allow replacement/relinking with a compatible library. VideoLAN components include additional third-party libraries under their respective licenses; see the upstream source distribution.
+
+JUnit 4.13.2 (test-only)
+Eclipse Public License 1.0
+https://github.com/junit-team/junit4
+
+No network permission is declared by this application. Video files remain on the device.
+
+Google Material Icons Round
+Copyright Google LLC
+License: Apache License, Version 2.0 (full text: Apache-2.0.txt)
+Source: https://github.com/google/material-design-icons/tree/master/src
+Canonical, unmodified SVG path geometry from materialiconsround/24px.svg:
+  navigation: arrow_back, more_horiz, more_vert, refresh, close
+  av: play_arrow, pause, skip_previous, skip_next, repeat, repeat_one,
+      shuffle, volume_up, volume_off, fast_forward, video_library
+  device: screen_rotation
+  image: brightness_6
+  action: search, settings
+  file: folder_open
+  content: sort
+SVG paths are rendered with Android PathParser in PlayerIcons.java and Ui.java.
+
+Launcher icon
+The launcher foreground now uses the same Google Material Icons Round play_arrow
+vector path listed above, rendered natively by Android at each display density.
+The adaptive-icon white background is a native Android color. No low-resolution
+Icons8 PNG or paid-size asset is included in this version.
+Source: https://github.com/google/material-design-icons/blob/master/src/av/play_arrow/materialiconsround/24px.svg
+License: Apache License, Version 2.0 (full text: Apache-2.0.txt)
+
+Character seek-bar artwork supplied by the user
+Original names: 1.png, 2.png (1254 x 1254, RGBA PNG)
+Bundled as drawable-nodpi/scrubber_forward.png and scrubber_backward.png.
+The original PNG file bytes and transparent, irregular outlines are preserved.
+Android Canvas trims transparent margins, normalizes visual area, and mirrors
+2.png only at render time. No reconstructed or AI-generated character art is used.
+These user-provided images are included for the user's personal application;
+the application makes no independent claim to their artwork rights.

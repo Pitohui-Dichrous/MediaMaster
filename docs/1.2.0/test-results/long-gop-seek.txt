@@ -1,0 +1,4 @@
+--------- beginning of main
+10-17 01:17:32.576  6609  6632 I LongGopSeek: api=34 targetMs=3400 firstRenderedPtsUs=3400000 errorUs=0 elapsedMs=645 renderedBuffers=1->2
+10-17 01:17:33.925  6609  6632 I LongGopSeek: api=34 targetMs=18700 firstRenderedPtsUs=18700000 errorUs=0 elapsedMs=1325 renderedBuffers=2->3
+10-17 01:17:34.957  6609  6632 I LongGopSeek: api=34 targetMs=6300 firstRenderedPtsUs=6300000 errorUs=0 elapsedMs=1008 renderedBuffers=3->4

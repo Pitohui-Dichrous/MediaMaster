@@ -1,0 +1,50 @@
+MediaMaster 1.1.0 -> 1.2.0 signed release covering upgrade on Android 15/API35 emulator-5554.
+No uninstall, data clearing, preference seeding, or grant changes performed.
+BEFORE:
+    versionCode=2 minSdk=26 targetSdk=35
+    versionName=1.1.0
+      dataDir=/data/user/0/io.mediamaster.app
+      firstInstallTime=2026-10-16 14:38:49
+        android.permission.READ_MEDIA_VIDEO: granted=true, flags=[ USER_SENSITIVE_WHEN_GRANTED|USER_SENSITIVE_WHEN_DENIED]
+Library records: 6
+Existing media paths: ['/storage/emulated/0/Movies/MediaMasterQA/01_Aurora.mp4', '/storage/emulated/0/Movies/MediaMasterQA/02_Horizon.mkv', '/storage/emulated/0/Movies/MediaMasterQA/03_Evening.avi', '/storage/emulated/0/Movies/MediaMasterQA/04_Portrait_Loop.mp4', '/storage/emulated/0/loop-api35.mp4', '/storage/emulated/0/Download/QA_Foreign_Consent.mp4']
+Shared preferences directory: total 16
+drwxrwx--x 2 u0_a212 u0_a212 4096 2026-10-16 14:38 .
+drwx------ 7 u0_a212 u0_a212 4096 2026-10-16 14:38 ..
+No custom folder sources or preferences existed in this emulator; preservation claims apply only to observed data.
+Legacy thumbnail cache before: 88	/data/user/0/io.mediamaster.app/cache/video-thumbnails-v1
+Before signing:
+Signer #1 certificate DN: CN=MediaMaster, OU=Personal, O=MediaMaster, C=NZ
+Signer #1 certificate SHA-256 digest: 750cc62b7d693924960594e22195ec56e929eef597715533d44d19eccf6fa16f
+Signer #1 certificate SHA-1 digest: 9c7fce79b5d05b76215ffe1e6378e30c9cf0beb5
+Signer #1 certificate MD5 digest: a87f9a7eb06fc2299fe42f9b1b8455e3
+
+New APK signing:
+Signer #1 certificate DN: CN=MediaMaster, OU=Personal, O=MediaMaster, C=NZ
+Signer #1 certificate SHA-256 digest: 750cc62b7d693924960594e22195ec56e929eef597715533d44d19eccf6fa16f
+Signer #1 certificate SHA-1 digest: 9c7fce79b5d05b76215ffe1e6378e30c9cf0beb5
+Signer #1 certificate MD5 digest: a87f9a7eb06fc2299fe42f9b1b8455e3
+
+New APK SHA256: bc9f6828bf029ea7cdbccab882660fec3a8e07fbc28a57360bcd13bb05ee22a7
+AFTER / PASS:
+    versionCode=3 minSdk=26 targetSdk=35
+    versionName=1.2.0
+    lastUpdateTime=2026-10-17 01:19:27
+      dataDir=/data/user/0/io.mediamaster.app
+      firstInstallTime=2026-10-16 14:38:49
+        android.permission.READ_MEDIA_VIDEO: granted=true, flags=[ USER_SENSITIVE_WHEN_GRANTED|USER_SENSITIVE_WHEN_DENIED]
+Installed APK byte hash exactly matches release universal APK: bc9f6828bf029ea7cdbccab882660fec3a8e07fbc28a57360bcd13bb05ee22a7
+All6 existing fixture records and paths are byte-for-byte equivalent as parsed metadata.
+Existing media permission remains granted; original firstInstallTime unchanged.
+No preexisting custom source/folder grants/preferences existed; none were invented for this check.
+Legacy on-disk thumbnail directory removed on first v1.2.0 launch: ls: /data/user/0/io.mediamaster.app/cache/video-thumbnails-v1: No such file or directory
+After browsing and playback, no thumbnail image files exist in app cache.
+Cache files remaining:
+/data/user/0/io.mediamaster.app/cache/player-queues/775e6444-5567-4c4e-82e3-d6b880fb01f9.json
+/data/user/0/io.mediamaster.app/cache/player-queues/0ba95b9a-f810-4204-8ba1-ad10a9ff7ae5.json
+/data/user/0/io.mediamaster.app/cache/player-queues/d05effe5-d6ef-4f6e-b3a2-18d80f2fa9f9.json
+/data/user/0/io.mediamaster.app/cache/oat_primary/x86_64/base.art
+Real playback smoke: Aurora MP4 opens PlayerActivity, Media3 1.8.0 initialized, rendered1.4s frame visible with transparent controls and custom irregular scrubber. Two screenshots700ms apart differ.
+AndroidRuntime after release startup/player smoke: no fatal exception.
+Screenshots: docs/1.2.0/screenshots/映序-新版目录.png, 映序-目录收起.png, 映序-高清图标.png, 映序-正式版播放.png
+Emulator-5554 returned to the library and released for parent use.

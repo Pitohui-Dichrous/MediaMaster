@@ -1,0 +1,54 @@
+映序 MediaMaster 1.1.0 验证记录
+日期：2026年10月17日（Pacific/Auckland）
+
+交付 APK：正式签名 release，versionCode 2，versionName 1.1.0。
+最低 Android 8.0/API26，目标 API35。本次重点验证 Android14/API34。
+原生库架构：arm64-v8a, armeabi-v7a, x86, x86_64。
+大小：91,827,202 字节。
+SHA-256：6f3e37933713f55c616fbe8b9005af8dd10f3d851077f69d32c4896a4a6bc5cb
+签名证书 SHA-256：750cc62b7d693924960594e22195ec56e929eef597715533d44d19eccf6fa16f
+
+构建与检查
+assembleRelease、assembleDebug、assembleDebugAndroidTest、testDebugUnitTest、lintDebug 成功。
+7 项单元测试全部通过，包含原有非线性进度曲线与播放顺序、线性亮度/音量计算。
+静态检查：0 errors，22 warnings。
+原有 GestureSeek.java 与 1.0.0 基线比较，忽略空白后完全一致。
+APK Signature Scheme v2 验签通过；RSA3072，签名与已发布 1.0.0 一致。
+
+Android14/API34：19 项设备测试全部通过，用时 59.096 秒
+MainFlowTest：5 项；MediaRepositoryInstrumentedTest：3 项。
+PlayerInteractionTest：5 项；SeekPreviewLoaderTest：4 项。
+SeamlessLoopTest：1 项；VlcResumeLoopTest：1 项。
+
+新交互专项
+横向拖动与进度条拖动均出现实际视频画面预览，松手跳转并隐藏预览。
+连续 60Hz 移动请求仍可在移动期间收到新画面，不会因不断取消提取而一直空白。
+提取覆盖不同时间点、末次请求、重置取消，以及 AVI 的兼容提取。
+长按进入 2 倍速，松手/取消恢复原设定速度；多指取消后不会再次误触。
+左侧垂直滑动调整窗口亮度，系统亮度值保持；右侧线性调整实际媒体音量。
+上下操作栏背景透明，无常驻模式文字和手势说明；标题与序号保留。
+
+刷新专项
+插入新视频并通知媒体库后，首页停留期间不会自动加入；点击扫描后正确加入。
+首页前台空闲超过 35 秒，跨过原 25 秒定时核对间隔；目录缓存修改时间和大小完全未变。
+代码已移除定时扫描、ContentObserver、FileObserver、下载广播监听。
+进入视频库、手动刷新及用户主动完成权限/文件操作后更新目录。
+预览按需在后台提取，最多一个解码工作和一个待处理目标；4MiB 内存缓存，不写预览图片文件。
+
+原有功能回归
+搜索、五种排序与统一倒序开关、随机队列入口、扫描、重命名和删除流程通过。
+MP4/MKV/AVI 与竖屏视频元数据、列表缩略图通过。
+6 秒短片连续 3 次单集循环，无首次就绪后的重新缓冲，播放器实例保持。
+兼容解码从恢复位置进入后，下一轮回到开头，未重复从恢复位置播放。
+
+Android15/API35：正式版覆盖升级
+原有正式版 1.0.0 未卸载，直接安装本次 universal release APK 成功。
+证书一致，versionCode 升为 2，首次安装时间与视频读取授权保留。
+启动前目录缓存 SHA-256 与旧版相同，六个原有视频及目录记录保留。
+旧版未保存自定义设置，本项没有针对不存在的偏好进行保留验证。
+新版启动、列表、视频画面推进及新图标显示正常。
+
+实测界面截图见 screenshots，关键原始文本记录见 test-results。
+当前没有连接用户的真实手机，测试在 Android14/15 模拟器上完成。
+格式兼容及循环边界仍受文件编码和手机解码器影响。
+旧版逐帧循环测量为历史记录，本次以设备回归测试检查循环，没有重新声称测量所有格式的音画接缝。

@@ -1,0 +1,25 @@
+MediaMaster Android 工程
+
+应用：io.mediamaster.app，版本 1.2.1，最低安卓 8.0（API26），目标 API35，为安卓14个人手机使用设计。
+技术：Java17，原生 Android Views，Media3 1.8.0，LibVLC 3.6.5。
+
+本工作区已准备工具：
+powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1 assembleRelease testDebugUnitTest lintDebug
+
+新机器可使用 Android Studio 打开本目录，安装 JDK17、Android SDK35、Build Tools35.0.0；工程内附标准 Gradle Wrapper（Gradle8.11.1，AGP8.9.2）。local.properties 属本机设置，不放入源代码包。
+
+发布签名位于 .tools/signing/，请备份。密码不写入公开源代码。
+没有本机签名配置的机器默认使用调试密钥以便重建；这样的 APK 不能覆盖当前正式安装版。更新现有安装必须使用同一签名。
+
+常用目录：
+app/src/main/java/io/mediamaster/app/MainActivity.java：视频列表与文件管理界面。
+app/src/main/java/io/mediamaster/app/media：媒体库、文件夹扫描、权限操作、缩略图。
+app/src/main/java/io/mediamaster/app/player：双引擎播放、非线性手势、播放顺序、方向适配。
+app/src/test：手势曲线、随机播放逻辑验证。
+docs：构建、许可与验证说明。
+dist：交付 APK、源代码压缩包、使用说明。
+
+仅冷启动新任务、手动刷新以及用户主动完成权限/目录/文件操作时扫描；同任务后台恢复、播放器返回和配置重建不扫描。没有定时轮询、MediaStore ContentObserver、FileObserver 或下载完成监听，也没有常驻后台服务。进度预览在独立工作线程按需提取，使用内存缓存，不写预览图片文件。
+
+目录缩略图12MiB、播放预览4MiB，均为纯内存LRU；旧版video-thumbnails-v1缓存后台迁移删除，不改动原视频。
+播放定位保持SeekParameters.EXACT；API34+启用MediaCodec decode-only标记以减少目标帧之前的送显开销，预览用附近关键帧降低解码竞争。

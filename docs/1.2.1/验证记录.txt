@@ -1,0 +1,33 @@
+映序 MediaMaster 1.2.1 验证记录
+日期：2026年10月17日（Pacific/Auckland）
+
+正式签名 universal release，versionName1.2.1，versionCode4。
+APK：94,761,810字节；原生库：arm64-v8a, armeabi-v7a, x86, x86_64。
+SHA-256：96f50ebcef27f571c59379a709dce95924ff64b01fd667b571f2a92836fdac02
+签名证书SHA-256：750cc62b7d693924960594e22195ec56e929eef597715533d44d19eccf6fa16f
+
+改动范围
+横滑目标时间原来被量化到整秒，改为保留毫秒精度。进度条、预览和松手定位共用连续目标。
+与1.2.0源代码比对，GestureSeek运算仅移除整秒取整，线性/非线性系数、灵敏度和边界均保持。
+时间文字仍显示分/秒；没有加入拖尾动画或周期插值来掩盖跳跃。
+
+构建及单元检查
+assembleRelease、assembleDebug、assembleDebugAndroidTest、testDebugUnitTest、lintDebug成功。
+9项单元测试全部通过，包括1秒/6秒/60秒时长的小幅连续移动、半像素可逆性，原长滑加速及随机队列回归。
+静态检查无错误；正式签名验签通过，与前版同签名。
+
+Android14/API34：15项针对本次改动的设备测试全部通过，耗时64.087秒
+PlayerInteractionTest 8项；SeekPreviewLoaderTest 4项；SeamlessLoopTest 1项；
+LongGopSeekTest 1项；VlcResumeLoopTest 1项。
+新增真实手势回归使用6秒竖屏短片：每次移动半dp，连续40个MOVE，随后逐步收回39次，按约60Hz发送。
+每一步的进度值均连续前进/后退，小步幅无整秒段跳跃；手势跨过多次播放进度ticker，实际播放位置仍未提交。
+松手后准确定位至同一毫秒目标。画面预览、人物控制点反向、保持UI、延迟加载、长按倍速、亮度音量继续通过。
+MP4短循环与VLC循环恢复、长GOP精确送显定位回归通过。
+目录部分未修改行为，本轮没有重复其1.2.0的全部目录测试；历史验证保留。
+
+Android15/API35
+正式1.2.0/code3直接覆盖到1.2.1/code4成功；同签名、首次安装时间和视频授权保留。
+原6条视频缓存记录在安装前、安装后、首次启动后三个节点完全一致，启动列表正常。
+设备安装后的APK字节哈希与交付源APK一致，升级证据附于test-results。
+
+本轮运行于模拟器，未对用户实体手机安装或执行测试。最终手指触感仍以实际手机显示刷新率和触控采样为准。

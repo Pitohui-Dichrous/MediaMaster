@@ -1,0 +1,35 @@
+MediaMaster / 映序 1.1.0 - 正式版覆盖升级验收
+验收日期：2026-10-17（Pacific/Auckland）
+设备：MediaMaster_API35 / emulator-5554 / Android 15 (API 35), x86_64
+安装包：app/build/outputs/apk/release/app-universal-release.apk
+
+PASS 旧版确认为 release 1.0.0 / versionCode 1；未卸载，未清理数据。
+PASS 使用 adb install -r 原地覆盖升级，返回 Success。
+PASS 升级后确认为 release 1.1.0 / versionCode 2。
+PASS 新旧 APK 签名证书 SHA-256 一致：
+750cc62b7d693924960594e22195ec56e929eef597715533d44d19eccf6fa16f
+PASS firstInstallTime 保持为 2026-10-16 14:38:49（设备原始时钟），lastUpdateTime 已更新。
+PASS READ_MEDIA_VIDEO 授权保留，无需再次授权。
+PASS 首次运行新版前，video-library-v4.json 的 SHA-256 完全保持：
+4d454d935aa13cf509b66c7d4a4580387f6c59e713cb39a4573ba91009cf06e2
+PASS 新版启动后列表显示原有 6 个视频，缓存六条的 id/path/name/size 集合保持一致。
+PASS 设备六个视频文件路径保持一致，未删除或改名任何测试视频。
+NOTE 升级前 shared_prefs 为空，原版未保存自定义设置；因此不宣称验证了不存在的自定义偏好。
+PASS 点开列表中的 01_Aurora.mp4：PlayerActivity 正常显示视频，两个连续截图的视频内容和片内时码由 0.000 推进至 1.433，未出现崩溃或加载错误。
+PASS 播放界面透明布局与 Material 图标显示正常，标题和 3 / 6 序号保留。
+PASS 应用抽屉已显示白底黑色圆角播放新图标，中文名称映序正常。
+
+证据：
+release-api35-before-package.txt / release-api35-after-package.txt
+release-api35-before-certificate.txt / release-api35-new-certificate.txt
+release-api35-install.txt
+release-api35-before-library.json / release-api35-after-library.json
+release-api35-before-media.txt / release-api35-after-media.txt
+release-upgrade-main.png / release-upgrade-main.xml
+release-upgrade-playback-a.png / release-upgrade-playback-b.png
+release-upgrade-playback.xml
+release-upgrade-launcher.png / release-upgrade-launcher.xml
+新图标交付截图：docs/1.1.0/screenshots/映序-新图标.png
+
+本次为正式签名升级专项验收，未重复完整播放器设备测试。
+5556 未操作。5554 已回到 Launcher，可交由主任务继续使用。

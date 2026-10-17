@@ -1,0 +1,13 @@
+
+io.mediamaster.app.MainFlowTest:.....
+io.mediamaster.app.media.MediaRepositoryInstrumentedTest:...
+io.mediamaster.app.player.PlayerInteractionTest:.....
+io.mediamaster.app.player.SeamlessLoopTest:.
+io.mediamaster.app.player.SeekPreviewLoaderTest:....
+io.mediamaster.app.player.VlcResumeLoopTest:.
+
+Time: 59.096
+
+OK (19 tests)
+
+

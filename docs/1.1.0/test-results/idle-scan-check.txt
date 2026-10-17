@@ -1,0 +1,14 @@
+Android 14/API 34 idle scan regression
+Device: emulator-5556
+Check: foreground library cache must not be rewritten across the former 25-second polling interval.
+Initial entry: activity cold-started; waited 5 seconds for entry scan.
+Before cache stat (mtime seconds:size bytes): 1792163984:1532
+Before resumed activity:     topResumedActivity=ActivityRecord{9197f30 u0 io.mediamaster.app/.MainActivity t50}
+Idle start UTC: 2026-10-16T15:20:04.0256125Z
+Idle duration: at least 35 seconds; no UI action, no background transition.
+Idle end UTC: 2026-10-16T15:21:00.5300786Z
+After cache stat (mtime seconds:size bytes): 1792163984:1532
+After resumed activity:     topResumedActivity=ActivityRecord{9197f30 u0 io.mediamaster.app/.MainActivity t50}
+Cache unchanged: True
+MainActivity remains foreground: True
+RESULT: PASS

@@ -1,0 +1,48 @@
+映序 MediaMaster 1.3.0-preview.2 · 三窗口原生分页验证
+日期：2026年10月20日，Pacific/Auckland
+版本：1.3.0-preview.2，versionCode 6，本地正式签名预览包。
+本轮提交并同步Git源码，不创建、更新或上传GitHub Release，不创建发布标签。最新正式版仍为1.2.1。
+
+本版行为
+原生ScrollView中的三个整屏VideoPage根始终挂载，各自拥有独立播放器和TextureView。
+当前前后视频在观看期间异步准备。邻页真实首帧暂停、静音，Exo页还必须STATE_READY才允许露出。
+手指拖动直接改变原生scrollY，同时露出当前页和相邻页；不通过单页移出后再加载模拟分页。
+松手到位只轮转三个页面角色并开放当前播放权，不重新prepare或重新绑定被选中的视频。
+随后只回收最远窗口，准备下一候选。已播完的上一条保留同一解码器，离屏定位回零并预热后可返回。
+随机peek不消耗历史或牌堆条目，取消/回滑不改变候选；提交时消费预载的同一条。
+纵滑离开锚点前暂停并静音当前页，滚动期间无页面发声，到位后只有居中的当前页可以播放。
+全屏/竖屏切换保留当前实例、位置、暂停和倍速；退出竖屏释放邻页引擎，后台释放全部引擎。
+相邻页未准备好时保持当前，避免先显示空白页。首次打开文件仍有正常的解析和解码准备过程。
+
+构建与逻辑验证
+assembleRelease、assembleDebug、assembleDebugAndroidTest、testDebugUnitTest、lintDebug成功。
+24项单元测试通过；Android Lint无Error/Fatal。
+APK签名通过，证书与1.2.1和前一预览包一致，支持覆盖安装。
+
+Android14/API34：56项完整设备用例全部通过，耗时225.603秒
+MainFlow8、MediaRepository3、ThumbnailLoader5、DirectionalThumbDrawable5、LongGopSeek1、
+PlayerInteraction8、PortraitPlayback13、PortraitPreload7、SeamlessLoop1、SeekPreviewLoader4、VlcResumeLoop1。
+
+七项原生预载验证包含：
+1. 前后页有实际解码输出与原生图像像素，首帧静音暂停，并与各文件开头参考帧比对。
+2. 未松手时原生滚动位移跟随手指，系统合成图同时出现两个实际视频页面。
+3. 松手后当前页就是先前预载的同一页面/播放器/视频视图，prepareCount与generation不增加，帧与时间继续前进。
+4. 随机预览取消及反向不改变历史，重复预览保留同一候选，始终仅复用三个附着根。
+5. 单集循环实际重复、手动反向切集及顺序自然EOF均遵守策略；已播完上一条返回后从头继续且能再次自动接播。
+6. 切回全屏保留当前解码器并释放邻页，实际进入后台后释放全部播放器。
+7. 强制VLC邻页取得真实纹理首帧并暂停，选中时沿用同一VLC实例，不重新打开媒体。
+全程以播放器回调和8ms采样验证最多一个可发声的播放实例；纵滑中明确验证两个相关实例均暂停静音。
+VLC纹理截图包含BEST_FIT黑边，测试按真实视频轨道宽高计算有效内容矩形后作参考帧对比，原图/有效内容图均保留。
+原有横滑连续进度、长按临时倍速、亮度音量、随机/单集循环、精确长GOP定位、目录扫描/文件管理回归通过。
+
+Android15/API35
+前一正式签名预览包code5直接覆盖code6成功，首次安装时间、视频授权、目录JSON字节哈希保留。
+目录默认全屏、竖屏往返、上下切集、松手前双视频同屏及返回全屏暂停位置检查通过。
+详见test-results/release-upgrade-api35.txt。未在用户实体手机测试，未做长时间帧率或实际声卡录音测量。
+
+APK
+文件：映序-MediaMaster-1.3.0-preview.2.apk
+字节数：94772762
+原生库：arm64-v8a, armeabi-v7a, x86, x86_64
+SHA-256：bcecba83957205e7c67c4411ba6c80b7b79f02935c672cd687e7df52f933e79a
+签名证书SHA-256：750cc62b7d693924960594e22195ec56e929eef597715533d44d19eccf6fa16f

@@ -1,6 +1,5 @@
 package io.mediamaster.app.player;
 
-import android.animation.ValueAnimator;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.BroadcastReceiver;
@@ -22,7 +21,6 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
 import android.provider.OpenableColumns;
 import android.provider.Settings;
@@ -39,7 +37,6 @@ import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityManager;
-import android.view.animation.PathInterpolator;
 import android.widget.FrameLayout;
 import android.widget.ImageButton;
 import android.widget.ImageView;
@@ -48,24 +45,15 @@ import android.widget.ProgressBar;
 import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
-import androidx.media3.common.C;
-import androidx.media3.common.MediaItem;
-import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
-import androidx.media3.common.VideoSize;
 import androidx.media3.common.util.UnstableApi;
-import androidx.media3.exoplayer.DefaultLoadControl;
-import androidx.media3.exoplayer.DefaultRenderersFactory;
 import androidx.media3.exoplayer.ExoPlayer;
-import androidx.media3.exoplayer.SeekParameters;
-import androidx.media3.ui.AspectRatioFrameLayout;
 import androidx.media3.ui.PlayerView;
 import io.mediamaster.app.media.VideoItem;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Locale;
 import org.videolan.libvlc.LibVLC;
-import org.videolan.libvlc.Media;
 import org.videolan.libvlc.MediaPlayer;
 import org.videolan.libvlc.util.VLCVideoLayout;
 
@@ -114,10 +102,11 @@ public final class PlayerActivity extends Activity {
         beginBoost();
       };
   private ImageButton playButton, modeButton, rotateButton, portraitButton;
-  private boolean portraitMode, pageTransitioning, pageAwaitingFrame;
+  private boolean portraitMode, pageTransitioning, pageSuspended;
   private int pageGeneration;
   private VelocityTracker pageVelocity;
-  private final Runnable pageLoadFallback = this::finishPageEntrance;
+  private ThreeWindowPager pager;
+  private VideoPage previousPage, currentPage, nextPage;
   private final Runnable automaticAdvance = this::advanceAutomatically;
   private ProgressBar loading;
   private SeekBar seek;
@@ -129,7 +118,6 @@ public final class PlayerActivity extends Activity {
   private ExoPlayer exo;
   private LibVLC libVlc;
   private MediaPlayer vlc;
-  private ParcelFileDescriptor vlcDescriptor;
   private AudioManager audioManager;
   private AudioFocusRequest vlcFocus;
   private boolean useVlc,
@@ -141,7 +129,7 @@ public final class PlayerActivity extends Activity {
       orientationOverride;
   private boolean noisyRegistered, focusPaused, handlingEnd;
   private boolean playVisualReady, lastPlayVisual;
-  private long restorePosition, gestureOrigin, gestureTarget, vlcPendingSeek;
+  private long restorePosition, gestureOrigin, gestureTarget;
   private float touchX, touchY, sensitivity = 1f, speed = 1f;
   private int desiredOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED;
   private final Runnable hideChrome = () -> setChrome(false);
@@ -270,18 +258,14 @@ public final class PlayerActivity extends Activity {
     setContentView(root);
     videoStage = new FrameLayout(this);
     root.addView(videoStage, new FrameLayout.LayoutParams(-1, -1));
-    exoView = new PlayerView(this);
-    exoView.setUseController(false);
-    exoView.setResizeMode(AspectRatioFrameLayout.RESIZE_MODE_FIT);
-    exoView.setKeepContentOnPlayerReset(true);
-    exoView.setShutterBackgroundColor(Color.TRANSPARENT);
-    exoView.setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER);
-    exoView.setFocusable(false);
-    exoView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-    videoStage.addView(exoView, new FrameLayout.LayoutParams(-1, -1));
-    vlcView = new VLCVideoLayout(this);
-    vlcView.setVisibility(View.GONE);
-    videoStage.addView(vlcView, new FrameLayout.LayoutParams(-1, -1));
+    pager = new ThreeWindowPager(this);
+    pager.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+    videoStage.addView(pager, new FrameLayout.LayoutParams(-1, -1));
+    previousPage = createVideoPage();
+    currentPage = createVideoPage();
+    nextPage = createVideoPage();
+    pager.setPages(previousPage, currentPage, nextPage);
+    syncCurrentPage();
     touchLayer = new View(this);
     touchLayer.setContentDescription("视频画面，点按显示控制，双击播放暂停，长按临时两倍速");
     touchLayer.setOnTouchListener(this::onVideoTouch);
@@ -537,6 +521,7 @@ public final class PlayerActivity extends Activity {
                     : touchX < view.getWidth() / 2f ? GESTURE_BRIGHTNESS : GESTURE_VOLUME;
             cancelTapRecognition();
             setChrome(false);
+            if (gestureKind == GESTURE_PAGE) suspendForPageScroll();
           }
         }
         if (gestureKind == GESTURE_SEEK) {
@@ -548,7 +533,7 @@ public final class PlayerActivity extends Activity {
         } else if (gestureKind == GESTURE_BRIGHTNESS || gestureKind == GESTURE_VOLUME) {
           updateVerticalGesture(dy, Math.max(1, view.getHeight()));
         } else if (gestureKind == GESTURE_PAGE) {
-          videoStage.setTranslationY(PortraitSwipe.offset(dy, view.getHeight()));
+          pager.dragTo(dy, canRevealPrevious(), canRevealNext());
         } else if (gestureKind == GESTURE_NONE) taps.onTouchEvent(event);
         return true;
       case MotionEvent.ACTION_UP:
@@ -604,6 +589,11 @@ public final class PlayerActivity extends Activity {
     cancelInteractions();
     cancelTapRecognition();
     portraitMode = enabled;
+    if (enabled) ensurePortraitWindow();
+    else {
+      previousPage.release();
+      nextPage.release();
+    }
     if (enabled) setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
     else if (orientationOverride) setRequestedOrientation(desiredOrientation);
     else adaptOrientation(videoWidth(), videoHeight());
@@ -635,81 +625,121 @@ public final class PlayerActivity extends Activity {
 
   private void resetPageMotion() {
     pageGeneration++;
-    handler.removeCallbacks(pageLoadFallback);
     pageTransitioning = false;
-    pageAwaitingFrame = false;
-    if (videoStage != null) {
-      videoStage.animate().withEndAction(null).cancel();
-      videoStage.setTranslationY(0);
-      videoStage.setAlpha(1);
+    if (pager != null) pager.cancelAndCenter();
+    if (pageSuspended) {
+      pageSuspended = false;
+      if (started) applyCurrentPlayback(shouldPlay);
     }
+  }
+
+  private boolean canRevealPrevious() {
+    return queue.size() > 1 && order.hasPrevious() && pageReady(previousPage);
+  }
+
+  private boolean canRevealNext() {
+    return queue.size() > 1 && pageReady(nextPage);
+  }
+
+  private boolean pageReady(VideoPage page) {
+    return page != null
+        && page.index >= 0
+        && (page.failed
+            || (page.firstFrameReady
+                && (page.exo == null || page.exo.getPlaybackState() == Player.STATE_READY)));
+  }
+
+  private void suspendForPageScroll() {
+    if (pageSuspended) return;
+    shouldPlay = playRequested();
+    pageSuspended = true;
+    // Close all audio gates before the viewport leaves its anchor. Decoders and surfaces stay.
+    currentPage.setPlayback(true, false, false);
+    previousPage.setPlayback(false, false, false);
+    nextPage.setPlayback(false, false, false);
   }
 
   private void finishPortraitSwipe(float dy, float velocity, float height) {
     int direction =
-        queue.size() < 2
-            ? 0
-            : PortraitSwipe.direction(
-                dy, velocity, height, getResources().getDisplayMetrics().density);
-    if (direction < 0 && !order.hasPrevious()) direction = 0;
+        PortraitSwipe.direction(dy, velocity, height, getResources().getDisplayMetrics().density);
+    if ((direction > 0 && !canRevealNext()) || (direction < 0 && !canRevealPrevious()))
+      direction = 0;
     final int chosen = direction;
     final int generation = ++pageGeneration;
     pageTransitioning = true;
     handler.removeCallbacks(hideChrome);
-    Runnable settled =
+    pager.settle(
+        chosen,
         () -> {
           if (generation != pageGeneration || !started || !portraitMode) return;
-          if (chosen == 0) {
+          // Incoming already owns a prepared decoder and rendered first frame. Never reopen it
+          // here.
+          if (chosen != 0) {
+            if (chosen > 0) order.next(false);
+            else order.previous();
+            adoptPreparedPage(chosen);
+            touchLayer.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+          } else {
             pageTransitioning = false;
+            pageSuspended = false;
+            applyCurrentPlayback(shouldPlay);
             showChrome();
-            return;
           }
-          int index = chosen > 0 ? order.next(false) : order.previous();
-          changeVideo(index);
-          // Frame callbacks complete the arrival. A bounded fallback leaves gestures responsive
-          // even for a missing/damaged file; the existing delayed loading/error UI handles that
-          // case.
-          pageTransitioning = true;
-          pageAwaitingFrame = true;
-          videoStage.setTranslationY(ValueAnimator.areAnimatorsEnabled() ? chosen * dp(28) : 0);
-          handler.postDelayed(pageLoadFallback, 1800);
-          touchLayer.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
-        };
-    if (!ValueAnimator.areAnimatorsEnabled()) {
-      videoStage.setTranslationY(0);
-      settled.run();
-    } else
-      videoStage
-          .animate()
-          .translationY(chosen == 0 ? 0 : -chosen * height)
-          .setDuration(160)
-          .setInterpolator(new PathInterpolator(.23f, 1f, .32f, 1f))
-          .withEndAction(settled)
-          .start();
+        });
   }
 
-  private void finishPageEntrance() {
-    if (!pageAwaitingFrame || !started) return;
-    pageAwaitingFrame = false;
-    handler.removeCallbacks(pageLoadFallback);
-    final int generation = pageGeneration;
-    Runnable finished =
-        () -> {
-          if (generation != pageGeneration) return;
-          pageTransitioning = false;
-          showChrome();
-        };
-    if (!ValueAnimator.areAnimatorsEnabled()) {
-      videoStage.setTranslationY(0);
-      finished.run();
-    } else
-      videoStage
-          .animate()
-          .translationY(0)
-          .setDuration(160)
-          .setInterpolator(new PathInterpolator(.23f, 1f, .32f, 1f))
-          .withEndAction(finished)
-          .start();
+  /** Promote by rotating references. All three native video surfaces remain attached. */
+  private void adoptPreparedPage(int direction) {
+    handler.removeCallbacks(automaticAdvance);
+    currentPage.setPlayback(false, false, false);
+    currentPage.rewindIfEnded();
+    if (direction > 0) {
+      VideoPage far = previousPage;
+      previousPage = currentPage;
+      currentPage = nextPage;
+      nextPage = far;
+    } else {
+      VideoPage far = nextPage;
+      nextPage = currentPage;
+      currentPage = previousPage;
+      previousPage = far;
+    }
+    abandonVlcFocus();
+    pager.setPages(previousPage, currentPage, nextPage);
+    pageTransitioning = false;
+    pageSuspended = false;
+    handlingEnd = false;
+    shouldPlay = true;
+    restorePosition = currentPage.position();
+    syncCurrentPage();
+    refreshVideoLabels();
+    currentPage.setSpeed(playbackRate());
+    if (exo != null && exo.getPlaybackState() == Player.STATE_ENDED) currentPage.seekTo(0);
+    applyCurrentPlayback(true);
+    showLoading(currentPage.buffering, "");
+    showChrome();
+    if (currentPage.failed) playbackFailed();
+    // Only the far, now invisible window is recycled. The promoted page is never prepared again.
+    ensurePortraitWindow();
+  }
+
+  private void ensurePortraitWindow() {
+    if (!started || !portraitMode) return;
+    if (queue.size() < 2) {
+      previousPage.release();
+      nextPage.release();
+      return;
+    }
+    if (order.hasPrevious()) prepareNeighbor(previousPage, order.peekPrevious());
+    else previousPage.release();
+    prepareNeighbor(nextPage, order.peekNext());
+  }
+
+  private void prepareNeighbor(VideoPage page, int index) {
+    page.setPlayback(false, false, false);
+    if (page.index == index && (page.exo != null || page.vlc != null || page.failed)) return;
+    page.prepare(
+        queue.get(index), index, 0, false, order.mode() == PlaybackOrder.SINGLE, speed, false);
   }
 
   private void showSeekPreview(long at) {
@@ -819,8 +849,7 @@ public final class PlayerActivity extends Activity {
   }
 
   private void applyPlaybackRate() {
-    if (exo != null) exo.setPlaybackSpeed(playbackRate());
-    else if (vlc != null) vlc.setRate(playbackRate());
+    if (currentPage != null) currentPage.setSpeed(playbackRate());
   }
 
   private void cancelInteractions() {
@@ -909,232 +938,135 @@ public final class PlayerActivity extends Activity {
     return queue.get(order.current());
   }
 
-  private void startCurrent(long start) {
-    handlingEnd = false;
-    refreshVideoLabels();
-    if (useVlc) startVlc(start);
-    else startExo(start);
-  }
-
-  private void startExo(long start) {
-    releasePlayers();
-    useVlc = false;
-    exoView.setVisibility(View.VISIBLE);
-    vlcView.setVisibility(View.GONE);
-    showLoading(true, "正在打开视频");
-    DefaultLoadControl buffer =
-        new DefaultLoadControl.Builder()
-            .setBufferDurationsMs(15000, 90000, 250, 500)
-            .setBackBuffer(15000, true)
-            .setTargetBufferBytes(64 * 1024 * 1024)
-            .build();
-    DefaultRenderersFactory renderers =
-        new DefaultRenderersFactory(this).setEnableDecoderFallback(true);
-    if (Build.VERSION.SDK_INT >= 34) {
-      // Decode intervening GOP frames without presenting them, while retaining exact seek targets.
-      renderers.experimentalSetEnableMediaCodecBufferDecodeOnlyFlag(true);
-    }
-    exo = new ExoPlayer.Builder(this, renderers).setLoadControl(buffer).build();
-    exo.setAudioAttributes(
-        new androidx.media3.common.AudioAttributes.Builder()
-            .setUsage(C.USAGE_MEDIA)
-            .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
-            .build(),
-        true);
-    exo.setHandleAudioBecomingNoisy(true);
-    exo.setSeekParameters(SeekParameters.EXACT);
-    exo.setRepeatMode(
-        order.mode() == PlaybackOrder.SINGLE ? Player.REPEAT_MODE_ONE : Player.REPEAT_MODE_OFF);
-    exo.setPlaybackSpeed(playbackRate());
-    exoView.setPlayer(exo);
-    final ExoPlayer source = exo;
-    exo.addListener(
-        new Player.Listener() {
+  private VideoPage createVideoPage() {
+    return new VideoPage(
+        this,
+        this::compatibilityEngine,
+        new VideoPage.Listener() {
           @Override
-          public void onPlaybackStateChanged(int state) {
-            if (exo != source) return;
-            showLoading(state == Player.STATE_BUFFERING, "正在缓冲");
-            if (state == Player.STATE_ENDED && !handlingEnd) {
-              handlingEnd = true;
-              handler.post(
-                  () -> {
-                    if (started && exo == source) advanceAutomatically();
-                  });
-            }
+          public void onChanged(VideoPage page) {
+            if (page != currentPage || !started) return;
+            boolean wasVlc = useVlc;
+            syncCurrentPage();
+            if (!wasVlc && vlc != null) applyCurrentPlayback(shouldPlay);
+            showLoading(page.buffering, "");
             updateProgress();
           }
 
           @Override
-          public void onIsPlayingChanged(boolean playing) {
-            if (exo == source) updatePlayUi();
+          public void onFirstFrame(VideoPage page) {
+            if (page == currentPage && started) {
+              syncCurrentPage();
+              showLoading(page.buffering, "");
+              updateProgress();
+            }
           }
 
           @Override
-          public void onRenderedFirstFrame() {
-            if (exo == source) finishPageEntrance();
-          }
-
-          @Override
-          public void onVideoSizeChanged(VideoSize size) {
-            if (exo == source && !orientationOverride) adaptOrientation(size.width, size.height);
-          }
-
-          @Override
-          public void onPlayerError(PlaybackException error) {
-            if (exo != source) return;
-            long at = position();
-            shouldPlay = playRequested();
+          public void onEnded(VideoPage page) {
+            if (page != currentPage || !started || handlingEnd) return;
+            handlingEnd = true;
+            final long generation = page.generation;
             handler.post(
                 () -> {
-                  if (started && exo == source && !useVlc) {
-                    useVlc = true;
-                    startVlc(at);
-                    toast("已切换兼容解码");
-                  }
+                  if (started && currentPage == page && page.generation == generation)
+                    advanceAutomatically();
                 });
           }
+
+          @Override
+          public void onFailed(VideoPage page) {
+            if (page == currentPage && started) playbackFailed();
+          }
+
+          @Override
+          public void onVideoSize(VideoPage page, int width, int height) {
+            if (page == currentPage && !orientationOverride) adaptOrientation(width, height);
+          }
         });
-    try {
-      exo.setMediaItem(MediaItem.fromUri(playbackUri(currentItem())), Math.max(0, start));
-      exo.prepare();
-      exo.setPlayWhenReady(shouldPlay);
-    } catch (Exception error) {
-      useVlc = true;
-      startVlc(start);
-    }
-    updatePlayUi();
   }
 
-  private void startVlc(long start) {
-    releasePlayers();
-    useVlc = true;
-    exoView.setVisibility(View.GONE);
-    vlcView.setVisibility(View.VISIBLE);
-    vlcPendingSeek = Math.max(0, start);
-    showLoading(true, "正在使用兼容解码");
-    try {
+  private LibVLC compatibilityEngine() {
+    if (libVlc == null) {
       ArrayList<String> options = new ArrayList<>();
       options.add("--no-video-title-show");
       options.add("--no-stats");
       options.add("--aout=opensles");
       options.add("--file-caching=750");
       libVlc = new LibVLC(this, options);
-      vlc = new MediaPlayer(libVlc);
-      vlc.attachViews(vlcView, null, false, false);
-      vlc.setVideoScale(MediaPlayer.ScaleType.SURFACE_BEST_FIT);
-      final MediaPlayer source = vlc;
-      vlc.setEventListener(
-          event ->
-              handler.post(
-                  () -> {
-                    if (!started || vlc != source) return;
-                    switch (event.type) {
-                      case MediaPlayer.Event.Playing:
-                        applyVlcResumeOnce(source);
-                        showLoading(false, "");
-                        finishPageEntrance();
-                        updatePlayUi();
-                        if (!shouldPlay) vlc.pause();
-                        else vlc.setRate(playbackRate());
-                        Media.VideoTrack track = vlc.getCurrentVideoTrack();
-                        if (!orientationOverride && track != null)
-                          adaptOrientation(track.width, track.height);
-                        break;
-                      case MediaPlayer.Event.Paused:
-                        applyVlcResumeOnce(source);
-                        updatePlayUi();
-                        break;
-                      case MediaPlayer.Event.SeekableChanged:
-                        applyVlcResumeOnce(source);
-                        break;
-                      case MediaPlayer.Event.Stopped:
-                        updatePlayUi();
-                        break;
-                      case MediaPlayer.Event.Buffering:
-                        showLoading(event.getBuffering() < 100, "正在缓冲");
-                        break;
-                      case MediaPlayer.Event.EndReached:
-                        if (!handlingEnd) {
-                          handlingEnd = true;
-                          advanceAutomatically();
-                        }
-                        break;
-                      case MediaPlayer.Event.EncounteredError:
-                        playbackFailed();
-                        break;
-                      default:
-                        break;
-                    }
-                  }));
-      Uri uri = playbackUri(currentItem());
-      Media media;
-      if ("content".equals(uri.getScheme())) {
-        // Native VLC cannot resolve Android ContentProvider URIs itself. Keep the
-        // granted descriptor open for the whole playback session, including repeats.
-        vlcDescriptor = getContentResolver().openFileDescriptor(uri, "r");
-        if (vlcDescriptor == null) throw new java.io.IOException("Video descriptor unavailable");
-        media = new Media(libVlc, vlcDescriptor.getFileDescriptor());
-      } else media = new Media(libVlc, uri);
-      media.setHWDecoderEnabled(true, false);
-      if (order.mode() == PlaybackOrder.SINGLE) media.addOption(":input-repeat=65535");
-      if (shouldPlay && !requestVlcFocus()) shouldPlay = false;
-      if (!shouldPlay) media.addOption(":start-paused");
-      vlc.setMedia(media);
-      media.release();
-      vlc.setRate(playbackRate());
-      vlc.play();
-      if (!shouldPlay) {
-        final MediaPlayer target = vlc;
-        handler.postDelayed(
-            () -> {
-              if (vlc == target) vlc.pause();
-            },
-            200);
-      }
-    } catch (Exception | UnsatisfiedLinkError error) {
-      playbackFailed();
     }
-    updatePlayUi();
+    return libVlc;
   }
 
-  private void applyVlcResumeOnce(MediaPlayer source) {
-    if (vlc != source || vlcPendingSeek <= 0 || !source.isSeekable()) return;
-    long target = vlcPendingSeek;
-    // A media-level start-time is reapplied by native input-repeat. Restore with a
-    // one-shot seek instead, so every later loop starts from the actual beginning.
-    vlcPendingSeek = 0;
-    source.setTime(target);
+  private void syncCurrentPage() {
+    if (currentPage == null) return;
+    if (vlc != currentPage.vlc) abandonVlcFocus();
+    exo = currentPage.exo;
+    vlc = currentPage.vlc;
+    exoView = currentPage.exoView;
+    vlcView = currentPage.vlcView;
+    useVlc = vlc != null;
   }
 
-  private void releasePlayers() {
-    showLoading(false, "");
-    if (exo != null) {
-      exoView.setPlayer(null);
-      exo.release();
-      exo = null;
+  private void startCurrent(long start) {
+    handlingEnd = false;
+    refreshVideoLabels();
+    prepareCurrent(start, useVlc);
+  }
+
+  private void startExo(long start) {
+    prepareCurrent(start, false);
+  }
+
+  private void startVlc(long start) {
+    prepareCurrent(start, true);
+  }
+
+  private void prepareCurrent(long start, boolean forceVlc) {
+    abandonVlcFocus();
+    currentPage.prepare(
+        currentItem(),
+        order.current(),
+        start,
+        forceVlc,
+        order.mode() == PlaybackOrder.SINGLE,
+        playbackRate(),
+        true);
+    syncCurrentPage();
+    applyCurrentPlayback(shouldPlay);
+    showLoading(currentPage.buffering, "");
+    ensurePortraitWindow();
+  }
+
+  private void applyCurrentPlayback(boolean play) {
+    if (currentPage == null) return;
+    syncCurrentPage();
+    boolean canPlay = play && started && !pageSuspended && !currentPage.failed;
+    if (canPlay && vlc != null && !requestVlcFocus()) {
+      shouldPlay = false;
+      canPlay = false;
     }
-    if (vlc != null) {
-      vlc.setEventListener(null);
-      vlc.detachViews();
-      vlc.release();
-      vlc = null;
-    }
-    if (libVlc != null) {
-      libVlc.release();
-      libVlc = null;
-    }
-    if (vlcDescriptor != null) {
-      try {
-        vlcDescriptor.close();
-      } catch (java.io.IOException ignored) {
-      }
-      vlcDescriptor = null;
-    }
+    currentPage.setPlayback(true, canPlay, !pageSuspended);
+  }
+
+  private void abandonVlcFocus() {
     if (vlcFocus != null && audioManager != null) {
       audioManager.abandonAudioFocusRequest(vlcFocus);
       vlcFocus = null;
     }
-    vlcPendingSeek = 0;
+  }
+
+  private void releasePlayers() {
+    showLoading(false, "");
+    if (currentPage != null) currentPage.release();
+    if (previousPage != null) previousPage.release();
+    if (nextPage != null) nextPage.release();
+    syncCurrentPage();
+    if (libVlc != null) {
+      libVlc.release();
+      libVlc = null;
+    }
+    abandonVlcFocus();
   }
 
   private void playbackFailed() {
@@ -1154,6 +1086,7 @@ public final class PlayerActivity extends Activity {
   private boolean requestVlcFocus() {
     if (vlcFocus != null)
       return audioManager.requestAudioFocus(vlcFocus) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
+    final MediaPlayer focusOwner = vlc;
     vlcFocus =
         new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
             .setAudioAttributes(
@@ -1163,17 +1096,19 @@ public final class PlayerActivity extends Activity {
                     .build())
             .setOnAudioFocusChangeListener(
                 change -> {
+                  if (vlc != focusOwner || !started) return;
                   if (change == AudioManager.AUDIOFOCUS_LOSS
                       || change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
-                    focusPaused = change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT && isPlaying();
+                    focusPaused = change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT && shouldPlay;
                     if (change == AudioManager.AUDIOFOCUS_LOSS) shouldPlay = false;
-                    if (vlc != null) vlc.pause();
+                    currentPage.setPlayback(true, false, false);
                   } else if (change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK) {
-                    if (vlc != null) vlc.setVolume(25);
+                    if (vlc != null)
+                      vlc.setVolume(!pageSuspended && currentPage.playRequested ? 25 : 0);
                   } else if (change == AudioManager.AUDIOFOCUS_GAIN && vlc != null) {
-                    vlc.setVolume(100);
-                    if (focusPaused) vlc.play();
+                    boolean resume = (focusPaused && shouldPlay) || currentPage.playRequested;
                     focusPaused = false;
+                    currentPage.setPlayback(true, resume && !pageSuspended, !pageSuspended);
                   }
                   updatePlayUi();
                 })
@@ -1189,6 +1124,16 @@ public final class PlayerActivity extends Activity {
   private void changeVideo(int index) {
     handler.removeCallbacks(automaticAdvance);
     cancelInteractions();
+    if (portraitMode && currentPage.index != index) {
+      if (nextPage.index == index && pageReady(nextPage)) {
+        adoptPreparedPage(1);
+        return;
+      }
+      if (previousPage.index == index && pageReady(previousPage)) {
+        adoptPreparedPage(-1);
+        return;
+      }
+    }
     shouldPlay = true;
     restorePosition = 0;
     useVlc = false;
@@ -1210,7 +1155,7 @@ public final class PlayerActivity extends Activity {
       // demuxer that ignores input-repeat. Keep the existing decoder/view alive.
       handlingEnd = false;
       if (vlc != null) {
-        vlc.setTime(0);
+        currentPage.seekTo(0);
         vlc.play();
       }
       return;
@@ -1220,26 +1165,22 @@ public final class PlayerActivity extends Activity {
   }
 
   private boolean isPlaying() {
-    return exo != null ? exo.isPlaying() : vlc != null && vlc.isPlaying();
+    return currentPage != null && currentPage.isPlaying();
   }
 
   private boolean playRequested() {
-    return exo != null ? exo.getPlayWhenReady() : shouldPlay;
+    return pageSuspended ? shouldPlay : exo != null ? exo.getPlayWhenReady() : shouldPlay;
   }
 
   private long position() {
     return Math.max(
         0,
-        exo != null
-            ? exo.getCurrentPosition()
-            : vlc != null
-                ? (vlcPendingSeek > 0 ? vlcPendingSeek : vlc.getTime())
-                : restorePosition);
+        currentPage != null && currentPage.index >= 0 ? currentPage.position() : restorePosition);
   }
 
   private long duration() {
-    long duration = exo != null ? exo.getDuration() : vlc != null ? vlc.getLength() : 0;
-    return duration > 0 ? duration : currentItem().durationMs;
+    long length = currentPage != null ? currentPage.duration() : 0;
+    return length > 0 ? length : currentItem().durationMs;
   }
 
   private int videoWidth() {
@@ -1251,23 +1192,14 @@ public final class PlayerActivity extends Activity {
   }
 
   private void seekTo(long at) {
-    long target = GestureSeek.targetMs(0, at, duration());
-    if (exo != null) exo.seekTo(target);
-    else if (vlc != null) vlc.setTime(target);
+    currentPage.seekTo(GestureSeek.targetMs(0, at, duration()));
     updateProgress();
   }
 
   private void setPlaying(boolean play) {
     shouldPlay = play;
-    if (exo != null) {
-      if (play && exo.getPlaybackState() == Player.STATE_ENDED) exo.seekTo(0);
-      exo.setPlayWhenReady(play);
-    } else if (vlc != null) {
-      if (play) {
-        if (requestVlcFocus()) vlc.play();
-        else shouldPlay = false;
-      } else vlc.pause();
-    }
+    if (play && exo != null && exo.getPlaybackState() == Player.STATE_ENDED) currentPage.seekTo(0);
+    applyCurrentPlayback(play);
     updatePlayUi();
   }
 
@@ -1314,22 +1246,20 @@ public final class PlayerActivity extends Activity {
       showChrome();
       return;
     }
-    int previous = order.mode();
+    cancelInteractions();
+    shouldPlay = playRequested();
     order.setMode(mode);
     getSharedPreferences("player", MODE_PRIVATE)
         .edit()
         .putInt("playback_mode", order.mode())
         .apply();
-    if (exo != null)
-      exo.setRepeatMode(
-          order.mode() == PlaybackOrder.SINGLE ? Player.REPEAT_MODE_ONE : Player.REPEAT_MODE_OFF);
-    // VLC's demuxer repeat is a media option and is configured once when the media
-    // opens. Reopen only when changing that option, never at normal loop boundaries.
-    if (vlc != null && (previous == PlaybackOrder.SINGLE || order.mode() == PlaybackOrder.SINGLE)) {
-      long at = position();
-      shouldPlay = playRequested();
-      startVlc(at);
-    }
+    boolean single = order.mode() == PlaybackOrder.SINGLE;
+    currentPage.setRepeat(single);
+    previousPage.setRepeat(single);
+    nextPage.setRepeat(single);
+    syncCurrentPage();
+    applyCurrentPlayback(shouldPlay);
+    ensurePortraitWindow();
     modeButton.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
     updateModeUi();
     showChrome();
@@ -1445,8 +1375,9 @@ public final class PlayerActivity extends Activity {
             selected,
             (dialog, item) -> {
               speed = values[item];
-              if (exo != null) exo.setPlaybackSpeed(playbackRate());
-              else if (vlc != null) vlc.setRate(playbackRate());
+              currentPage.setSpeed(playbackRate());
+              previousPage.setSpeed(speed);
+              nextPage.setSpeed(speed);
               dialog.dismiss();
               showChrome();
             })

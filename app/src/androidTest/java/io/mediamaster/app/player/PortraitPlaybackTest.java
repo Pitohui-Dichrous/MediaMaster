@@ -317,7 +317,8 @@ public final class PortraitPlaybackTest {
   }
 
   @Test
-  public void portraitEndDuringHeldVerticalGestureDoesNotSkipTwoEpisodes() throws Exception {
+  public void portraitHeldVerticalScrollPausesNearEndAndReleaseAdvancesOnlyOneEpisode()
+      throws Exception {
     cycleTo(PlaybackOrder.SEQUENTIAL);
     setPortrait(true);
     ExoPlayer source = onMain(() -> (ExoPlayer) read("exo"));
@@ -333,24 +334,42 @@ public final class PortraitPlaybackTest {
         });
     send(MotionEvent.ACTION_DOWN, x, startY);
     send(MotionEvent.ACTION_MOVE, x, endY);
+    long heldPosition =
+        onMain(
+            () -> {
+              assertFalse(
+                  "Vertical axis lock pauses the outgoing decoder", source.getPlayWhenReady());
+              assertEquals(
+                  "Vertical scrolling immediately closes its audio gate",
+                  0f,
+                  source.getVolume(),
+                  0);
+              assertEquals(source.getDuration() - 650, source.getCurrentPosition(), 180);
+              return source.getCurrentPosition();
+            });
     SystemClock.sleep(1100);
-    await(
-        () ->
-            onMain(
-                () -> source.getPlaybackState() == Player.STATE_ENDED || currentIndexOnMain() != 0),
-        8000);
-    assertEquals("Actual EOF waits for the held paging gesture", 0, currentIndex());
-    assertEquals(Player.STATE_ENDED, onMain(source::getPlaybackState).intValue());
-    assertTrue(onMain(() -> (Boolean) read("touchDown")));
-    // Allow another deferred automatic-advance deadline to pass before completing the same gesture.
-    SystemClock.sleep(250);
-    assertEquals(0, currentIndex());
+    onMain(
+        () -> {
+          assertEquals("A held native scroll must not advance the queue", 0, currentIndexOnMain());
+          assertSame("The outgoing decoder remains attached while held", source, read("exo"));
+          assertFalse(source.getPlayWhenReady());
+          assertEquals(0f, source.getVolume(), 0);
+          assertEquals(
+              "Holding across the old EOF deadline does not advance playback",
+              heldPosition,
+              source.getCurrentPosition(),
+              100);
+          assertTrue((Boolean) read("touchDown"));
+          return null;
+        });
     send(MotionEvent.ACTION_UP, x, endY);
-    await(() -> currentIndex() == 1, 5000);
-    pauseAndAwaitReady();
+    await(
+        () -> onMain(() -> currentIndexOnMain() == 1 && ((ExoPlayer) read("exo")).isPlaying()),
+        8000);
     SystemClock.sleep(500);
     assertEquals(
-        "The old EOF callback must not skip the freshly selected video", 1, currentIndex());
+        "Release selects one video without a stale EOF skipping another", 1, currentIndex());
+    assertTrue(onMain(() -> ((ExoPlayer) read("exo")).isPlaying()));
     assertTrue(portrait());
     assertTrue(isPortraitConfiguration());
   }
@@ -586,6 +605,23 @@ public final class PortraitPlaybackTest {
         });
     await(() -> portrait() == portrait && (!portrait || isPortraitConfiguration()), 5000);
     await(() -> !onMain(() -> (Boolean) read("pageTransitioning")), 5000);
+    if (portrait)
+      await(
+          () ->
+              onMain(
+                  () -> {
+                    PlaybackOrder currentOrder = (PlaybackOrder) read("order");
+                    VideoPage nextPage = (VideoPage) read("nextPage");
+                    VideoPage previousPage = (VideoPage) read("previousPage");
+                    return nextPage.firstFrameReady
+                        && (nextPage.exo == null
+                            || nextPage.exo.getPlaybackState() == Player.STATE_READY)
+                        && (!currentOrder.hasPrevious()
+                            || previousPage.firstFrameReady
+                                && (previousPage.exo == null
+                                    || previousPage.exo.getPlaybackState() == Player.STATE_READY));
+                  }),
+          20000);
     // Give handled configuration changes and the surface layout a frame to settle.
     instrumentation.waitForIdleSync();
     SystemClock.sleep(200);

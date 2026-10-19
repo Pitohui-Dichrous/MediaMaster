@@ -1,0 +1,33 @@
+映序 1.3.0-preview.2 · Android 15 同签名覆盖升级与轻量 UI 验收
+结果：PASS（下列限定范围）
+验证日期：2026-10-20，Pacific/Auckland
+设备：emulator-5554，Android 15 / API 35，1080×2400；模拟器隐藏冷启动，未wipe。
+
+正式签名 APK 已在根代理 final-build.txt 显示 BUILD SUCCESSFUL 后取用。
+安装前：1.3.0-preview.1 / code 5。
+执行 install -r：Success；安装后 1.3.0-preview.2 / code 6。未卸载、未清数据。
+升级前后 firstInstallTime=2026-10-16 14:38:49，READ_MEDIA_VIDEO 均 granted=true。
+新版首次启动前，原视频目录 JSON 文件逐字节 SHA256 升级前后相同：
+4d454d935aa13cf509b66c7d4a4580387f6c59e713cb39a4573ba91009cf06e2
+进入目录后仍保留原 6 个视频 / 14.8 MB。
+Android 覆盖安装通过签名一致性检查；新版 apksigner verify 通过，证书 SHA256 与 preview.1 记录一致：
+750cc62b7d693924960594e22195ec56e929eef597715533d44d19eccf6fa16f
+APK 字节数：94772762
+APK SHA256：bcecba83957205e7c67c4411ba6c80b7b79f02935c672cd687e7df52f933e79a
+
+实际 UI 检查：
+1. 目录点击 01_Aurora.mp4，默认横向全屏，3/6；暂停在1.133秒，点击手机按钮切竖屏，保持视频/时间/暂停状态，画面完整等比居中。
+2. 竖屏拖动途中，上方当前视频与下方相邻视频的真实像素同时可见；下方相邻画面的时间为0.000，说明松手之前它已具有画面。长滑松手后直接到02_Horizon.mkv，4/6；未观察到先黑屏再重新打开的切页过程。
+3. 下滑返回01_Aurora.mp4，3/6；暂停在2.033秒后点击全屏按钮，回到横向画面并保持同一暂停帧。
+4. 图标、人物进度控制点与序号均显示，未出现切页卡死或错误提示。采样日志尾部未检出 AndroidRuntime/ExoPlayerImpl 错误。
+
+最终截图：
+api35-full-default.png：目录默认横向全屏，Aurora 3/6。
+api35-portrait-current.png：竖屏Aurora 3/6，与切换前同帧。
+api35-two-native-pages-mid-scroll.png：滑动途中两页真实画面同屏。
+api35-portrait-next-final.png：Horizon 4/6，已settled。
+api35-portrait-previous-final.png：Aurora 3/6，已settled。
+api35-full-restored-final.png：返回横向全屏，保持2.033秒暂停帧。
+
+局限：本项仅为 Android 15 模拟器的升级与轻量 UI 流程，完整的持指/解码器身份/音频互斥及VLC回归由根代理 Android 14 设备套件负责。未在用户实体手机测试，也未做长时间帧率或音频录制测量。
+额外观察：首次冷启动后，脚本约1秒即点暂停，曾截图到首帧尚未出现的黑画面；按播放即恢复。重新进入并等待首帧后，上述模式切换与预载切页均正常。该启动等待不作为切页后黑屏的通过或失败证据。

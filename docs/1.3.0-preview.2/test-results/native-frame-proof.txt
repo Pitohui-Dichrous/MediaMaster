@@ -1,0 +1,7 @@
+--------- beginning of main
+I/PortraitNativeProof(22181): VLC native viewport=173x384 videoTrack=640x360 expectedFitContent=173x97
+I/PortraitNativeProof(22181): page=0 nonBlackFraction=1.0 firstFrameRgbDistance=11.579345703125
+I/PortraitNativeProof(22181): held outgoing=Rect(0, 0 - 1080, 960) incoming=Rect(0, 2096 - 1080, 2400) offset=1200.0
+I/PortraitNativeProof(22181): page=0 nonBlackFraction=1.0 firstFrameRgbDistance=2.217041015625
+I/PortraitNativeProof(22181): page=1 nonBlackFraction=1.0 firstFrameRgbDistance=2.217041015625
+I/PortraitNativeProof(22181): page=0 nonBlackFraction=1.0 firstFrameRgbDistance=2.217041015625

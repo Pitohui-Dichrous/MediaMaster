@@ -1,6 +1,6 @@
 MediaMaster Android 工程
 
-应用：io.mediamaster.app，版本 1.3.0-preview.1，最低安卓 8.0（API26），目标 API35，为安卓14个人手机使用设计。
+应用：io.mediamaster.app，版本 1.3.0-preview.2（versionCode 6），最低安卓 8.0（API26），目标 API35，为安卓14个人手机使用设计。
 技术：Java17，原生 Android Views，Media3 1.8.0，LibVLC 3.6.5。
 
 本工作区已准备工具：
@@ -24,4 +24,10 @@ dist：交付 APK、源代码压缩包、使用说明。
 目录缩略图12MiB、播放预览4MiB，均为纯内存LRU；旧版video-thumbnails-v1缓存后台迁移删除，不改动原视频。
 播放定位保持SeekParameters.EXACT；API34+启用MediaCodec decode-only标记以减少目标帧之前的送显开销，预览用附近关键帧降低解码竞争。
 
-竖屏模式使用同一PlayerActivity和播放实例切换，不通过重建Activity/播放器切模式。手势分类锁轴，竖滑只在独立portraitMode中翻页。此开发预览版不创建远端tag或Release；APK仅本地交付。
+竖屏与全屏共用同一PlayerActivity及当前VideoPage，切换模式不重建当前播放实例；退出竖屏时释放两个邻页引擎。
+ThreeWindowPager是原生ScrollView+OverScroller视口，内含三个始终附着的页面根。每页高H，内容总高3H，角色位于0/H/2H。拖动直接改变native scrollY；完成切页后同步轮转角色并居中，不移除/重新挂载页面，也不以单页退场动画代替翻页。
+每个VideoPage使用TextureView及独立ExoPlayer或VLC实例。邻页异步准备真实首帧并暂停；Exo页还需达到STATE_READY才可露出。提交切集仅提升已准备页面并开启播放，不再次prepare；只回收远端页。未就绪方向保持当前画面，失败页提供可继续滑走的提示。
+以全屏前台方式创建的实例沿用64MiB缓冲预算；邻页实例使用8MiB、0.5至4秒的缓冲配置，提升后复用原实例。预载与缩略预览均不写视频副本或缩略图片文件。
+随机邻页通过peekNext/peekPrevious选择，预览不消耗随机牌堆或观看历史，提交时才推进顺序。翻页离开中心前关闭声音、暂停播放，最终居中后仅开放当前页；自然结束的旧页退为上一页时用同一实例定位到零并预热，以便返回。
+手势分类锁轴，竖滑仅在独立portraitMode中翻页。此开发预览版不创建远端tag或Release，APK仅本地交付；最新正式版仍为1.2.1。
+本轮设计与实际验证记录分别位于docs/1.3.0-preview.2/设计说明.txt、docs/1.3.0-preview.2/验证记录.txt。docs/1.3.0-preview/保留上一轮历史记录，不代表本轮验证结果。

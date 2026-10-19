@@ -46,6 +46,27 @@ public final class PlaybackOrder {
     cursor = 0;
   }
 
+  /**
+   * Returns the next manual-navigation candidate without advancing playback or watch history. A
+   * shuffle deck may be prepared here, but its candidate is retained until next(false) commits it.
+   * Single-repeat affects natural completion only, so it still has a manual next candidate.
+   */
+  public int peekNext() {
+    if (mode != SHUFFLE) return (current + 1) % count;
+    if (cursor + 1 < history.size()) return history.get(cursor + 1);
+    prepareShuffleDeck();
+    return deck.isEmpty() ? current : deck.get(deck.size() - 1);
+  }
+
+  /**
+   * Returns the previous manual-navigation candidate without changing history. At the start of
+   * shuffle history this is the current video; hasPrevious() distinguishes that boundary.
+   */
+  public int peekPrevious() {
+    if (mode == SHUFFLE) return cursor > 0 ? history.get(cursor - 1) : current;
+    return (current - 1 + count) % count;
+  }
+
   public int next(boolean automatic) {
     if (automatic && mode == SINGLE) return current;
     if (mode != SHUFFLE) {
@@ -53,10 +74,7 @@ public final class PlaybackOrder {
       return current;
     }
     if (cursor + 1 < history.size()) return current = history.get(++cursor);
-    if (deck.isEmpty()) {
-      for (int i = 0; i < count; i++) if (i != current) deck.add(i);
-      Collections.shuffle(deck, random);
-    }
+    prepareShuffleDeck();
     if (!deck.isEmpty()) current = deck.remove(deck.size() - 1);
     history.add(current);
     cursor++;
@@ -66,6 +84,12 @@ public final class PlaybackOrder {
       cursor--;
     }
     return current;
+  }
+
+  private void prepareShuffleDeck() {
+    if (!deck.isEmpty()) return;
+    for (int i = 0; i < count; i++) if (i != current) deck.add(i);
+    Collections.shuffle(deck, random);
   }
 
   public int previous() {

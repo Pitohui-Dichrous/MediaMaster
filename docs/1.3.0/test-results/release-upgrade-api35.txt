@@ -1,0 +1,27 @@
+映序 1.3.0 正式版 · Android 15 覆盖安装验证
+结果：PASS（覆盖升级、目录启动、片段实际播放）
+验证日期：2026-10-20，Pacific/Auckland。
+设备：emulator-5554，Android 15 / API 35；隐藏冷启动AVD，未wipe。
+根代理 build.txt 显示 BUILD SUCCESSFUL 后取用正式签名APK。
+
+包名：io.mediamaster.app。
+安装前：1.3.0-preview.2 / versionCode 6。
+安装方式：adb install -r，结果 Success。未卸载、未清除应用数据。
+安装后：1.3.0 / versionCode 7。
+Android 覆盖安装通过签名一致性检查；apksigner verify通过，证书SHA256为：
+750cc62b7d693924960594e22195ec56e929eef597715533d44d19eccf6fa16f
+与preview.2原有正式签名证书一致。
+
+升级前后 firstInstallTime 均为 2026-10-16 14:38:49（设备值原样记录）。
+升级前后 READ_MEDIA_VIDEO 均 granted=true，授权保留。
+新版首次启动前，目录缓存 video-library-v4.json 的原始SHA256逐字节保持：
+4d454d935aa13cf509b66c7d4a4580387f6c59e713cb39a4573ba91009cf06e2
+启动后目录正常显示原有6个视频 / 14.8 MB。
+从目录点击 01_Aurora.mp4，进入全屏播放；截图显示真实视频画面、内嵌时间1.600秒及3/6序号，确认可实际播放。
+采样日志尾部未检出 AndroidRuntime/ExoPlayerImpl 错误。
+
+正式APK：app/build/outputs/apk/release/app-universal-release.apk
+字节数：94772654
+SHA256：bdde60ca935a96232e68b1319a1ad949b7e1fde648374f5b8306a5f38d16584b
+
+本次仅运行指定轻量确认，未重复完整UI/设备套件；未在用户实体手机测试。

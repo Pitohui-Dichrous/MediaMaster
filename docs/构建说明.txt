@@ -1,7 +1,8 @@
 MediaMaster Android 工程
 
-应用：io.mediamaster.app，版本 1.3.0-preview.2（versionCode 6），最低安卓 8.0（API26），目标 API35，为安卓14个人手机使用设计。
+应用：io.mediamaster.app，正式版本 1.3.0（versionCode 7），最低安卓 8.0（API26），目标 API35，为安卓14个人手机使用设计。
 技术：Java17，原生 Android Views，Media3 1.8.0，LibVLC 3.6.5。
+本版由用户已实机认可的1.3.0-preview.2转为正式版，播放功能保持一致。
 
 本工作区已准备工具：
 powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1 assembleRelease testDebugUnitTest lintDebug
@@ -29,5 +30,7 @@ ThreeWindowPager是原生ScrollView+OverScroller视口，内含三个始终附�
 每个VideoPage使用TextureView及独立ExoPlayer或VLC实例。邻页异步准备真实首帧并暂停；Exo页还需达到STATE_READY才可露出。提交切集仅提升已准备页面并开启播放，不再次prepare；只回收远端页。未就绪方向保持当前画面，失败页提供可继续滑走的提示。
 以全屏前台方式创建的实例沿用64MiB缓冲预算；邻页实例使用8MiB、0.5至4秒的缓冲配置，提升后复用原实例。预载与缩略预览均不写视频副本或缩略图片文件。
 随机邻页通过peekNext/peekPrevious选择，预览不消耗随机牌堆或观看历史，提交时才推进顺序。翻页离开中心前关闭声音、暂停播放，最终居中后仅开放当前页；自然结束的旧页退为上一页时用同一实例定位到零并预热，以便返回。
-手势分类锁轴，竖滑仅在独立portraitMode中翻页。此开发预览版不创建远端tag或Release，APK仅本地交付；最新正式版仍为1.2.1。
-本轮设计与实际验证记录分别位于docs/1.3.0-preview.2/设计说明.txt、docs/1.3.0-preview.2/验证记录.txt。docs/1.3.0-preview/保留上一轮历史记录，不代表本轮验证结果。
+手势分类锁轴，竖滑仅在独立portraitMode中翻页。正式版通过GitHub标签v1.3.0及对应Release交付，本机交付目录为dist/1.3.0/。
+Release附件为MediaMaster-1.3.0.apk、MediaMaster-1.3.0-source.zip、INSTALL.txt、VERIFICATION.txt、SHA256SUMS.txt。源码包排除签名私钥、本机工具、缓存与用户视频；APK使用既有正式签名，支持覆盖更新并保留应用设置及目录记录。
+正式发布说明与核验记录位于docs/1.3.0/发布说明.md、docs/1.3.0/验证记录.txt。设计说明保留于docs/1.3.0-preview.2/设计说明.txt。
+preview.2历史记录包含24项单元测试及Android14模拟器56项设备测试，该预览版随后获得用户实机认可。历史验证不计为正式包本轮重测，正式包结果以1.3.0验证记录为准。docs中的旧预览版记录保持原样。

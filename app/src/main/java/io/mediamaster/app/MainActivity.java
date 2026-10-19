@@ -744,7 +744,7 @@ public class MainActivity extends Activity {
                     .show();
               else
                 new AlertDialog.Builder(this)
-                    .setTitle("映序  1.3.0 预览版")
+                    .setTitle("映序  1.3.0")
                     .setMessage(
                         "MediaMaster\n"
                             + "你的本地片库，随心播放。\n\n"

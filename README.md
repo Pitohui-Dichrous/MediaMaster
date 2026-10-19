@@ -1,12 +1,14 @@
 # 映序 / MediaMaster
 
-个人使用的安卓本地视频播放器，离线运行，无账号、无广告。当前开发预览版 **1.3.0-preview.2**，最低支持 Android 8.0，主要面向 Android 14。
+个人使用的安卓本地视频播放器，离线运行，无账号、无广告。当前正式版 **1.3.0**，最低支持 Android 8.0，主要面向 Android 14。
 
-竖屏模式采用三页预载：上下滑动时直接露出已准备的视频，松手后完成切换。列表入口仍为原有全屏，手机图标切入竖屏，展开图标切回全屏；左右滑动继续调进度。模式切换保留当前播放器、位置、倍速和历史。此预览版仅提交源码并提供本地测试 APK，**不创建或上传新 Release**；最新正式版仍为 1.2.1。
+竖屏模式采用三页预载：上下滑动时直接露出已准备的视频，松手后完成切换。列表入口仍为原有全屏，手机图标切入竖屏，展开图标切回全屏；左右滑动继续调进度。模式切换保留当前播放器、位置、倍速和历史。1.3.0 将已获用户实机认可的 1.3.0-preview.2 转为正式版，本轮不再更改播放功能。
 
 ## 安装
 
-正式版前往 [Releases 下载 APK](https://github.com/Pitohui-Dichrous/MediaMaster/releases/latest)，传到手机后打开安装。已有映序时直接覆盖更新，不要先卸载。本轮预览安装包仅在本地 `dist/1.3.0-preview.2/`，不在 Releases 发布。
+前往 [1.3.0 Release](https://github.com/Pitohui-Dichrous/MediaMaster/releases/tag/v1.3.0) 下载 `MediaMaster-1.3.0.apk`，传到手机后打开安装。已有正式版或预览版映序时，**直接覆盖更新，不要先卸载**；同一签名保留原有设置和添加的文件夹记录。本机交付目录为 `dist/1.3.0/`。
+
+Release 同时附有源码包 `MediaMaster-1.3.0-source.zip`、安装说明 `INSTALL.txt`、验证记录 `VERIFICATION.txt` 和校验清单 `SHA256SUMS.txt`。
 
 首次打开允许读取视频；需要扫描整个共享存储空间时，在文件夹菜单中授予全盘访问权限。完整说明见 [安装与使用](安装与使用.txt)。
 
@@ -46,10 +48,12 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1 assembleRelease
 
 ## 验证与许可
 
-本轮验证结果以对应记录为准；上一轮预览版与稳定版记录保留作历史参考。
+1.3.0 的功能基于用户已实机确认的 1.3.0-preview.2。该预览版历史记录包含 24 项单元测试和 Android 14 模拟器的 56 项设备测试；正式包的构建、签名及安装核验以本版记录为准。历史记录保留，不视为本轮重新执行的测试。
 
+- [1.3.0 发布说明](docs/1.3.0/发布说明.md)
+- [1.3.0 验证记录](docs/1.3.0/验证记录.txt)
 - [三页预载设计与交互](docs/1.3.0-preview.2/设计说明.txt)
-- [本轮验证记录](docs/1.3.0-preview.2/验证记录.txt)
+- [1.3.0-preview.2 历史验证记录](docs/1.3.0-preview.2/验证记录.txt)
 - [上一轮预览版验证记录](docs/1.3.0-preview/验证记录.txt)
 - [1.2.1 历史验证记录](docs/1.2.1/验证记录.txt)
 - [构建说明](docs/构建说明.txt)
@@ -57,4 +61,4 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1 assembleRelease
 
 人物控制点素材由用户提供。第三方组件和素材遵守各自许可。
 
-本机 SDK、构建缓存、签名私钥、测试视频与 `dist` 安装包不纳入 Git；正式安装包保存在 Releases，开发预览包仅在本地提供。
+本机 SDK、构建缓存、签名私钥、测试视频与 `dist` 安装包不纳入 Git；正式安装包通过 Releases 提供。

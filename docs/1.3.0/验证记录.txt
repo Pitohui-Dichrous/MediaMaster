@@ -1,0 +1,40 @@
+映序 MediaMaster 1.3.0 正式版 · 发布核验
+日期：2026年10月20日，Pacific/Auckland
+版本：1.3.0 / versionCode 7；包名：io.mediamaster.app
+最低Android 8.0（API26），目标API35，主要面向Android14。
+
+发布依据与改动范围
+用户报告1.3.0-preview.2实际使用未发现问题，并明确同意发布1.3.0。
+正式版基于已确认的e3eb39083c89fa9b634bc9e7a0d4a7cc268b6fc3。
+产品代码仅提升版本号和关于页标题；播放器、媒体库、资源及测试源码保持不变。
+三窗口原生分页、相邻首帧预载、播放权控制、全屏/竖屏切换与随机历史沿用已确认实现。
+
+本次正式包核验
+assembleRelease、testDebugUnitTest、lintDebug：成功。
+24项单元测试通过，Failures=0，Errors=0，Skipped=0；Lint无Error/Fatal。
+APK ZIP CRC通过，正式发布签名校验通过。
+Android15/API35：从preview.2/code6直接覆盖安装至1.3.0/code7成功。
+升级前后首次安装时间、READ_MEDIA_VIDEO授权及目录缓存SHA256保持一致。
+启动目录显示原有6个测试视频，点击视频后实际播放；采样未检出AndroidRuntime/ExoPlayerImpl错误。
+本次为版本晋升核验，未重新执行完整设备套件。
+
+历史功能验证
+相同功能实现的preview.2已通过24项单元测试及Android14/API34完整56项设备测试。
+覆盖实际首帧、滑动中双视频画面、预载同一实例直接播放、随机历史、循环与两种引擎等。
+原始记录保留于docs/1.3.0-preview.2/，不计作本轮新跑的设备测试。
+用户自己的手机试用反馈由用户提供；本次自动核验在指定模拟器运行。
+
+正式安装包
+文件：MediaMaster-1.3.0.apk
+字节数：94772654
+原生库：arm64-v8a, armeabi-v7a, x86, x86_64
+SHA256：bdde60ca935a96232e68b1319a1ad949b7e1fde648374f5b8306a5f38d16584b
+签名证书SHA256：750cc62b7d693924960594e22195ec56e929eef597715533d44d19eccf6fa16f
+与1.2.1及预览版沿用同一发布证书；直接覆盖安装，不要卸载。
+
+附件
+INSTALL.txt：安装与使用说明。
+VERIFICATION.txt：本记录。
+MediaMaster-1.3.0-source.zip：开发源码与验证文档，排除签名私钥、本机工具、构建缓存和用户视频。
+SHA256SUMS.txt：APK、源码包与说明文件的SHA256清单。
+本版发布标签：v1.3.0。历史版本及验证记录保留。

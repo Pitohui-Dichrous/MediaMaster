@@ -1,0 +1,4 @@
+Signer #1 certificate DN: CN=MediaMaster, OU=Personal, O=MediaMaster, C=NZ
+Signer #1 certificate SHA-256 digest: 750cc62b7d693924960594e22195ec56e929eef597715533d44d19eccf6fa16f
+Signer #1 certificate SHA-1 digest: 9c7fce79b5d05b76215ffe1e6378e30c9cf0beb5
+Signer #1 certificate MD5 digest: a87f9a7eb06fc2299fe42f9b1b8455e3

@@ -74,4 +74,8 @@ public final class PlaybackOrder {
     } else current = (current - 1 + count) % count;
     return current;
   }
+
+  public boolean hasPrevious() {
+    return mode != SHUFFLE || cursor > 0;
+  }
 }

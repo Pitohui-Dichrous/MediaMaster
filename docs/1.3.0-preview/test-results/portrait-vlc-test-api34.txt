@@ -1,0 +1,5 @@
+io.mediamaster.app.player.PortraitPlaybackTest:.
+
+Time: 6.485
+
+OK (1 test)

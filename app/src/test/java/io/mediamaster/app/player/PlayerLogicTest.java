@@ -81,6 +81,18 @@ public class PlayerLogicTest {
   }
 
   @Test
+  public void randomPreviousAvailabilityFollowsActualWatchHistory() {
+    PlaybackOrder order = new PlaybackOrder(4, 0, PlaybackOrder.SHUFFLE, new Random(7));
+    assertFalse(order.hasPrevious());
+    order.next(false);
+    assertTrue(order.hasPrevious());
+    assertEquals(0, order.previous());
+    assertFalse(order.hasPrevious());
+    order.setMode(PlaybackOrder.SINGLE);
+    assertTrue(order.hasPrevious());
+  }
+
+  @Test
   public void oneVideoShuffleIsSafe() {
     PlaybackOrder order = new PlaybackOrder(1, 0, PlaybackOrder.SHUFFLE);
     for (int i = 0; i < 10; i++) assertEquals(0, order.next(true));

@@ -1,0 +1,37 @@
+映序 1.3.0-preview.1 · Android 15 正式签名覆盖升级与界面验证
+结果：PASS
+设备：emulator-5554，Android 15 / API 35，1080 × 2400；仅此模拟器用于本项检查。
+
+一、覆盖升级
+安装前：versionName=1.2.1，versionCode=4。
+安装方式：adb install -r；结果 Success。未卸载、未清除应用数据。
+安装后：versionName=1.3.0-preview.1，versionCode=5。
+前后 firstInstallTime 同为 2026-10-16 14:38:49。
+安装前 lastUpdateTime=2026-10-17 01:38:11；安装后=2026-10-19 10:06:45（设备时间原样记录）。
+前后 READ_MEDIA_VIDEO 均 granted=true，授权保持。
+首次启动新版前，video-library-v4.json 原始文件 SHA256 升级前后完全一致：
+4d454d935aa13cf509b66c7d4a4580387f6c59e713cb39a4573ba91009cf06e2
+启动后目录仍显示 6 个视频 / 14.8 MB，包括 MP4、MKV、AVI 与竖屏视频。
+
+新旧 APK 均通过 apksigner verify，证书 SHA256 相同：
+750cc62b7d693924960594e22195ec56e929eef597715533d44d19eccf6fa16f
+本次验证 APK：app/build/outputs/apk/release/app-universal-release.apk
+字节数：94765678
+SHA256：497b5fafb1ea7006d3b83a41001edd4862deda7b7b138c4dcb87a055ff08c84a
+
+二、实际界面与手势
+从目录点击 01_Aurora.mp4，先进入原有横向全屏模式；按钮进入竖屏后，横向视频完整等比居中显示，控制栏具有全屏返回按钮。
+03_Evening.avi 暂停定位在 6.000 秒，竖屏切回全屏时保留相同帧、6 秒位置、5/6 序号和暂停状态；再次进入竖屏保持位置与状态。
+
+竖屏顺序手势：03_Evening.avi 5/6 上滑至 04_Portrait_Loop.mp4 6/6，下滑返回 03_Evening.avi 5/6；视频层在纵向拖动时实际随手指移动，松手完成切集后回到正常位置，没有卡死或残留错位。
+
+最终连续三帧补拍（均 1080×2400，暂停后截图，控件完整）：
+../screenshots/映序-竖屏控制.png：01_Aurora.mp4，3/6，进入竖屏后。
+../screenshots/映序-竖屏切集.png：上滑后 02_Horizon.mkv，4/6。
+../screenshots/映序-返回上一集.png：下滑后 01_Aurora.mp4，3/6。
+已通过原图像素区域及 UIAutomator 双重核对：返回、更多、播放模式、上一集、播放、下一集、全屏按钮均存在，布局与点击范围正确。
+
+三、附加兼容检查
+临时设置 animator_duration_scale=0 与 density=540（320dp 宽）后，连续上滑、下滑及按钮退出竖屏均能完成，未因关闭动画而阻塞手势。320dp 竖屏五个控制按钮及顶部按钮排布完整。
+检查后 finally 恢复 animator_duration_scale 原值 0.5，移除 density override，确认 Physical density:420。
+本项是模拟器覆盖升级和人工界面检查，不代表用户实体手机已测试。

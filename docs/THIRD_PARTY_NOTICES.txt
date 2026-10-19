@@ -28,7 +28,8 @@ Copyright Google LLC
 License: Apache License, Version 2.0 (full text: Apache-2.0.txt)
 Source: https://github.com/google/material-design-icons/tree/master/src
 Canonical, unmodified SVG path geometry from materialiconsround/24px.svg:
-  navigation: arrow_back, more_horiz, more_vert, refresh, close
+  navigation: arrow_back, more_horiz, more_vert, refresh, close, fullscreen
+  hardware: smartphone
   av: play_arrow, pause, skip_previous, skip_next, repeat, repeat_one,
       shuffle, volume_up, volume_off, fast_forward, video_library
   device: screen_rotation

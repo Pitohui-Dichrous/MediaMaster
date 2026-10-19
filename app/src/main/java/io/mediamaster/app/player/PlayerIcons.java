@@ -27,7 +27,9 @@ final class PlayerIcons extends Drawable {
       BRIGHTNESS = 10,
       VOLUME = 11,
       VOLUME_OFF = 12,
-      FAST_FORWARD = 13;
+      FAST_FORWARD = 13,
+      PORTRAIT_MODE = 14,
+      FULLSCREEN = 15;
   private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
   private final Path path;
 
@@ -123,6 +125,15 @@ final class PlayerIcons extends Drawable {
         return "M5.58 16.89l5.77-4.07c.56-.4.56-1.24 0-1.63L5.58 7.11C4.91 6.65 4 7.12 4"
             + " 7.93v8.14c0 .81.91 1.28 1.58.82zM13 7.93v8.14c0 .81.91 1.28"
             + " 1.58.82l5.77-4.07c.56-.4.56-1.24 0-1.63l-5.77-4.07c-.67-.47-1.58 0-1.58.81z";
+      case PORTRAIT_MODE:
+        return "M17 1.01L7 1c-1.1 0-2 .9-2 2v18c0 1.1.9 2 2 2h10c1.1 0 2-.9"
+            + " 2-2V3c0-1.1-.9-1.99-2-1.99zM17 19H7V5h10v14z";
+      case FULLSCREEN:
+        return "M6 14c-.55 0-1 .45-1 1v3c0 .55.45 1 1 1h3c.55 0 1-.45 1-1s-.45-1-1-1H7v-2c0-.55"
+            + "-.45-1-1-1zm0-4c.55 0 1-.45 1-1V7h2c.55 0 1-.45 1-1s-.45-1-1-1H6c-.55 0-1 .45-1"
+            + " 1v3c0 .55.45 1 1 1zm11 7h-2c-.55 0-1 .45-1 1s.45 1 1 1h3c.55 0 1-.45"
+            + " 1-1v-3c0-.55-.45-1-1-1s-1 .45-1 1v2zM14 6c0 .55.45 1 1 1h2v2c0 .55.45 1 1"
+            + " 1s1-.45 1-1V6c0-.55-.45-1-1-1h-3c-.55 0-1 .45-1 1z";
       default:
         throw new IllegalArgumentException("Unknown player icon: " + icon);
     }

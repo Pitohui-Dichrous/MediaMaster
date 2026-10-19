@@ -1,0 +1,4 @@
+io.mediamaster.app.player.GestureLevelsTest: tests=2, failures=0, errors=0, skipped=0
+io.mediamaster.app.player.PlayerLogicTest: tests=8, failures=0, errors=0, skipped=0
+io.mediamaster.app.player.PortraitSwipeTest: tests=7, failures=0, errors=0, skipped=0
+Total: 17; PASS

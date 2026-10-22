@@ -3,6 +3,7 @@ package io.mediamaster.app;
 import static org.junit.Assert.*;
 
 import android.Manifest;
+import android.animation.ValueAnimator;
 import android.app.Activity;
 import android.app.Instrumentation;
 import android.content.ContentResolver;
@@ -13,12 +14,15 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.graphics.Color;
+import android.graphics.Rect;
 import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.RippleDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.SystemClock;
 import android.provider.MediaStore;
 import android.util.Xml;
+import android.view.InputDevice;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
@@ -31,6 +35,7 @@ import androidx.test.platform.app.InstrumentationRegistry;
 import androidx.test.rule.ActivityTestRule;
 import io.mediamaster.app.library.LibraryFastScroller;
 import io.mediamaster.app.library.LibraryHeader;
+import io.mediamaster.app.library.PullRefreshLayout;
 import io.mediamaster.app.media.VideoItem;
 import io.mediamaster.app.media.VideoRepository;
 import io.mediamaster.app.player.PlaybackOrder;
@@ -48,6 +53,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Callable;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.After;
 import org.junit.Before;
@@ -646,9 +652,12 @@ public final class MainFlowTest {
             assertEquals(
                 "Returning to the true top reopens the header", 0, header.collapseOffset(), 1f);
             LibraryFastScroller handle = (LibraryFastScroller) read(activity, "fastScroller");
-            assertTrue(
-                "The handle reserves the native 48dp hit width",
-                handle.getWidth() >= Ui.dp(context, 48));
+            assertEquals(
+                "Fast scrolling occupies only its dedicated narrow edge",
+                Ui.dp(context, 24),
+                handle.getWidth(),
+                1);
+            assertMenusOutsideFastScrollEdge((RecyclerView) read(activity, "list"), handle);
             float startY =
                 (Float) read(handle, "thumbTop") + (Float) read(handle, "thumbHeight") / 2f;
             long now = SystemClock.uptimeMillis();
@@ -745,6 +754,439 @@ public final class MainFlowTest {
             return null;
           });
     }
+  }
+
+  @Test
+  public void pullRefreshRequiresAnUncancelledReleaseAtTheRealTopBeforeIndexing() throws Exception {
+    launchLibrary();
+    List<VideoItem> original = repeatLibraryRows();
+    File cache = new File(context.getFilesDir(), "video-library-v4.json");
+    long originalTime = cache.lastModified(), marker = 1_600_000_000_000L;
+    assertTrue(cache.setLastModified(marker));
+    PullRefreshLayout refresh = onMain(() -> (PullRefreshLayout) read(activity, "refresh"));
+    RecyclerView list = onMain(() -> (RecyclerView) read(activity, "list"));
+    try {
+      long down = pullAndHold(refresh, Ui.dp(context, 120), null);
+      assertTrue(
+          "The list itself follows a below-threshold pull",
+          onMain(list::getTranslationY) > Ui.dp(context, 16));
+      finishPull(refresh, down, MotionEvent.ACTION_UP, Ui.dp(context, 120));
+      awaitPullReturn(refresh);
+      assertEquals("A short pull never scans", marker, cache.lastModified());
+      assertFalse(onMain(refresh::isRefreshing));
+      assertFalse(onMain(() -> (Boolean) read(activity, "scanning")));
+
+      down = pullAndHold(refresh, Ui.dp(context, 260), null);
+      finishPull(refresh, down, MotionEvent.ACTION_CANCEL, Ui.dp(context, 260));
+      awaitPullReturn(refresh);
+      assertEquals(
+          "CANCEL never scans even after passing the trigger", marker, cache.lastModified());
+      assertFalse(onMain(refresh::isRefreshing));
+      assertFalse(onMain(() -> (Boolean) read(activity, "scanning")));
+
+      down = pullAndHold(refresh, Ui.dp(context, 260), null);
+      long multiDown = down;
+      onMain(
+          () -> {
+            dispatchPullPointer(
+                refresh, multiDown, Ui.dp(context, 260), MotionEvent.ACTION_POINTER_DOWN);
+            dispatchPullPointer(
+                refresh, multiDown, Ui.dp(context, 260), MotionEvent.ACTION_POINTER_UP);
+            return null;
+          });
+      finishPull(refresh, down, MotionEvent.ACTION_UP, Ui.dp(context, 260));
+      awaitPullReturn(refresh);
+      assertEquals("Adding a second finger cancels refresh", marker, cache.lastModified());
+      assertFalse(onMain(refresh::isRefreshing));
+      assertFalse(onMain(() -> (Boolean) read(activity, "scanning")));
+
+      onMain(
+          () -> {
+            list.scrollBy(0, list.getHeight() * 3);
+            return null;
+          });
+      assertTrue(
+          "The non-top test starts in a genuinely scrollable middle",
+          onMain(() -> list.canScrollVertically(-1)));
+      down = pullAndHold(refresh, Ui.dp(context, 260), null);
+      finishPull(refresh, down, MotionEvent.ACTION_UP, Ui.dp(context, 260));
+      awaitPullReturn(refresh);
+      assertEquals(
+          "Browsing toward the top from the middle never starts a scan",
+          marker,
+          cache.lastModified());
+      assertFalse(onMain(refresh::isRefreshing));
+      assertFalse(onMain(() -> (Boolean) read(activity, "scanning")));
+
+      onMain(
+          () -> {
+            list.stopScroll();
+            ((LinearLayoutManager) list.getLayoutManager()).scrollToPositionWithOffset(0, 0);
+            return null;
+          });
+      SystemClock.sleep(100);
+      down = pullAndHold(refresh, Ui.dp(context, 260), null);
+      assertEquals("Holding past the trigger still has not indexed", marker, cache.lastModified());
+      finishPull(refresh, down, MotionEvent.ACTION_UP, Ui.dp(context, 260));
+      long deadline = SystemClock.uptimeMillis() + 20000;
+      while (cache.lastModified() == marker && SystemClock.uptimeMillis() < deadline)
+        SystemClock.sleep(40);
+      assertNotEquals(
+          "A real completed pull invokes the app's indexing callback",
+          marker,
+          cache.lastModified());
+      awaitScanIdle();
+      awaitPullReturn(refresh);
+      assertFalse(onMain(refresh::isRefreshing));
+    } finally {
+      onMain(
+          () -> {
+            refresh.setRefreshing(false);
+            return null;
+          });
+      restoreLibraryRows(original);
+      cache.setLastModified(originalTime);
+    }
+  }
+
+  @Test
+  public void pullRefreshReturnsTheContentBeforeCallingOnceAndRejectsRepeatedPullsWhileBusy()
+      throws Exception {
+    launchLibrary();
+    PullRefreshLayout refresh = onMain(() -> (PullRefreshLayout) read(activity, "refresh"));
+    RecyclerView list = onMain(() -> (RecyclerView) read(activity, "list"));
+    AtomicInteger callbacks = new AtomicInteger();
+    AtomicReference<Float> translationAtCallback = new AtomicReference<>();
+    onMain(
+        () -> {
+          refresh.setOnRefreshListener(
+              () -> {
+                translationAtCallback.set(list.getTranslationY());
+                callbacks.incrementAndGet();
+              });
+          return null;
+        });
+    try {
+      Set<Integer> observedFeedbackSteps = new HashSet<>();
+      long down = pullAndHold(refresh, Ui.dp(context, 260), observedFeedbackSteps);
+      assertTrue(
+          "The actual child visibly follows the finger",
+          onMain(list::getTranslationY) >= Ui.dp(context, 96));
+      assertEquals("No refresh starts while the finger is held", 0, callbacks.get());
+      assertEquals(
+          "The gesture exposes five progress stages, without claiming physical vibration",
+          new HashSet<>(Arrays.asList(0, 1, 2, 3, 4)),
+          observedFeedbackSteps);
+      finishPull(refresh, down, MotionEvent.ACTION_UP, Ui.dp(context, 260));
+      long deadline = SystemClock.uptimeMillis() + 3000;
+      while (callbacks.get() == 0 && SystemClock.uptimeMillis() < deadline) SystemClock.sleep(25);
+      assertEquals("One release dispatches one refresh", 1, callbacks.get());
+      assertEquals(
+          "The callback runs only after the content returns to its resting position",
+          0f,
+          translationAtCallback.get(),
+          .5f);
+      assertTrue("The listener can hold its refresh in flight", onMain(refresh::isRefreshing));
+      down = pullAndHold(refresh, Ui.dp(context, 260), null);
+      finishPull(refresh, down, MotionEvent.ACTION_UP, Ui.dp(context, 260));
+      SystemClock.sleep(250);
+      assertEquals("A second pull cannot duplicate an in-flight refresh", 1, callbacks.get());
+      assertEquals(0f, onMain(list::getTranslationY), .5f);
+    } finally {
+      onMain(
+          () -> {
+            refresh.setRefreshing(false);
+            return null;
+          });
+    }
+  }
+
+  @Test
+  public void pressedRowsCancelWithoutPlayingAndTheirMenusRemainOutsideTheScrollHandle()
+      throws Exception {
+    launchLibrary();
+    List<VideoItem> original = repeatLibraryRows();
+    Instrumentation.ActivityMonitor monitor =
+        instrumentation.addMonitor(PlayerActivity.class.getName(), null, false);
+    try {
+      View random =
+          onMain(() -> viewWithDescription(activity.getWindow().getDecorView(), "随机播放，开启随机连播"));
+      View firstRow = onMain(() -> ((RecyclerView) read(activity, "list")).getChildAt(0));
+      assertNotNull(random);
+      assertNotNull(firstRow);
+      for (View target : new View[] {random, firstRow}) {
+        int[] layout =
+            onMain(
+                () ->
+                    new int[] {
+                      target.getLeft(), target.getTop(), target.getWidth(), target.getHeight()
+                    });
+        onMain(
+            () -> {
+              assertFalse(
+                  "Touch feedback has no background ripple",
+                  target.getBackground() instanceof RippleDrawable);
+              assertFalse(
+                  "Touch feedback has no foreground ripple",
+                  target.getForeground() instanceof RippleDrawable);
+              return null;
+            });
+        long down = SystemClock.uptimeMillis();
+        onMain(
+            () ->
+                dispatchTouch(
+                    target,
+                    down,
+                    down,
+                    MotionEvent.ACTION_DOWN,
+                    target.getWidth() / 2f,
+                    target.getHeight() / 2f));
+        SystemClock.sleep(180);
+        onMain(
+            () -> {
+              assertEquals(layout[0], target.getLeft());
+              assertEquals(layout[1], target.getTop());
+              assertEquals(layout[2], target.getWidth());
+              assertEquals(layout[3], target.getHeight());
+              if (ValueAnimator.areAnimatorsEnabled()) {
+                assertEquals(
+                    "A held press acknowledges the finger without moving layout",
+                    .95f,
+                    target.getScaleX(),
+                    .015f);
+                assertEquals(target.getScaleX(), target.getScaleY(), .001f);
+              }
+              dispatchTouch(
+                  target,
+                  down,
+                  SystemClock.uptimeMillis(),
+                  MotionEvent.ACTION_CANCEL,
+                  target.getWidth() / 2f,
+                  target.getHeight() / 2f);
+              return null;
+            });
+        SystemClock.sleep(230);
+        onMain(
+            () -> {
+              assertEquals(1f, target.getScaleX(), .005f);
+              assertEquals(1f, target.getScaleY(), .005f);
+              return null;
+            });
+        assertEquals("Cancelling a press must not launch a video", 0, monitor.getHits());
+      }
+      View menu = onMain(() -> videoMenuView(firstRow));
+      assertNotNull(menu);
+      String expectedName =
+          onMain(() -> menu.getContentDescription().toString().substring("操作视频 ".length()));
+      int[] center =
+          onMain(
+              () -> {
+                RecyclerView list = (RecyclerView) read(activity, "list");
+                assertMenusOutsideFastScrollEdge(list, (View) read(activity, "fastScroller"));
+                int[] point = new int[2];
+                menu.getLocationOnScreen(point);
+                point[0] += menu.getWidth() / 2;
+                point[1] += menu.getHeight() / 2;
+                return point;
+              });
+      long down = SystemClock.uptimeMillis();
+      sendScreenTouch(down, MotionEvent.ACTION_DOWN, center);
+      SystemClock.sleep(40);
+      sendScreenTouch(down, MotionEvent.ACTION_UP, center);
+      AccessibilityNodeInfo options = awaitWindowText("重命名");
+      assertTrue(
+          "A real tap opens the menu for the touched video", hasExactText(options, expectedName));
+      assertTrue(hasExactText(options, "文件详情"));
+      assertTrue(hasExactText(options, "删除视频"));
+      assertEquals("The menu tap does not leak through as playback", 0, monitor.getHits());
+      clickText(options, "取消");
+    } finally {
+      instrumentation.removeMonitor(monitor);
+      Activity unexpectedlyOpened = monitor.getLastActivity();
+      if (unexpectedlyOpened != null)
+        onMain(
+            () -> {
+              unexpectedlyOpened.finish();
+              return null;
+            });
+      restoreLibraryRows(original);
+    }
+  }
+
+  private List<VideoItem> repeatLibraryRows() throws Exception {
+    List<VideoItem> original = onMain(() -> new ArrayList<>(items("all")));
+    onMain(
+        () -> {
+          items("all").clear();
+          for (int index = 0; index < 120; index++)
+            items("all").add(original.get(index % original.size()));
+          invoke(activity, "filter");
+          return null;
+        });
+    SystemClock.sleep(200);
+    return original;
+  }
+
+  private void restoreLibraryRows(List<VideoItem> original) throws Exception {
+    onMain(
+        () -> {
+          items("all").clear();
+          items("all").addAll(original);
+          invoke(activity, "filter");
+          return null;
+        });
+  }
+
+  private long pullAndHold(PullRefreshLayout refresh, float delta, Set<Integer> stages)
+      throws Exception {
+    long down =
+        onMain(
+            () -> {
+              long now = SystemClock.uptimeMillis();
+              dispatchTouch(
+                  refresh,
+                  now,
+                  now,
+                  MotionEvent.ACTION_DOWN,
+                  refresh.getWidth() * .4f,
+                  refresh.getHeight() * .25f);
+              return now;
+            });
+    for (int step = 1; step <= 8; step++) {
+      long sample = down + step * 16L;
+      long remaining = sample - SystemClock.uptimeMillis();
+      if (remaining > 0) SystemClock.sleep(remaining);
+      float distance = delta * step / 8;
+      onMain(
+          () -> {
+            dispatchTouch(
+                refresh,
+                down,
+                sample,
+                MotionEvent.ACTION_MOVE,
+                refresh.getWidth() * .4f,
+                refresh.getHeight() * .25f + distance);
+            if (stages != null) {
+              int stage = (Integer) read(refresh, "lastHapticStep");
+              if (stage >= 0) stages.add(stage);
+            }
+            return null;
+          });
+    }
+    return down;
+  }
+
+  private void finishPull(PullRefreshLayout refresh, long down, int action, float delta)
+      throws Exception {
+    onMain(
+        () ->
+            dispatchTouch(
+                refresh,
+                down,
+                SystemClock.uptimeMillis(),
+                action,
+                refresh.getWidth() * .4f,
+                refresh.getHeight() * .25f + delta));
+  }
+
+  private void awaitPullReturn(PullRefreshLayout refresh) throws Exception {
+    long deadline = SystemClock.uptimeMillis() + 3000;
+    while (onMain(
+        () ->
+            Math.abs(((RecyclerView) read(activity, "list")).getTranslationY()) > .5f
+                || (Boolean) read(refresh, "returning")
+                || (Boolean) read(refresh, "pendingRefresh"))) {
+      assertTrue(
+          "Released content returns and settles within its animation window",
+          SystemClock.uptimeMillis() < deadline);
+      SystemClock.sleep(25);
+    }
+  }
+
+  private void dispatchPullPointer(PullRefreshLayout refresh, long down, float delta, int action) {
+    MotionEvent.PointerProperties[] properties = new MotionEvent.PointerProperties[2];
+    MotionEvent.PointerCoords[] coordinates = new MotionEvent.PointerCoords[2];
+    for (int index = 0; index < 2; index++) {
+      properties[index] = new MotionEvent.PointerProperties();
+      properties[index].id = index;
+      properties[index].toolType = MotionEvent.TOOL_TYPE_FINGER;
+      coordinates[index] = new MotionEvent.PointerCoords();
+      coordinates[index].x = refresh.getWidth() * .4f + Ui.dp(context, index * 8);
+      coordinates[index].y = refresh.getHeight() * .25f + delta;
+      coordinates[index].pressure = coordinates[index].size = 1;
+    }
+    MotionEvent event =
+        MotionEvent.obtain(
+            down,
+            SystemClock.uptimeMillis(),
+            action | (1 << MotionEvent.ACTION_POINTER_INDEX_SHIFT),
+            2,
+            properties,
+            coordinates,
+            0,
+            0,
+            1,
+            1,
+            0,
+            0,
+            InputDevice.SOURCE_TOUCHSCREEN,
+            0);
+    try {
+      refresh.dispatchTouchEvent(event);
+    } finally {
+      event.recycle();
+    }
+  }
+
+  private static boolean dispatchTouch(
+      View target, long down, long sample, int action, float x, float y) {
+    MotionEvent event = MotionEvent.obtain(down, sample, action, x, y, 0);
+    event.setSource(InputDevice.SOURCE_TOUCHSCREEN);
+    try {
+      return target.dispatchTouchEvent(event);
+    } finally {
+      event.recycle();
+    }
+  }
+
+  private void sendScreenTouch(long down, int action, int[] point) {
+    MotionEvent event =
+        MotionEvent.obtain(down, SystemClock.uptimeMillis(), action, point[0], point[1], 0);
+    event.setSource(InputDevice.SOURCE_TOUCHSCREEN);
+    try {
+      instrumentation.sendPointerSync(event);
+    } finally {
+      event.recycle();
+    }
+  }
+
+  private static View videoMenuView(View view) {
+    CharSequence label = view.getContentDescription();
+    if (label != null && label.toString().startsWith("操作视频 ")) return view;
+    if (view instanceof ViewGroup) {
+      ViewGroup group = (ViewGroup) view;
+      for (int index = 0; index < group.getChildCount(); index++) {
+        View result = videoMenuView(group.getChildAt(index));
+        if (result != null) return result;
+      }
+    }
+    return null;
+  }
+
+  private static void assertMenusOutsideFastScrollEdge(RecyclerView list, View handle) {
+    Rect edge = new Rect();
+    assertTrue(handle.getGlobalVisibleRect(edge));
+    int visibleMenus = 0;
+    for (int index = 0; index < list.getChildCount(); index++) {
+      View menu = videoMenuView(list.getChildAt(index));
+      Rect bounds = new Rect();
+      if (menu == null || !menu.getGlobalVisibleRect(bounds)) continue;
+      assertTrue(
+          "A video menu stays left of the scroll strip: menu=" + bounds + " edge=" + edge,
+          bounds.right <= edge.left);
+      visibleMenus++;
+    }
+    assertTrue("The geometry check includes real visible video menus", visibleMenus > 0);
   }
 
   private void dragFastHandleTo(boolean top) throws Exception {

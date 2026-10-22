@@ -13,8 +13,8 @@ android {
         resValue 'string', 'app_name', previewInstall ? '映序预览' : '映序'
         minSdk 26
         targetSdk 35
-        versionCode 9
-        versionName '1.4.0-preview.2'
+        versionCode 10
+        versionName '1.4.0-preview.3'
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
     }
     compileOptions {

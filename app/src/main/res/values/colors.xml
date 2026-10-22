@@ -4,9 +4,10 @@
     <color name="mm_surface">#EDF0EB</color>
     <color name="mm_text">#272637</color>
     <color name="mm_muted">#62666B</color>
-    <color name="mm_dark_background">#201D2C</color>
-    <color name="mm_dark_text">#F5F4F8</color>
-    <color name="mm_dark_muted">#C2BFCC</color>
+    <color name="mm_dark_background">#1C1C1C</color>
+    <color name="mm_dark_surface">#2C2C2C</color>
+    <color name="mm_dark_text">#F5F5F5</color>
+    <color name="mm_dark_muted">#C2C2C2</color>
     <color name="mm_accent">#145F39</color>
     <color name="mm_player_surface">#201D2C</color>
     <color name="mm_player_text">#FFFFFF</color>

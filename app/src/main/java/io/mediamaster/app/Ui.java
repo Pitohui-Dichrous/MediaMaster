@@ -44,14 +44,14 @@ public final class Ui {
    */
   public static void configure(Context context) {
     dark = isDark(context);
-    BG = dark ? DEEP_PURPLE : 0xfff7f8f5;
-    SURFACE = dark ? PURPLE : 0xffedf0eb;
-    BORDER = dark ? 0xff464352 : 0xffdce1da;
-    TEXT = dark ? 0xfff5f4f8 : PURPLE;
-    MUTED = dark ? 0xffc2bfcc : 0xff62666b;
+    BG = dark ? 0xff1c1c1c : 0xfff7f8f5;
+    SURFACE = dark ? 0xff2c2c2c : 0xffedf0eb;
+    BORDER = dark ? 0xff444444 : 0xffdce1da;
+    TEXT = dark ? 0xfff5f5f5 : PURPLE;
+    MUTED = dark ? 0xffc2c2c2 : 0xff62666b;
     INK = TEXT;
     SOFT_ACCENT = dark ? 0xff2a3d35 : 0xffe8f0e9;
-    CONTROL = dark ? 0xfff5f4f8 : ACCENT;
+    CONTROL = dark ? 0xfff5f5f5 : ACCENT;
   }
 
   public static int dialogTheme(Context context) {

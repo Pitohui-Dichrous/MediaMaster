@@ -13,7 +13,6 @@ import android.view.*;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.*;
 import androidx.recyclerview.widget.*;
-import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 import io.mediamaster.app.library.*;
 import io.mediamaster.app.media.*;
 import io.mediamaster.app.player.PlayerActivity;
@@ -35,7 +34,7 @@ public class MainActivity extends Activity {
   private LibraryHeader libraryHeader;
   private LibraryFastScroller fastScroller;
   private VideoAdapter adapter;
-  private SwipeRefreshLayout refresh;
+  private PullRefreshLayout refresh;
   private TextView count, status, sortButton, emptyTitle, emptyDetail;
   private LinearLayout empty;
   private Button emptyAction;
@@ -48,6 +47,11 @@ public class MainActivity extends Activity {
   private VideoItem pendingItem;
   private String pendingName;
   private boolean pendingDelete, pendingConsentCompletes, mutationInFlight, pendingWaitConsent;
+  private final Runnable clearRefreshStatus =
+      () -> {
+        if (!scanning && status != null && "刷新成功".contentEquals(status.getText()))
+          libraryStatus("", null);
+      };
 
   @Override
   public void onCreate(Bundle state) {
@@ -56,6 +60,7 @@ public class MainActivity extends Activity {
     super.onCreate(state);
     getWindow().setStatusBarColor(Ui.BG);
     getWindow().setNavigationBarColor(Ui.BG);
+    updateSystemBarAppearance();
     repository = new VideoRepository(this);
     thumbnails = new ThumbnailLoader(this);
     sort = getPreferences(0).getInt("sort", 0);
@@ -190,11 +195,13 @@ public class MainActivity extends Activity {
     shuffle.setBounds(0, 0, d(20), d(20));
     random.setCompoundDrawables(shuffle, null, null, null);
     random.setCompoundDrawablePadding(d(8));
-    Ui.ripple(random, Ui.ACCENT, 8);
-    ((android.graphics.drawable.RippleDrawable) random.getBackground())
-        .setColor(android.content.res.ColorStateList.valueOf(0x50ffffff));
+    Ui.surface(random, Ui.ACCENT, 8);
     random.setContentDescription("随机播放，开启随机连播");
-    random.setOnClickListener(v -> playRandom());
+    random.setOnClickListener(
+        v -> {
+          v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
+          playRandom();
+        });
     randomSection.addView(
         random, new LinearLayout.LayoutParams(-1, Math.max(d(48), random.getLineHeight() + d(16))));
 
@@ -233,20 +240,21 @@ public class MainActivity extends Activity {
     libraryHeader.setSections(titleRow, searchSection, randomSection, librarySection);
 
     FrameLayout body = new FrameLayout(this);
-    refresh = new SwipeRefreshLayout(this);
-    refresh.setColorSchemeColors(Ui.ACCENT);
-    refresh.setProgressBackgroundColorSchemeColor(Ui.BG);
+    refresh = new PullRefreshLayout(this);
+    refresh.setColors(Ui.CONTROL, Ui.BG);
     body.addView(refresh, new FrameLayout.LayoutParams(-1, -1));
     refresh.setOnRefreshListener(() -> scan(true));
     list = new RecyclerView(this);
+    list.setBackgroundColor(android.graphics.Color.TRANSPARENT);
     list.setLayoutManager(new LinearLayoutManager(this));
     list.setClipToPadding(false);
-    list.setPadding(d(8), 0, d(12), d(16));
+    // Reserve a separate edge lane so the full-size row menu never sits under the fast handle.
+    list.setPadding(d(8), 0, d(24), d(16));
     list.setItemAnimator(null);
     adapter = new VideoAdapter();
     list.setAdapter(adapter);
     refresh.addView(list);
-    refresh.setOnChildScrollUpCallback((parent, child) -> list.canScrollVertically(-1));
+    refresh.setOnChildScrollUpCallback(() -> list.canScrollVertically(-1));
     list.addOnScrollListener(
         new RecyclerView.OnScrollListener() {
           @Override
@@ -258,11 +266,13 @@ public class MainActivity extends Activity {
           }
         });
     fastScroller = new LibraryFastScroller(this, list);
-    body.addView(fastScroller, new FrameLayout.LayoutParams(d(48), -1, Gravity.RIGHT));
+    body.addView(fastScroller, new FrameLayout.LayoutParams(d(24), -1, Gravity.RIGHT));
     libraryHeader.addOnLayoutChangeListener(
-        (v, l, t, r, b, ol, ot, or, ob) ->
-            fastScroller.setTopInset(
-                Math.round(libraryHeader.collapseRange() - libraryHeader.collapseOffset())));
+        (v, l, t, r, b, ol, ot, or, ob) -> {
+          fastScroller.setTopInset(
+              Math.round(libraryHeader.collapseRange() - libraryHeader.collapseOffset()));
+          refresh.setIndicatorInset(libraryHeader.collapseRange());
+        });
 
     empty = column();
     empty.setGravity(Gravity.CENTER);
@@ -308,6 +318,7 @@ public class MainActivity extends Activity {
   }
 
   private void libraryStatus(String message, View.OnClickListener action) {
+    handler.removeCallbacks(clearRefreshStatus);
     status.setText(message);
     status.setOnClickListener(action);
     status.setMinimumHeight(d(action == null ? 32 : 48));
@@ -405,6 +416,21 @@ public class MainActivity extends Activity {
   }
 
   @Override
+  public void onWindowFocusChanged(boolean hasFocus) {
+    super.onWindowFocusChanged(hasFocus);
+    if (hasFocus) updateSystemBarAppearance();
+  }
+
+  private void updateSystemBarAppearance() {
+    androidx.core.view.WindowInsetsControllerCompat bars =
+        androidx.core.view.WindowCompat.getInsetsController(
+            getWindow(), getWindow().getDecorView());
+    boolean light = !Ui.isDark(this);
+    bars.setAppearanceLightStatusBars(light);
+    bars.setAppearanceLightNavigationBars(light);
+  }
+
+  @Override
   protected void onPause() {
     active = false;
     scanAgain = false;
@@ -439,8 +465,8 @@ public class MainActivity extends Activity {
     }
     scanning = true;
     scanButton.setEnabled(false);
-    libraryStatus("", null);
-    if (manual) refresh.setRefreshing(true);
+    libraryStatus("正在刷新", null);
+    refresh.setRefreshing(true);
     worker.execute(
         () -> {
           try {
@@ -470,7 +496,11 @@ public class MainActivity extends Activity {
                     libraryStatus("部分视频授权", v -> permissions());
                   } else if (items.isEmpty() && !hasLibraryAccess()) {
                     libraryStatus("未授权", v -> permissions());
-                  } else libraryStatus("", null);
+                  } else {
+                    libraryStatus("刷新成功", null);
+                    handler.postDelayed(clearRefreshStatus, 1800);
+                  }
+                  if (manual && !warnings.isEmpty()) toast("刷新完成，请查看扫描提示");
                   if (scanAgain && active) {
                     scanAgain = false;
                     scan(false);
@@ -1067,11 +1097,13 @@ public class MainActivity extends Activity {
 
   private final class VideoAdapter extends RecyclerView.Adapter<VideoHolder> {
     public VideoHolder onCreateViewHolder(ViewGroup parent, int type) {
-      LinearLayout line = row();
+      PressFeedbackLayout line = new PressFeedbackLayout(MainActivity.this);
+      line.setOrientation(LinearLayout.HORIZONTAL);
+      line.setGravity(Gravity.CENTER_VERTICAL);
       line.setLayoutParams(new RecyclerView.LayoutParams(-1, -2));
       line.setPadding(d(8), d(8), 0, d(8));
       line.setMinimumHeight(d(88));
-      Ui.ripple(line, Ui.BG, 8);
+      Ui.surface(line, Ui.BG, 8);
       FrameLayout art = new FrameLayout(MainActivity.this);
       line.addView(art, new LinearLayout.LayoutParams(d(96), d(60)));
       ImageView image = new ImageView(MainActivity.this);
@@ -1082,7 +1114,7 @@ public class MainActivity extends Activity {
       art.addView(image, new FrameLayout.LayoutParams(-1, -1));
       TextView duration = Ui.text(MainActivity.this, "", 11, Ui.ON_ACCENT);
       duration.setPadding(d(5), d(2), d(5), d(2));
-      Ui.surface(duration, 0xcc201d2c, 4);
+      Ui.surface(duration, 0xcc1c1c1c, 4);
       FrameLayout.LayoutParams dura =
           new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.RIGHT);
       dura.setMargins(0, 0, d(4), d(4));
@@ -1110,6 +1142,7 @@ public class MainActivity extends Activity {
     }
 
     public void onBindViewHolder(VideoHolder h, int pos) {
+      ((PressFeedbackLayout) h.itemView).resetPressFeedback();
       VideoItem v = visible.get(pos);
       h.title.setText(v.name);
       long date = sort / 2 == 1 ? v.addedMs : v.modifiedMs;
@@ -1136,6 +1169,7 @@ public class MainActivity extends Activity {
 
     @Override
     public void onViewRecycled(VideoHolder holder) {
+      ((PressFeedbackLayout) holder.itemView).resetPressFeedback();
       thumbnails.unbind(holder.image);
       super.onViewRecycled(holder);
     }

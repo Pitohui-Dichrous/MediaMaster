@@ -19,7 +19,7 @@ import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 import io.mediamaster.app.Ui;
 
-/** A narrow visible handle with a full 48dp hit area, backed by the list's own scroll metrics. */
+/** A visible handle in a dedicated 24dp edge lane, backed by the list's own scroll metrics. */
 public final class LibraryFastScroller extends View {
   private final RecyclerView list;
   private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);

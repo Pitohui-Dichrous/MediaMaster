@@ -53,7 +53,12 @@
         <item name="android:textColorSecondary">@color/mm_player_muted</item>
         <item name="android:windowBackground">@drawable/dialog_background</item>
     </style>
-    <style name="DialogThemeDark" parent="PlayerDialogTheme" />
+    <style name="DialogThemeDark" parent="PlayerDialogTheme">
+        <item name="android:colorControlNormal">@color/mm_dark_muted</item>
+        <item name="android:colorBackgroundFloating">@color/mm_dark_surface</item>
+        <item name="android:textColorPrimary">@color/mm_dark_text</item>
+        <item name="android:textColorSecondary">@color/mm_dark_muted</item>
+    </style>
     <style name="PlayerThemeBase" parent="android:style/Theme.Material.NoActionBar">
         <item name="android:fontFamily">sans</item>
         <item name="android:colorAccent">@color/mm_accent</item>

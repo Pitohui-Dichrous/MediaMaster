@@ -10,11 +10,11 @@ android {
     compileSdk 35
     defaultConfig {
         applicationId previewInstall ? 'io.mediamaster.app.preview' : 'io.mediamaster.app'
-        resValue 'string', 'app_name', previewInstall ? '映序预览' : '映序'
+        resValue 'string', 'app_name', '映序'
         minSdk 26
         targetSdk 35
-        versionCode 12
-        versionName '1.4.0'
+        versionCode 13
+        versionName '2.0.0'
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
     }
     compileOptions {

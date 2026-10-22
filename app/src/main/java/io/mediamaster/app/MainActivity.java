@@ -173,7 +173,7 @@ public class MainActivity extends Activity {
     LinearLayout randomSection = column();
     randomSection.setBackgroundColor(Ui.BG);
     randomSection.setPadding(d(16), 0, d(16), d(8));
-    Button random = new Button(this);
+    Button random = new PressFeedbackButton(this);
     random.setText("随机播放");
     random.setTextSize(14);
     random.setSingleLine(true);
@@ -191,19 +191,12 @@ public class MainActivity extends Activity {
     random.setCompoundDrawables(shuffle, null, null, null);
     random.setCompoundDrawablePadding(d(8));
     Ui.ripple(random, Ui.ACCENT, 8);
+    ((android.graphics.drawable.RippleDrawable) random.getBackground())
+        .setColor(android.content.res.ColorStateList.valueOf(0x50ffffff));
     random.setContentDescription("随机播放，开启随机连播");
     random.setOnClickListener(v -> playRandom());
     randomSection.addView(
-        random, new LinearLayout.LayoutParams(-2, Math.max(d(48), random.getLineHeight() + d(16))));
-    // Share the toolbar at ordinary text sizes; larger accessibility text gets its own row.
-    int randomWidth =
-        Math.max(d(128), (int) Math.ceil(random.getPaint().measureText("随机播放")) + d(60));
-    int toolbarWidth = getResources().getDisplayMetrics().widthPixels - d(24);
-    if (wordmark.getPaint().measureText("映序") + d(112) + randomWidth <= toolbarWidth) {
-      randomSection.removeView(random);
-      randomSection.setPadding(0, 0, 0, 0);
-      titleRow.addView(random, 1, new LinearLayout.LayoutParams(randomWidth, d(48)));
-    }
+        random, new LinearLayout.LayoutParams(-1, Math.max(d(48), random.getLineHeight() + d(16))));
 
     LinearLayout librarySection = column();
     librarySection.setBackgroundColor(Ui.BG);

@@ -4,13 +4,17 @@ import android.animation.ValueAnimator;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Paint;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.SystemClock;
 import android.view.HapticFeedbackConstants;
 import android.view.MotionEvent;
+import android.view.VelocityTracker;
 import android.view.View;
+import android.view.ViewConfiguration;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.animation.PathInterpolator;
+import android.widget.OverScroller;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 import io.mediamaster.app.Ui;
@@ -26,6 +30,41 @@ public final class LibraryFastScroller extends View {
   private int topInset;
   private float dragY;
   private boolean dragging, scrollable;
+  private final OverScroller momentum;
+  private final int touchSlop, maxVelocity;
+  private VelocityTracker velocity;
+  private int activePointer = -1, momentumTravel;
+  private float downY, requestedFraction;
+  private boolean moved;
+  private long lastMovement;
+  private RecyclerView.Adapter<?> observedAdapter;
+  private final RecyclerView.AdapterDataObserver dataObserver =
+      new RecyclerView.AdapterDataObserver() {
+        @Override
+        public void onChanged() {
+          cancelInteraction();
+        }
+
+        @Override
+        public void onItemRangeChanged(int start, int count) {
+          onChanged();
+        }
+
+        @Override
+        public void onItemRangeInserted(int start, int count) {
+          onChanged();
+        }
+
+        @Override
+        public void onItemRangeRemoved(int start, int count) {
+          onChanged();
+        }
+
+        @Override
+        public void onItemRangeMoved(int from, int to, int count) {
+          onChanged();
+        }
+      };
   private int lastSection = -1;
   private long lastHaptic;
   private ValueAnimator fade;
@@ -35,6 +74,10 @@ public final class LibraryFastScroller extends View {
     super(context);
     this.list = list;
     density = getResources().getDisplayMetrics().density;
+    momentum = new OverScroller(context);
+    ViewConfiguration configuration = ViewConfiguration.get(context);
+    touchSlop = configuration.getScaledTouchSlop();
+    maxVelocity = configuration.getScaledMaximumFlingVelocity();
     setFocusable(true);
     setContentDescription("快速滚动视频目录");
     setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_YES);
@@ -48,7 +91,16 @@ public final class LibraryFastScroller extends View {
 
           @Override
           public void onScrollStateChanged(RecyclerView view, int state) {
+            if (state != RecyclerView.SCROLL_STATE_IDLE) stopMomentum();
             if (state != RecyclerView.SCROLL_STATE_IDLE) show();
+          }
+        });
+    list.addOnItemTouchListener(
+        new RecyclerView.SimpleOnItemTouchListener() {
+          @Override
+          public boolean onInterceptTouchEvent(RecyclerView view, MotionEvent event) {
+            if (event.getActionMasked() == MotionEvent.ACTION_DOWN) stopMomentum();
+            return false;
           }
         });
     list.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> updateMetrics());
@@ -71,6 +123,7 @@ public final class LibraryFastScroller extends View {
     scrollable =
         range > extent && list.getAdapter() != null && list.getAdapter().getItemCount() > 1;
     if (!scrollable) {
+      stopMomentum();
       if (dragging) release();
       setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
       invalidate();
@@ -141,34 +194,72 @@ public final class LibraryFastScroller extends View {
   public boolean onTouchEvent(MotionEvent event) {
     switch (event.getActionMasked()) {
       case MotionEvent.ACTION_DOWN:
+        stopMomentum();
         updateMetrics();
         if (!scrollable
             || event.getY() < thumbTop - dp(12)
             || event.getY() > thumbTop + thumbHeight + dp(12)) return false;
         dragging = true;
         dragY = event.getY();
+        downY = dragY;
+        moved = false;
+        lastMovement = event.getEventTime();
+        activePointer = event.getPointerId(0);
+        recycleVelocity();
+        velocity = VelocityTracker.obtain();
+        velocity.addMovement(event);
         grabOffset = Math.max(0, Math.min(thumbHeight, event.getY() - thumbTop));
+        requestedFraction = Math.max(0, Math.min(1, (thumbTop - topInset - dp(8)) / trackTravel()));
         list.stopScroll();
         getParent().requestDisallowInterceptTouchEvent(true);
-        performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+        // Respect the device's touch-feedback preference; one distinct pickup per grab.
+        performHapticFeedback(
+            Build.VERSION.SDK_INT >= 34
+                ? HapticFeedbackConstants.DRAG_START
+                : HapticFeedbackConstants.LONG_PRESS);
         lastHaptic = SystemClock.uptimeMillis();
-        lastSection = -1;
+        lastSection = Math.round(requestedFraction * 20);
         show();
         return true;
       case MotionEvent.ACTION_MOVE:
         if (!dragging) return false;
-        dragY = event.getY();
-        float travel = Math.max(1, getHeight() - topInset - dp(16) - thumbHeight);
-        scrollToFraction((dragY - grabOffset - topInset - dp(8)) / travel);
+        velocity.addMovement(event);
+        moveDrag(event);
         return true;
       case MotionEvent.ACTION_UP:
         if (!dragging) return false;
+        velocity.addMovement(event);
+        moveDrag(event);
+        float releaseVelocity = 0;
+        if (moved
+            && event.getEventTime() - lastMovement < 120
+            && ValueAnimator.areAnimatorsEnabled()) {
+          velocity.computeCurrentVelocity(1000, maxVelocity);
+          releaseVelocity = momentumVelocity(velocity.getYVelocity(activePointer));
+        }
+        int travel = Math.max(1, Math.round(trackTravel()));
+        float fromFraction = requestedFraction;
         release();
+        if (releaseVelocity != 0) {
+          // Fling in thumb space, so a large library doesn't multiply the physical throw.
+          momentumTravel = travel;
+          momentum.fling(
+              0,
+              Math.round(fromFraction * travel),
+              0,
+              Math.round(releaseVelocity),
+              0,
+              0,
+              0,
+              travel);
+          postInvalidateOnAnimation();
+        }
         performClick();
         return true;
       case MotionEvent.ACTION_CANCEL:
       case MotionEvent.ACTION_POINTER_DOWN:
         if (!dragging) return false;
+        stopMomentum();
         release();
         return true;
       default:
@@ -176,8 +267,61 @@ public final class LibraryFastScroller extends View {
     }
   }
 
+  private float trackTravel() {
+    return Math.max(1, getHeight() - topInset - dp(16) - thumbHeight);
+  }
+
+  private void moveDrag(MotionEvent event) {
+    int pointer = event.findPointerIndex(activePointer);
+    if (pointer < 0) return;
+    float next = event.getY(pointer);
+    if (Math.abs(next - dragY) > dp(.5f)) lastMovement = event.getEventTime();
+    dragY = next;
+    moved |= Math.abs(dragY - downY) > touchSlop;
+    scrollToFraction((dragY - grabOffset - topInset - dp(8)) / trackTravel());
+  }
+
+  private float momentumVelocity(float pixelsPerSecond) {
+    // Precise positioning has a dead zone. A smooth ramp avoids a sudden kick at its edge.
+    float speed = Math.abs(pixelsPerSecond) / density;
+    float excess = Math.max(0, speed - 120);
+    float blend = Math.min(1, excess / 600);
+    blend = blend * blend * (3 - 2 * blend);
+    return Math.copySign(dp(Math.min(2400, excess * blend)), pixelsPerSecond);
+  }
+
+  @Override
+  public void computeScroll() {
+    if (momentum.isFinished()) return;
+    if (!scrollable || dragging || !ValueAnimator.areAnimatorsEnabled()) {
+      stopMomentum();
+      return;
+    }
+    if (momentum.computeScrollOffset()) {
+      scrollToFraction(momentum.getCurrY() / (float) Math.max(1, momentumTravel));
+      if (!momentum.isFinished()) postInvalidateOnAnimation();
+    }
+  }
+
+  private void stopMomentum() {
+    // abortAnimation jumps to the destination; forceFinished stops at the visible position.
+    if (momentum != null) momentum.forceFinished(true);
+  }
+
+  private void recycleVelocity() {
+    if (velocity != null) velocity.recycle();
+    velocity = null;
+  }
+
+  private void cancelInteraction() {
+    stopMomentum();
+    if (dragging) release();
+    else recycleVelocity();
+  }
+
   private void scrollToFraction(float raw) {
     float fraction = Math.max(0, Math.min(1, raw));
+    requestedFraction = fraction;
     int count = list.getAdapter() == null ? 0 : list.getAdapter().getItemCount();
     if (count == 0 || !(list.getLayoutManager() instanceof LinearLayoutManager)) return;
     int range = list.computeVerticalScrollRange(), extent = list.computeVerticalScrollExtent();
@@ -189,7 +333,7 @@ public final class LibraryFastScroller extends View {
         .scrollToPositionWithOffset(position, -remainder);
     int section = Math.round(fraction * 20);
     long now = SystemClock.uptimeMillis();
-    if (section != lastSection && now - lastHaptic >= 80) {
+    if (dragging && section != lastSection && now - lastHaptic >= 80) {
       performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
       lastHaptic = now;
     }
@@ -201,6 +345,8 @@ public final class LibraryFastScroller extends View {
 
   private void release() {
     dragging = false;
+    activePointer = -1;
+    recycleVelocity();
     updateMetrics();
     if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(false);
     show();
@@ -234,6 +380,7 @@ public final class LibraryFastScroller extends View {
     if (scrollable
         && action == AccessibilityNodeInfo.AccessibilityAction.ACTION_SET_PROGRESS.getId()
         && arguments != null) {
+      stopMomentum();
       scrollToFraction(
           arguments.getFloat(AccessibilityNodeInfo.ACTION_ARGUMENT_PROGRESS_VALUE) / 100f);
       return true;
@@ -241,6 +388,7 @@ public final class LibraryFastScroller extends View {
     if (scrollable
         && (action == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
             || action == AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)) {
+      stopMomentum();
       list.smoothScrollBy(
           0,
           (action == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD ? 1 : -1)
@@ -253,7 +401,23 @@ public final class LibraryFastScroller extends View {
   }
 
   @Override
+  protected void onAttachedToWindow() {
+    super.onAttachedToWindow();
+    observedAdapter = list.getAdapter();
+    if (observedAdapter != null) observedAdapter.registerAdapterDataObserver(dataObserver);
+  }
+
+  @Override
+  public void onWindowFocusChanged(boolean hasWindowFocus) {
+    super.onWindowFocusChanged(hasWindowFocus);
+    if (!hasWindowFocus) cancelInteraction();
+  }
+
+  @Override
   protected void onDetachedFromWindow() {
+    cancelInteraction();
+    if (observedAdapter != null) observedAdapter.unregisterAdapterDataObserver(dataObserver);
+    observedAdapter = null;
     removeCallbacks(settle);
     if (fade != null) fade.cancel();
     super.onDetachedFromWindow();

@@ -64,6 +64,8 @@ public final class PortraitPreloadTest {
   private ArrayList<VideoItem> fixtures;
   private final ArrayList<Bitmap> references = new ArrayList<>();
   private int savedMode;
+  private int savedPortraitNavigation;
+  private boolean hadPortraitNavigation;
   private long downTime;
   private AudioExclusivityProbe audioProbe;
 
@@ -79,10 +81,17 @@ public final class PortraitPreloadTest {
                 ? Manifest.permission.READ_MEDIA_VIDEO
                 : Manifest.permission.READ_EXTERNAL_STORAGE);
     savedMode = context.getSharedPreferences("player", 0).getInt("playback_mode", 0);
+    hadPortraitNavigation =
+        context.getSharedPreferences("player", 0).contains("portrait_navigation_mode");
+    savedPortraitNavigation =
+        context
+            .getSharedPreferences("player", 0)
+            .getInt("portrait_navigation_mode", PlaybackOrder.SEQUENTIAL);
     context
         .getSharedPreferences("player", 0)
         .edit()
         .putInt("playback_mode", PlaybackOrder.SINGLE)
+        .putInt("portrait_navigation_mode", PlaybackOrder.SEQUENTIAL)
         .commit();
     fixtures = new ArrayList<>();
     // Three visibly different, real fixture files; explicit compatibility-engine coverage is below.
@@ -129,8 +138,14 @@ public final class PortraitPreloadTest {
             return null;
           });
     if (activity != null) rule.finishActivity();
-    if (context != null)
-      context.getSharedPreferences("player", 0).edit().putInt("playback_mode", savedMode).commit();
+    if (context != null) {
+      android.content.SharedPreferences.Editor preferences =
+          context.getSharedPreferences("player", 0).edit().putInt("playback_mode", savedMode);
+      if (hadPortraitNavigation)
+        preferences.putInt("portrait_navigation_mode", savedPortraitNavigation);
+      else preferences.remove("portrait_navigation_mode");
+      preferences.commit();
+    }
     for (Bitmap bitmap : references) bitmap.recycle();
     references.clear();
     if (audioProbe != null) audioProbe.assertHealthy();
@@ -327,7 +342,8 @@ public final class PortraitPreloadTest {
           assertSame(decoder, current().exo);
           assertEquals(prepares, current().prepareCount);
           assertEquals(1, order().current());
-          assertEquals(PlaybackOrder.SINGLE, order().mode());
+          assertEquals(PlaybackOrder.SEQUENTIAL, order().mode());
+          assertEquals(PlaybackOrder.SINGLE, order().fullScreenMode());
           assertEquals(Player.REPEAT_MODE_ONE, current().exo.getRepeatMode());
           return null;
         });
@@ -337,113 +353,88 @@ public final class PortraitPreloadTest {
   }
 
   @Test
-  public void repeatKeepsCurrentDecoderAndSequentialNaturalEndPromotesPreparedNext()
+  public void portraitRepeatDoesNotConsumeSequentialOrRandomPreloadBeforeManualCommit()
       throws Exception {
-    VideoPage repeating = onMain(() -> current());
-    ExoPlayer decoder = onMain(() -> repeating.exo);
-    AtomicInteger repeats = new AtomicInteger();
-    int prepares = onMain(() -> repeating.prepareCount);
-    onMain(
-        () -> {
-          decoder.addListener(
-              new Player.Listener() {
-                @Override
-                public void onMediaItemTransition(MediaItem item, int reason) {
-                  if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT)
-                    repeats.incrementAndGet();
-                }
-              });
-          decoder.seekTo(Math.max(0, decoder.getDuration() - 550));
-          invoke("setPlaying", new Class<?>[] {boolean.class}, true);
-          return null;
-        });
-    await(() -> repeats.get() > 0, 8000);
-    onMain(
-        () -> {
-          assertSame(repeating, current());
-          assertSame(decoder, repeating.exo);
-          assertEquals(prepares, repeating.prepareCount);
-          invoke("setPlaying", new Class<?>[] {boolean.class}, false);
-          invoke("setPlaybackMode", new Class<?>[] {int.class}, PlaybackOrder.SEQUENTIAL);
-          return null;
-        });
-    awaitNeighbors();
-    VideoPage incoming = onMain(() -> next());
-    ExoPlayer prepared = onMain(() -> incoming.exo);
-    int incomingPrepares = onMain(() -> incoming.prepareCount);
-    onMain(
-        () -> {
-          decoder.seekTo(Math.max(0, decoder.getDuration() - 550));
-          invoke("setPlaying", new Class<?>[] {boolean.class}, true);
-          return null;
-        });
-    await(() -> onMain(() -> current() == incoming && incoming.exo.isPlaying()), 10000);
-    onMain(
-        () -> {
-          assertSame("Natural EOF also promotes the warmed decoder", prepared, current().exo);
-          assertEquals(incomingPrepares, current().prepareCount);
-          assertEquals(PlaybackOrder.SEQUENTIAL, order().mode());
-          assertTrue((Boolean) read("portraitMode"));
-          invoke("setPlaying", new Class<?>[] {boolean.class}, false);
-          return null;
-        });
-    await(() -> onMain(() -> previous() == repeating && readyForPlayback(previous())), 10000);
-    onMain(
-        () -> {
-          assertSame(
-              "The completed video retains its original native decoder", decoder, previous().exo);
-          assertEquals(
-              "Rewinding a completed neighbor must not prepare its media again",
-              prepares,
-              previous().prepareCount);
-          assertEquals(
-              "The completed previous page is rewound while still offscreen",
-              0,
-              pagePosition(previous()),
-              100);
-          return null;
-        });
-    swipeDown();
-    await(
-        () ->
-            onMain(
-                () ->
-                    current() == repeating
-                        && !(Boolean) read("pageTransitioning")
-                        && decoder.isPlaying()),
-        8000);
-    onMain(
-        () -> {
-          assertSame("Returning to a completed video promotes the same page", repeating, current());
-          assertSame(
-              "Returning to a completed video resumes the same decoder", decoder, current().exo);
-          assertEquals(prepares, current().prepareCount);
-          assertEquals(2, order().current());
-          return null;
-        });
-    await(
-        () -> onMain(() -> pagePosition(repeating) > 150 && pagePosition(repeating) < 1800), 5000);
-    await(() -> onMain(() -> next() == incoming && readyForPlayback(next())), 10000);
-    onMain(
-        () -> {
-          // Exercise a second actual EOF after returning; an old per-page ended flag must not
-          // swallow it.
-          decoder.seekTo(Math.max(0, decoder.getDuration() - 550));
-          return null;
-        });
-    await(() -> onMain(() -> current() == incoming && incoming.exo.isPlaying()), 10000);
-    onMain(
-        () -> {
-          assertSame("The second EOF also uses the prepared next decoder", prepared, current().exo);
-          assertEquals(incomingPrepares, current().prepareCount);
-          assertEquals(
-              "No prepare was needed to revisit and complete the original video",
-              prepares,
-              repeating.prepareCount);
-          assertEquals(PlaybackOrder.SEQUENTIAL, order().mode());
-          return null;
-        });
-    assertOnlyCurrentAudible();
+    for (int navigation : new int[] {PlaybackOrder.SEQUENTIAL, PlaybackOrder.SHUFFLE}) {
+      onMain(
+          () -> {
+            invoke("setPlaying", new Class<?>[] {boolean.class}, false);
+            invoke("setPlaybackMode", new Class<?>[] {int.class}, navigation);
+            return null;
+          });
+      await(() -> onMain(() -> readyForPlayback(next())), 20000);
+      VideoPage repeating = onMain(() -> current());
+      ExoPlayer decoder = onMain(() -> repeating.exo);
+      VideoPage incoming = onMain(() -> next());
+      ExoPlayer prepared = onMain(() -> incoming.exo);
+      int index = onMain(() -> order().current());
+      int candidate = onMain(() -> incoming.index);
+      int prepares = onMain(() -> repeating.prepareCount);
+      int incomingPrepares = onMain(() -> incoming.prepareCount);
+      long generation = onMain(() -> incoming.generation);
+      String before = onMain(this::historyFingerprint);
+      AtomicInteger repeats = new AtomicInteger();
+      onMain(
+          () -> {
+            decoder.addListener(
+                new Player.Listener() {
+                  @Override
+                  public void onMediaItemTransition(MediaItem item, int reason) {
+                    if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT)
+                      repeats.incrementAndGet();
+                  }
+                });
+            assertEquals(Player.REPEAT_MODE_ONE, decoder.getRepeatMode());
+            decoder.seekTo(Math.max(0, decoder.getDuration() - 550));
+            invoke("setPlaying", new Class<?>[] {boolean.class}, true);
+            return null;
+          });
+      await(() -> repeats.get() > 0, 8000);
+      onMain(
+          () -> {
+            assertSame("Portrait completion keeps the same native page", repeating, current());
+            assertSame(decoder, current().exo);
+            assertEquals(prepares, current().prepareCount);
+            assertEquals(index, order().current());
+            assertEquals(navigation, order().mode());
+            assertEquals(
+                "Natural completion never consumes manual navigation history",
+                before,
+                historyFingerprint());
+            assertSame("The next video remains warm until explicitly chosen", incoming, next());
+            assertEquals(candidate, next().index);
+            assertSame(prepared, next().exo);
+            assertEquals(incomingPrepares, next().prepareCount);
+            invoke("setPlaying", new Class<?>[] {boolean.class}, false);
+            return null;
+          });
+      swipeUp();
+      await(
+          () ->
+              onMain(
+                  () ->
+                      current() == incoming
+                          && incoming.exo.isPlaying()
+                          && !(Boolean) read("pageTransitioning")),
+          8000);
+      onMain(
+          () -> {
+            assertSame(
+                "An explicit swipe promotes the already rendered native page", incoming, current());
+            assertSame(
+                "An explicit swipe never replaces the warmed decoder", prepared, current().exo);
+            assertEquals(incomingPrepares, current().prepareCount);
+            assertEquals(generation, current().generation);
+            assertEquals(candidate, order().current());
+            assertEquals(navigation, order().mode());
+            assertEquals(Player.REPEAT_MODE_ONE, current().exo.getRepeatMode());
+            assertEquals(PlaybackOrder.SINGLE, order().fullScreenMode());
+            return null;
+          });
+      await(() -> onMain(() -> pagePosition(incoming) > 120), 5000);
+      assertOnlyCurrentAudible();
+      assertThreeAttachedRoots();
+    }
   }
 
   @Test
@@ -473,6 +464,8 @@ public final class PortraitPreloadTest {
           assertSame(decoder, center.exo);
           assertFalse(center.exo.getPlayWhenReady());
           assertFalse((Boolean) read("portraitMode"));
+          assertEquals(PlaybackOrder.SINGLE, order().mode());
+          assertEquals(Player.REPEAT_MODE_ONE, center.exo.getRepeatMode());
           return null;
         });
     assertTrue(
@@ -528,7 +521,8 @@ public final class PortraitPreloadTest {
           assertEquals(prepares, current().prepareCount);
           assertEquals(generation, current().generation);
           assertEquals(index, order().current());
-          assertEquals(PlaybackOrder.SINGLE, order().mode());
+          assertEquals(PlaybackOrder.SEQUENTIAL, order().mode());
+          assertEquals(PlaybackOrder.SINGLE, order().fullScreenMode());
           return null;
         });
     await(() -> onMain(() -> pagePosition(incoming) > 250), 8000);

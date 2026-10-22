@@ -58,6 +58,8 @@ public final class PortraitPlaybackTest {
   private ArrayList<VideoItem> fixtures;
   private long downTime;
   private int savedMode;
+  private int savedPortraitNavigation;
+  private boolean hadPortraitNavigation;
 
   @Before
   public void launch() throws Exception {
@@ -71,10 +73,17 @@ public final class PortraitPlaybackTest {
                 ? Manifest.permission.READ_MEDIA_VIDEO
                 : Manifest.permission.READ_EXTERNAL_STORAGE);
     savedMode = context.getSharedPreferences("player", 0).getInt("playback_mode", 0);
+    hadPortraitNavigation =
+        context.getSharedPreferences("player", 0).contains("portrait_navigation_mode");
+    savedPortraitNavigation =
+        context
+            .getSharedPreferences("player", 0)
+            .getInt("portrait_navigation_mode", PlaybackOrder.SEQUENTIAL);
     context
         .getSharedPreferences("player", 0)
         .edit()
         .putInt("playback_mode", PlaybackOrder.SINGLE)
+        .putInt("portrait_navigation_mode", PlaybackOrder.SEQUENTIAL)
         .commit();
     fixtures = new ArrayList<>();
     for (String name :
@@ -93,8 +102,14 @@ public final class PortraitPlaybackTest {
           });
     }
     rule.finishActivity();
-    if (context != null)
-      context.getSharedPreferences("player", 0).edit().putInt("playback_mode", savedMode).commit();
+    if (context != null) {
+      android.content.SharedPreferences.Editor preferences =
+          context.getSharedPreferences("player", 0).edit().putInt("playback_mode", savedMode);
+      if (hadPortraitNavigation)
+        preferences.putInt("portrait_navigation_mode", savedPortraitNavigation);
+      else preferences.remove("portrait_navigation_mode");
+      preferences.commit();
+    }
   }
 
   @Test
@@ -135,6 +150,7 @@ public final class PortraitPlaybackTest {
           return null;
         });
     await(() -> portrait() && isPortraitConfiguration(), 5000);
+    cycleTo(PlaybackOrder.SHUFFLE);
     assertSessionPreserved(pipeline, originalOrder, 1400, 1.5f, PlaybackOrder.SHUFFLE);
     onMain(
         () -> {
@@ -198,23 +214,28 @@ public final class PortraitPlaybackTest {
             assertFalse(compatibilityPlayer.isPlaying());
             assertFalse((Boolean) read("shouldPlay"));
             assertEquals(1.5f, compatibilityPlayer.getRate(), .01f);
-            assertEquals(PlaybackOrder.SINGLE, originalOrder.mode());
+            assertEquals(
+                portrait ? PlaybackOrder.SEQUENTIAL : PlaybackOrder.SINGLE, originalOrder.mode());
+            assertEquals(PlaybackOrder.SINGLE, originalOrder.fullScreenMode());
             assertEquals(0, originalOrder.current());
             return null;
           });
     }
     page(true, 1);
     assertEquals(
-        "Manual portrait paging overrides single-repeat without changing the policy",
-        PlaybackOrder.SINGLE,
+        "Portrait manual paging uses its sequential navigation policy",
+        PlaybackOrder.SEQUENTIAL,
         onMain(() -> ((PlaybackOrder) read("order")).mode()).intValue());
+    assertEquals(
+        PlaybackOrder.SINGLE,
+        onMain(() -> ((PlaybackOrder) read("order")).fullScreenMode()).intValue());
     assertEquals(1.5f, onMain(() -> (Float) read("speed")), 0);
   }
 
   @Test
   public void sequentialSwipesUseCatalogOrderAndKeepBothAspectRatiosInPortrait() throws Exception {
-    cycleTo(PlaybackOrder.SEQUENTIAL);
     setPortrait(true);
+    cycleTo(PlaybackOrder.SEQUENTIAL);
     page(false, 3); // Previous wraps from the first landscape video to the last portrait video.
     page(true, 0);
     page(true, 1);
@@ -228,6 +249,7 @@ public final class PortraitPlaybackTest {
       throws Exception {
     cycleTo(PlaybackOrder.SHUFFLE);
     setPortrait(true);
+    cycleTo(PlaybackOrder.SHUFFLE);
     PlaybackOrder originalOrder = onMain(() -> (PlaybackOrder) read("order"));
     swipePage(true);
     await(() -> currentIndex() != 0, 5000);
@@ -277,43 +299,301 @@ public final class PortraitPlaybackTest {
     assertSame(pipeline, onMain(() -> (ExoPlayer) read("exo")));
     page(true, 1);
     assertEquals(
-        PlaybackOrder.SINGLE, onMain(() -> ((PlaybackOrder) read("order")).mode()).intValue());
+        PlaybackOrder.SEQUENTIAL, onMain(() -> ((PlaybackOrder) read("order")).mode()).intValue());
+    assertEquals(
+        PlaybackOrder.SINGLE,
+        onMain(() -> ((PlaybackOrder) read("order")).fullScreenMode()).intValue());
     assertEquals(
         Player.REPEAT_MODE_ONE, onMain(() -> ((ExoPlayer) read("exo")).getRepeatMode()).intValue());
   }
 
   @Test
-  public void sequentialAndShuffleNaturalEndsContinueInPortrait() throws Exception {
-    cycleTo(PlaybackOrder.SEQUENTIAL);
+  public void sequentialAndShufflePortraitOrdersBothRepeatNaturallyWithoutConsumingTheNextVideo()
+      throws Exception {
+    setPortrait(true);
+    ExoPlayer source = onMain(() -> (ExoPlayer) read("exo"));
+    AtomicInteger loops = new AtomicInteger();
+    onMain(
+        () -> {
+          source.addListener(
+              new Player.Listener() {
+                @Override
+                public void onMediaItemTransition(MediaItem item, int reason) {
+                  if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT) loops.incrementAndGet();
+                }
+              });
+          return null;
+        });
+    for (int navigation : new int[] {PlaybackOrder.SEQUENTIAL, PlaybackOrder.SHUFFLE}) {
+      cycleTo(navigation);
+      int before = loops.get();
+      int candidate = onMain(() -> ((PlaybackOrder) read("order")).peekNext());
+      onMain(
+          () -> {
+            assertEquals(Player.REPEAT_MODE_ONE, source.getRepeatMode());
+            source.seekTo(Math.max(0, source.getDuration() - 550));
+            invoke("setPlaying", new Class<?>[] {boolean.class}, true);
+            return null;
+          });
+      await(() -> loops.get() > before, 8000);
+      pauseAndAwaitReady();
+      onMain(
+          () -> {
+            PlaybackOrder order = (PlaybackOrder) read("order");
+            assertSame("Natural portrait repeat keeps the original decoder", source, read("exo"));
+            assertEquals(0, order.current());
+            assertEquals(navigation, order.mode());
+            assertEquals(
+                "Natural repeat must not consume the warmed next candidate",
+                candidate,
+                order.peekNext());
+            assertEquals(
+                "Portrait navigation never overwrites the full-screen preference",
+                PlaybackOrder.SINGLE,
+                order.fullScreenMode());
+            return null;
+          });
+      assertTrue(portrait());
+    }
+  }
+
+  @Test
+  public void returningToFullscreenRestoresSequentialAndShuffleNaturalAdvance() throws Exception {
+    for (int fullscreen : new int[] {PlaybackOrder.SEQUENTIAL, PlaybackOrder.SHUFFLE}) {
+      cycleTo(fullscreen);
+      ExoPlayer source = onMain(() -> (ExoPlayer) read("exo"));
+      setPortrait(true);
+      cycleTo(
+          fullscreen == PlaybackOrder.SEQUENTIAL
+              ? PlaybackOrder.SHUFFLE
+              : PlaybackOrder.SEQUENTIAL);
+      onMain(
+          () -> {
+            assertEquals(Player.REPEAT_MODE_ONE, source.getRepeatMode());
+            assertEquals(fullscreen, ((PlaybackOrder) read("order")).fullScreenMode());
+            return null;
+          });
+      setPortrait(false);
+      int expected = onMain(() -> ((PlaybackOrder) read("order")).peekNext());
+      onMain(
+          () -> {
+            assertSame(source, read("exo"));
+            assertEquals(fullscreen, ((PlaybackOrder) read("order")).mode());
+            assertEquals(Player.REPEAT_MODE_OFF, source.getRepeatMode());
+            source.seekTo(Math.max(0, source.getDuration() - 550));
+            invoke("setPlaying", new Class<?>[] {boolean.class}, true);
+            return null;
+          });
+      await(() -> currentIndex() == expected, 10000);
+      pauseAndAwaitReady();
+      assertFalse(portrait());
+      assertEquals(fullscreen, onMain(() -> ((PlaybackOrder) read("order")).mode()).intValue());
+    }
+  }
+
+  @Test
+  public void compatibilityEngineRepeatsTheSameVideoUnderBothPortraitNavigationOrders()
+      throws Exception {
     setPortrait(true);
     onMain(
         () -> {
-          ExoPlayer player = (ExoPlayer) read("exo");
-          player.seekTo(Math.max(0, player.getDuration() - 550));
+          invoke("startVlc", new Class<?>[] {long.class}, 0L);
+          return null;
+        });
+    await(
+        () ->
+            onMain(
+                () -> {
+                  VideoPage page = (VideoPage) read("currentPage");
+                  return page.firstFrameReady
+                      && page.vlc != null
+                      && page.vlc.getLength() > 0
+                      && !page.vlc.isPlaying();
+                }),
+        20000);
+    MediaPlayer source = onMain(() -> (MediaPlayer) read("vlc"));
+    VideoPage originalPage = onMain(() -> (VideoPage) read("currentPage"));
+    int prepares = onMain(() -> originalPage.prepareCount);
+    for (int navigation : new int[] {PlaybackOrder.SEQUENTIAL, PlaybackOrder.SHUFFLE}) {
+      cycleTo(navigation);
+      int candidate = onMain(() -> ((PlaybackOrder) read("order")).peekNext());
+      long length = onMain(source::getLength);
+      onMain(
+          () -> {
+            assertSame(source, read("vlc"));
+            invoke("seekTo", new Class<?>[] {long.class}, Math.max(0, length - 1200));
+            invoke("setPlaying", new Class<?>[] {boolean.class}, true);
+            return null;
+          });
+      await(() -> onMain(() -> source.getTime() >= length - 1500), 8000);
+      await(() -> onMain(() -> source.getTime() >= 0 && source.getTime() < 1000), 10000);
+      await(() -> onMain(() -> source.getTime() >= 450 && source.getTime() < 2000), 5000);
+      onMain(
+          () -> {
+            PlaybackOrder order = (PlaybackOrder) read("order");
+            assertSame(
+                "A native VLC portrait loop keeps its existing decoder", source, read("vlc"));
+            assertSame(originalPage, read("currentPage"));
+            assertEquals(
+                "Native repeat never reopens the media", prepares, originalPage.prepareCount);
+            assertEquals(0, order.current());
+            assertEquals(navigation, order.mode());
+            assertEquals(candidate, order.peekNext());
+            assertEquals(PlaybackOrder.SINGLE, order.fullScreenMode());
+            return null;
+          });
+      pauseAndAwaitReady();
+    }
+  }
+
+  @Test
+  public void compatibilityFullscreenPreservesItsDecoderAndDistinguishesManualRewindFromNaturalEnd()
+      throws Exception {
+    cycleTo(PlaybackOrder.SEQUENTIAL);
+    onMain(
+        () -> {
+          invoke("startVlc", new Class<?>[] {long.class}, 0L);
+          return null;
+        });
+    await(
+        () ->
+            onMain(
+                () -> {
+                  VideoPage page = (VideoPage) read("currentPage");
+                  return page.firstFrameReady
+                      && page.vlc != null
+                      && page.vlc.getLength() > 0
+                      && !page.vlc.isPlaying();
+                }),
+        20000);
+    MediaPlayer source = onMain(() -> (MediaPlayer) read("vlc"));
+    VideoPage originalPage = onMain(() -> (VideoPage) read("currentPage"));
+    int prepares = onMain(() -> originalPage.prepareCount);
+    long generation = onMain(() -> originalPage.generation);
+    setPortrait(true);
+    setPortrait(false);
+    long length = onMain(source::getLength);
+    onMain(
+        () -> {
+          assertSame("Changing the completion policy does not replace VLC", source, read("vlc"));
+          assertSame(originalPage, read("currentPage"));
+          assertEquals(prepares, originalPage.prepareCount);
+          assertEquals(generation, originalPage.generation);
+          assertEquals(PlaybackOrder.SEQUENTIAL, ((PlaybackOrder) read("order")).mode());
+          assertFalse((Boolean) read("shouldPlay"));
+          invoke("seekTo", new Class<?>[] {long.class}, Math.max(0, length - 1200));
           invoke("setPlaying", new Class<?>[] {boolean.class}, true);
+          return null;
+        });
+    await(() -> onMain(() -> source.getTime() >= length - 1500), 8000);
+    await(() -> onMain(() -> source.getTime() >= length - 1000), 8000);
+    onMain(
+        () -> {
+          assertTrue("The rewind happens during real near-end playback", source.isPlaying());
+          invoke("seekTo", new Class<?>[] {long.class}, 200L);
+          return null;
+        });
+    await(() -> onMain(() -> source.getTime() >= 0 && source.getTime() < 800), 5000);
+    onMain(
+        () -> {
+          invoke("setPlaying", new Class<?>[] {boolean.class}, true);
+          return null;
+        });
+    await(
+        () ->
+            currentIndex() != 0 || onMain(() -> source.getTime() >= 900 && source.getTime() < 2500),
+        6000);
+    onMain(
+        () -> {
+          assertEquals(
+              "A deliberate rewind must not be mistaken for native end-of-file",
+              0,
+              currentIndexOnMain());
+          assertSame(source, read("vlc"));
+          assertEquals(prepares, originalPage.prepareCount);
+          invoke("seekTo", new Class<?>[] {long.class}, Math.max(0, length - 1200));
           return null;
         });
     await(() -> currentIndex() == 1, 10000);
     pauseAndAwaitReady();
-    assertTrue(portrait());
-    assertTrue(isPortraitConfiguration());
+    assertFalse(portrait());
     assertEquals(
         PlaybackOrder.SEQUENTIAL, onMain(() -> ((PlaybackOrder) read("order")).mode()).intValue());
-    cycleTo(PlaybackOrder.SHUFFLE);
-    onMain(
-        () -> {
-          ExoPlayer player = (ExoPlayer) read("exo");
-          assertNotNull("Generated MKV remains on the Exo pipeline", player);
-          player.seekTo(Math.max(0, player.getDuration() - 550));
-          invoke("setPlaying", new Class<?>[] {boolean.class}, true);
-          return null;
-        });
-    await(() -> currentIndex() != 1, 10000);
-    pauseAndAwaitReady();
-    assertTrue(portrait());
-    assertTrue(isPortraitConfiguration());
-    assertEquals(
-        PlaybackOrder.SHUFFLE, onMain(() -> ((PlaybackOrder) read("order")).mode()).intValue());
+  }
+
+  @Test
+  public void heldHorizontalSeekDefersFullscreenCompletionAndHonorsPlayingAndPausedIntent()
+      throws Exception {
+    for (int mode : new int[] {PlaybackOrder.SEQUENTIAL, PlaybackOrder.SHUFFLE}) {
+      cycleTo(mode);
+      ExoPlayer source = onMain(() -> (ExoPlayer) read("exo"));
+      int candidate = onMain(() -> ((PlaybackOrder) read("order")).peekNext());
+      onMain(
+          () -> {
+            invoke("seekTo", new Class<?>[] {long.class}, Math.max(0, source.getDuration() - 650));
+            invoke("setPlaying", new Class<?>[] {boolean.class}, true);
+            return null;
+          });
+      View surface = touch();
+      float width = surface.getWidth(), y = surface.getHeight() * .45f;
+      send(MotionEvent.ACTION_DOWN, width * .8f, y);
+      send(MotionEvent.ACTION_MOVE, width * .3f, y);
+      long selected = onMain(() -> (Long) read("gestureTarget"));
+      onMain(
+          () -> {
+            assertTrue((Boolean) read("gestureSeeking"));
+            assertTrue(
+                "The chosen rewind is well before the end", selected < source.getDuration() - 1500);
+            return null;
+          });
+      await(
+          () ->
+              onMain(
+                  () ->
+                      currentIndexOnMain() != 0 || source.getPlaybackState() == Player.STATE_ENDED),
+          8000);
+      SystemClock.sleep(500);
+      onMain(
+          () -> {
+            assertEquals("Natural completion waits while a seek is held", 0, currentIndexOnMain());
+            assertSame(source, read("exo"));
+            assertEquals(Player.STATE_ENDED, source.getPlaybackState());
+            return null;
+          });
+      send(MotionEvent.ACTION_UP, width * .3f, y);
+      await(() -> onMain(() -> currentIndexOnMain() != 0 || source.isPlaying()), 8000);
+      SystemClock.sleep(600);
+      onMain(
+          () -> {
+            assertEquals(
+                "A stale EOF callback must not override the committed rewind",
+                0,
+                currentIndexOnMain());
+            assertSame(source, read("exo"));
+            assertTrue(source.isPlaying());
+            assertTrue(source.getCurrentPosition() >= selected);
+            assertTrue(source.getCurrentPosition() < selected + 2500);
+            assertEquals(candidate, ((PlaybackOrder) read("order")).peekNext());
+            invoke("setPlaying", new Class<?>[] {boolean.class}, false);
+            invoke("seekTo", new Class<?>[] {long.class}, 1500L);
+            return null;
+          });
+      awaitReady();
+      send(MotionEvent.ACTION_DOWN, width * .4f, y);
+      send(MotionEvent.ACTION_MOVE, width * .5f, y);
+      long pausedTarget = onMain(() -> (Long) read("gestureTarget"));
+      send(MotionEvent.ACTION_UP, width * .5f, y);
+      awaitReady();
+      SystemClock.sleep(500);
+      onMain(
+          () -> {
+            assertEquals(0, currentIndexOnMain());
+            assertSame(source, read("exo"));
+            assertFalse("A paused manual seek stays paused", source.getPlayWhenReady());
+            assertEquals(pausedTarget, source.getCurrentPosition(), 120);
+            return null;
+          });
+    }
   }
 
   @Test
@@ -477,21 +757,20 @@ public final class PortraitPlaybackTest {
   }
 
   @Test
-  public void portraitModeButtonCyclesAllPlaybackPoliciesWithoutReplacingDecoder()
+  public void portraitModeButtonSwitchesOnlyManualOrderAndAlwaysKeepsNativeRepeat()
       throws Exception {
     setPortrait(true);
     ExoPlayer pipeline = onMain(() -> (ExoPlayer) read("exo"));
     for (int mode :
-        new int[] {PlaybackOrder.SHUFFLE, PlaybackOrder.SEQUENTIAL, PlaybackOrder.SINGLE}) {
+        new int[] {PlaybackOrder.SHUFFLE, PlaybackOrder.SEQUENTIAL, PlaybackOrder.SHUFFLE}) {
       onMain(
           () -> {
             ImageButton button = (ImageButton) read("modeButton");
             assertTrue(button.isShown());
             assertTrue(button.performClick());
             assertEquals(mode, ((PlaybackOrder) read("order")).mode());
-            assertEquals(
-                mode == PlaybackOrder.SINGLE ? Player.REPEAT_MODE_ONE : Player.REPEAT_MODE_OFF,
-                pipeline.getRepeatMode());
+            assertEquals(Player.REPEAT_MODE_ONE, pipeline.getRepeatMode());
+            assertEquals(PlaybackOrder.SINGLE, ((PlaybackOrder) read("order")).fullScreenMode());
             return null;
           });
       assertSame(pipeline, onMain(() -> (ExoPlayer) read("exo")));
@@ -605,26 +884,29 @@ public final class PortraitPlaybackTest {
         });
     await(() -> portrait() == portrait && (!portrait || isPortraitConfiguration()), 5000);
     await(() -> !onMain(() -> (Boolean) read("pageTransitioning")), 5000);
-    if (portrait)
-      await(
-          () ->
-              onMain(
-                  () -> {
-                    PlaybackOrder currentOrder = (PlaybackOrder) read("order");
-                    VideoPage nextPage = (VideoPage) read("nextPage");
-                    VideoPage previousPage = (VideoPage) read("previousPage");
-                    return nextPage.firstFrameReady
-                        && (nextPage.exo == null
-                            || nextPage.exo.getPlaybackState() == Player.STATE_READY)
-                        && (!currentOrder.hasPrevious()
-                            || previousPage.firstFrameReady
-                                && (previousPage.exo == null
-                                    || previousPage.exo.getPlaybackState() == Player.STATE_READY));
-                  }),
-          20000);
+    if (portrait) awaitPortraitNeighbors();
     // Give handled configuration changes and the surface layout a frame to settle.
     instrumentation.waitForIdleSync();
     SystemClock.sleep(200);
+  }
+
+  private void awaitPortraitNeighbors() throws Exception {
+    await(
+        () ->
+            onMain(
+                () -> {
+                  PlaybackOrder currentOrder = (PlaybackOrder) read("order");
+                  VideoPage nextPage = (VideoPage) read("nextPage");
+                  VideoPage previousPage = (VideoPage) read("previousPage");
+                  return nextPage.firstFrameReady
+                      && (nextPage.exo == null
+                          || nextPage.exo.getPlaybackState() == Player.STATE_READY)
+                      && (!currentOrder.hasPrevious()
+                          || previousPage.firstFrameReady
+                              && (previousPage.exo == null
+                                  || previousPage.exo.getPlaybackState() == Player.STATE_READY));
+                }),
+        20000);
   }
 
   private void cycleTo(int mode) throws Exception {
@@ -636,6 +918,7 @@ public final class PortraitPlaybackTest {
           assertEquals(mode, ((PlaybackOrder) read("order")).mode());
           return null;
         });
+    if (portrait()) awaitPortraitNeighbors();
   }
 
   private boolean portrait() throws Exception {
@@ -658,6 +941,62 @@ public final class PortraitPlaybackTest {
   }
 
   private void page(boolean up, int expected) throws Exception {
+    long readyDeadline = SystemClock.elapsedRealtime() + 20000;
+    boolean prepared = false;
+    while (SystemClock.elapsedRealtime() < readyDeadline) {
+      prepared =
+          onMain(
+              () -> {
+                VideoPage target = (VideoPage) read(up ? "nextPage" : "previousPage");
+                if (target == null) return false;
+                assertFalse(
+                    "The requested fixture failed to preload: index=" + target.index,
+                    target.failed);
+                return target.index == expected
+                    && target.firstFrameReady
+                    && (target.exo != null && target.exo.getPlaybackState() == Player.STATE_READY
+                        || target.vlc != null
+                            && !target.buffering
+                            && target.pendingSeek == 0
+                            && target.vlc.getLength() > 0
+                            && !target.vlc.isPlaying());
+              });
+      if (prepared) break;
+      SystemClock.sleep(40);
+    }
+    if (!prepared) {
+      String state =
+          onMain(
+              () -> {
+                VideoPage target = (VideoPage) read(up ? "nextPage" : "previousPage");
+                if (target == null) return "target=null";
+                return "current="
+                    + currentIndexOnMain()
+                    + ", target="
+                    + target.index
+                    + ", firstFrame="
+                    + target.firstFrameReady
+                    + ", failed="
+                    + target.failed
+                    + ", buffering="
+                    + target.buffering
+                    + ", pendingSeek="
+                    + target.pendingSeek
+                    + ", exoState="
+                    + (target.exo == null ? "none" : target.exo.getPlaybackState())
+                    + ", vlcLength="
+                    + (target.vlc == null ? "none" : target.vlc.getLength())
+                    + ", vlcPlaying="
+                    + (target.vlc != null && target.vlc.isPlaying());
+              });
+      fail(
+          "The "
+              + (up ? "next" : "previous")
+              + " page "
+              + expected
+              + " did not finish preparing before the swipe: "
+              + state);
+    }
     swipePage(up);
     await(() -> currentIndex() == expected, 5000);
     pauseAndAwaitReady();

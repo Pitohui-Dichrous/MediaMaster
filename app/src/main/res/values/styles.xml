@@ -1,26 +1,71 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="AppThemeBase" parent="android:style/Theme.Material.NoActionBar">
+    <style name="AppThemeBase" parent="android:style/Theme.Material.Light.NoActionBar">
         <item name="android:fontFamily">sans</item>
-        <item name="android:windowLightStatusBar">false</item>
-        <item name="android:statusBarColor">#101416</item>
-        <item name="android:navigationBarColor">#101416</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:statusBarColor">@color/mm_background</item>
+        <item name="android:navigationBarColor">@color/mm_background</item>
         <item name="android:windowActionModeOverlay">true</item>
-        <item name="android:colorAccent">#60E0C0</item>
-        <item name="android:windowBackground">#101416</item>
+        <item name="android:colorAccent">@color/mm_accent</item>
+        <item name="android:colorControlNormal">@color/mm_text</item>
+        <item name="android:colorControlHighlight">#1F145F39</item>
+        <item name="android:colorBackground">@color/mm_background</item>
+        <item name="android:textColorPrimary">@color/mm_text</item>
+        <item name="android:textColorSecondary">@color/mm_muted</item>
+        <item name="android:windowBackground">@color/mm_background</item>
         <item name="android:alertDialogTheme">@style/DialogTheme</item>
     </style>
     <style name="AppTheme" parent="AppThemeBase" />
-    <style name="DialogTheme" parent="android:style/Theme.Material.Dialog.Alert">
-        <item name="android:colorAccent">#60E0C0</item>
-        <item name="android:colorBackgroundFloating">#1A2023</item>
+    <style name="AppThemeDarkBase" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:statusBarColor">@color/mm_dark_background</item>
+        <item name="android:navigationBarColor">@color/mm_dark_background</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:colorAccent">@color/mm_accent</item>
+        <item name="android:colorControlNormal">@color/mm_dark_text</item>
+        <item name="android:colorControlActivated">@color/mm_dark_text</item>
+        <item name="android:colorControlHighlight">#24FFFFFF</item>
+        <item name="android:colorBackground">@color/mm_dark_background</item>
+        <item name="android:textColorPrimary">@color/mm_dark_text</item>
+        <item name="android:textColorSecondary">@color/mm_dark_muted</item>
+        <item name="android:windowBackground">@color/mm_dark_background</item>
+        <item name="android:alertDialogTheme">@style/DialogThemeDark</item>
+    </style>
+    <style name="AppThemeDark" parent="AppThemeDarkBase" />
+    <style name="DialogTheme" parent="android:style/Theme.Material.Light.Dialog.Alert">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">@color/mm_accent</item>
+        <item name="android:colorControlNormal">@color/mm_muted</item>
+        <item name="android:colorControlHighlight">#1F145F39</item>
+        <item name="android:colorBackgroundFloating">#FFFFFF</item>
+        <item name="android:textColorPrimary">@color/mm_text</item>
+        <item name="android:textColorSecondary">@color/mm_muted</item>
         <item name="android:windowBackground">@drawable/dialog_background</item>
     </style>
-    <style name="PlayerTheme" parent="AppTheme">
+    <style name="PlayerDialogTheme" parent="android:style/Theme.Material.Dialog.Alert">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">@color/mm_player_text</item>
+        <item name="android:colorControlNormal">@color/mm_player_muted</item>
+        <item name="android:colorControlHighlight">#26FFFFFF</item>
+        <item name="android:colorBackgroundFloating">@color/mm_player_surface</item>
+        <item name="android:textColorPrimary">@color/mm_player_text</item>
+        <item name="android:textColorSecondary">@color/mm_player_muted</item>
+        <item name="android:windowBackground">@drawable/dialog_background</item>
+    </style>
+    <style name="DialogThemeDark" parent="PlayerDialogTheme" />
+    <style name="PlayerThemeBase" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">@color/mm_accent</item>
+        <item name="android:textColorPrimary">@color/mm_player_text</item>
+        <item name="android:textColorSecondary">@color/mm_player_muted</item>
+        <item name="android:alertDialogTheme">@style/PlayerDialogTheme</item>
+        <item name="android:windowLightStatusBar">false</item>
         <item name="android:windowFullscreen">true</item>
         <item name="android:windowBackground">#000000</item>
         <item name="android:navigationBarColor">#000000</item>
         <item name="android:statusBarColor">#000000</item>
         <item name="android:windowNoTitle">true</item>
     </style>
+    <style name="PlayerTheme" parent="PlayerThemeBase" />
 </resources>

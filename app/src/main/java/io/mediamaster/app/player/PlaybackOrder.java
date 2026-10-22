@@ -4,7 +4,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Random;
 
-/** A shuffled deck visits every other item before any repeats, and retains real history. */
+/** Manual navigation has a stable shuffle deck; portrait repeat is independent of that order. */
 public final class PlaybackOrder {
   public static final int SEQUENTIAL = 0;
   public static final int SINGLE = 1;
@@ -16,6 +16,8 @@ public final class PlaybackOrder {
   private int cursor;
   private int current;
   private int mode;
+  private int portraitNavigationMode;
+  private boolean portraitMode;
 
   public PlaybackOrder(int count, int initial, int mode) {
     this(count, initial, mode, new Random());
@@ -27,6 +29,7 @@ public final class PlaybackOrder {
     this.random = random;
     current = Math.max(0, Math.min(count - 1, initial));
     this.mode = mode;
+    portraitNavigationMode = mode == SHUFFLE ? SHUFFLE : SEQUENTIAL;
     history.add(current);
   }
 
@@ -35,11 +38,59 @@ public final class PlaybackOrder {
   }
 
   public int mode() {
+    return portraitMode ? portraitNavigationMode : mode;
+  }
+
+  /** The full-screen preference is unaffected by changes to portrait manual navigation. */
+  public int fullScreenMode() {
     return mode;
   }
 
+  public boolean portraitMode() {
+    return portraitMode;
+  }
+
+  public int portraitNavigationMode() {
+    return portraitNavigationMode;
+  }
+
+  /** Natural completion always loops in portrait, whichever order manual swipes use. */
+  public boolean repeatsCurrent() {
+    return portraitMode || mode == SINGLE;
+  }
+
+  public void setPortraitMode(boolean portraitMode) {
+    boolean wasShuffle = isShuffle();
+    this.portraitMode = portraitMode;
+    if (wasShuffle != isShuffle()) resetNavigationHistory();
+  }
+
+  /**
+   * Restores a portrait choice without entering portrait or changing the full-screen preference.
+   */
+  public void setPortraitNavigationMode(int mode) {
+    boolean wasShuffle = isShuffle();
+    // SINGLE is a full-screen completion policy, not a separate portrait swipe order.
+    portraitNavigationMode = mode == SHUFFLE ? SHUFFLE : SEQUENTIAL;
+    if (wasShuffle != isShuffle()) resetNavigationHistory();
+  }
+
+  /** Updates the mode for the active presentation only. */
   public void setMode(int mode) {
+    if (portraitMode) {
+      setPortraitNavigationMode(mode);
+      return;
+    }
+    boolean wasShuffle = isShuffle();
     this.mode = Math.max(SEQUENTIAL, Math.min(SHUFFLE, mode));
+    if (wasShuffle != isShuffle()) resetNavigationHistory();
+  }
+
+  private boolean isShuffle() {
+    return mode() == SHUFFLE;
+  }
+
+  private void resetNavigationHistory() {
     deck.clear();
     history.clear();
     history.add(current);
@@ -52,7 +103,7 @@ public final class PlaybackOrder {
    * Single-repeat affects natural completion only, so it still has a manual next candidate.
    */
   public int peekNext() {
-    if (mode != SHUFFLE) return (current + 1) % count;
+    if (!isShuffle()) return (current + 1) % count;
     if (cursor + 1 < history.size()) return history.get(cursor + 1);
     prepareShuffleDeck();
     return deck.isEmpty() ? current : deck.get(deck.size() - 1);
@@ -63,13 +114,13 @@ public final class PlaybackOrder {
    * shuffle history this is the current video; hasPrevious() distinguishes that boundary.
    */
   public int peekPrevious() {
-    if (mode == SHUFFLE) return cursor > 0 ? history.get(cursor - 1) : current;
+    if (isShuffle()) return cursor > 0 ? history.get(cursor - 1) : current;
     return (current - 1 + count) % count;
   }
 
   public int next(boolean automatic) {
-    if (automatic && mode == SINGLE) return current;
-    if (mode != SHUFFLE) {
+    if (automatic && repeatsCurrent()) return current;
+    if (!isShuffle()) {
       current = (current + 1) % count;
       return current;
     }
@@ -93,13 +144,13 @@ public final class PlaybackOrder {
   }
 
   public int previous() {
-    if (mode == SHUFFLE) {
+    if (isShuffle()) {
       if (cursor > 0) current = history.get(--cursor);
     } else current = (current - 1 + count) % count;
     return current;
   }
 
   public boolean hasPrevious() {
-    return mode != SHUFFLE || cursor > 0;
+    return !isShuffle() || cursor > 0;
   }
 }

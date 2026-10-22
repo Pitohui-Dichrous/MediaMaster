@@ -1,1 +1,14 @@
-<resources><color name="icon_background">#101C1A</color></resources>
+<resources>
+    <color name="icon_background">#101C1A</color>
+    <color name="mm_background">#F7F8F5</color>
+    <color name="mm_surface">#EDF0EB</color>
+    <color name="mm_text">#272637</color>
+    <color name="mm_muted">#62666B</color>
+    <color name="mm_dark_background">#201D2C</color>
+    <color name="mm_dark_text">#F5F4F8</color>
+    <color name="mm_dark_muted">#C2BFCC</color>
+    <color name="mm_accent">#145F39</color>
+    <color name="mm_player_surface">#201D2C</color>
+    <color name="mm_player_text">#FFFFFF</color>
+    <color name="mm_player_muted">#D9D7E3</color>
+</resources>

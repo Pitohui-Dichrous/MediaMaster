@@ -9,15 +9,54 @@ import android.view.View;
 import android.widget.*;
 import java.util.Locale;
 
-final class Ui {
-  static final int BG = Color.rgb(16, 20, 22),
-      SURFACE = Color.rgb(26, 32, 35),
-      BORDER = Color.rgb(47, 57, 61),
-      TEXT = Color.rgb(241, 246, 245),
-      MUTED = Color.rgb(165, 181, 182),
-      ACCENT = Color.rgb(96, 224, 192),
-      INK = Color.rgb(14, 46, 38),
-      RED = Color.rgb(255, 151, 155);
+public final class Ui {
+  public static int BG = 0xfff7f8f5,
+      SURFACE = 0xffedf0eb,
+      BORDER = 0xffdce1da,
+      TEXT = 0xff272637,
+      MUTED = 0xff62666b,
+      SOFT_ACCENT = 0xffe8f0e9,
+      INK = TEXT,
+      CONTROL = 0xff145f39;
+  public static final int ACCENT = 0xff145f39,
+      ON_ACCENT = Color.WHITE,
+      PURPLE = 0xff272637,
+      DEEP_PURPLE = 0xff201d2c,
+      RED = 0xffb3261e;
+  private static boolean dark;
+
+  public static boolean isDark(Context context) {
+    return context
+        .getSharedPreferences("appearance", Context.MODE_PRIVATE)
+        .getBoolean("dark", false);
+  }
+
+  public static void setDark(Context context, boolean enabled) {
+    context
+        .getSharedPreferences("appearance", Context.MODE_PRIVATE)
+        .edit()
+        .putBoolean("dark", enabled)
+        .apply();
+  }
+
+  /**
+   * MainActivity recreates its views when appearance changes; playback accent tokens stay fixed.
+   */
+  public static void configure(Context context) {
+    dark = isDark(context);
+    BG = dark ? DEEP_PURPLE : 0xfff7f8f5;
+    SURFACE = dark ? PURPLE : 0xffedf0eb;
+    BORDER = dark ? 0xff464352 : 0xffdce1da;
+    TEXT = dark ? 0xfff5f4f8 : PURPLE;
+    MUTED = dark ? 0xffc2bfcc : 0xff62666b;
+    INK = TEXT;
+    SOFT_ACCENT = dark ? 0xff2a3d35 : 0xffe8f0e9;
+    CONTROL = dark ? 0xfff5f4f8 : ACCENT;
+  }
+
+  public static int dialogTheme(Context context) {
+    return isDark(context) ? R.style.DialogThemeDark : R.style.DialogTheme;
+  }
 
   static int dp(Context c, float n) {
     return Math.round(n * c.getResources().getDisplayMetrics().density);
@@ -28,6 +67,7 @@ final class Ui {
     v.setText(value);
     v.setTextSize(size);
     v.setTextColor(color);
+    v.setIncludeFontPadding(false);
     v.setGravity(Gravity.CENTER_VERTICAL);
     return v;
   }
@@ -46,7 +86,7 @@ final class Ui {
   static void ripple(View v, int color, int radius) {
     v.setBackground(
         new RippleDrawable(
-            ColorStateList.valueOf(0x2260e0c0),
+            ColorStateList.valueOf(dark ? 0x24ffffff : 0x1f145f39),
             shape(v.getContext(), color, radius),
             shape(v.getContext(), Color.WHITE, radius)));
     v.setClickable(true);
@@ -57,8 +97,16 @@ final class Ui {
     ImageButton b = new ImageButton(c);
     b.setImageDrawable(new Icon(kind, TEXT));
     b.setContentDescription(label);
+    b.setTooltipText(label);
     b.setPadding(dp(c, 12), dp(c, 12), dp(c, 12), dp(c, 12));
-    ripple(b, SURFACE, 16);
+    ripple(b, Color.TRANSPARENT, 8);
+    b.setImageTintList(
+        new ColorStateList(
+            new int[][] {new int[] {-android.R.attr.state_enabled}, new int[] {}},
+            new int[] {TEXT & 0x00ffffff | 0x66000000, TEXT}));
+    b.setMinimumWidth(dp(c, 48));
+    b.setMinimumHeight(dp(c, 48));
+    b.setElevation(0);
     return b;
   }
 

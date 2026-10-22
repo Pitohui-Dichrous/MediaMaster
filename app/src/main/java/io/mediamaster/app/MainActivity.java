@@ -44,18 +44,25 @@ public class MainActivity extends Activity {
   private boolean scanning, scanAgain, active, destroyed;
   private int sort = 0;
   private String query = "";
+  private Parcelable restoredListState;
   private VideoItem pendingItem;
   private String pendingName;
   private boolean pendingDelete, pendingConsentCompletes, mutationInFlight, pendingWaitConsent;
 
   @Override
   public void onCreate(Bundle state) {
+    Ui.configure(this);
+    setTheme(Ui.isDark(this) ? R.style.AppThemeDark : R.style.AppTheme);
     super.onCreate(state);
     getWindow().setStatusBarColor(Ui.BG);
     getWindow().setNavigationBarColor(Ui.BG);
     repository = new VideoRepository(this);
     thumbnails = new ThumbnailLoader(this);
     sort = getPreferences(0).getInt("sort", 0);
+    if (state != null) {
+      query = state.getString("library_query", "");
+      restoredListState = state.getParcelable("library_scroll");
+    }
     if (state != null && state.getBoolean("pending_consent")) {
       pendingItem = (VideoItem) state.getSerializable("pending_item");
       pendingName = state.getString("pending_name");
@@ -67,6 +74,8 @@ public class MainActivity extends Activity {
     startupRefreshPending = lastAutoScanTaskId != getTaskId();
     if (startupRefreshPending) lastAutoScanTaskId = getTaskId();
     buildUi();
+    search.setText(query);
+    search.setSelection(search.length());
     worker.execute(
         () -> {
           List<VideoItem> cached = repository.loadCache();
@@ -103,123 +112,143 @@ public class MainActivity extends Activity {
     root.setFitsSystemWindows(true);
     setContentView(root);
     libraryHeader = new LibraryHeader(this);
+
     LinearLayout titleRow = row();
     titleRow.setBackgroundColor(Ui.BG);
-    titleRow.setPadding(d(24), d(18), d(24), d(18));
-    LinearLayout brand = column();
-    titleRow.addView(brand, new LinearLayout.LayoutParams(0, -2, 1));
-    TextView wordmark = Ui.text(this, "映序", 30, Ui.TEXT);
-    wordmark.setTypeface(null, Typeface.BOLD);
-    brand.addView(wordmark);
-    TextView english = Ui.text(this, "MEDIAMASTER  /  本地视频", 10, Ui.MUTED);
-    english.setLetterSpacing(.14f);
-    LinearLayout.LayoutParams ep = new LinearLayout.LayoutParams(-1, -2);
-    ep.topMargin = d(4);
-    brand.addView(english, ep);
-    ImageButton folders = Ui.icon(this, "folder", "管理扫描文件夹");
+    titleRow.setPadding(d(16), d(8), d(8), 0);
+    TextView wordmark = Ui.text(this, "映序", 20, Ui.TEXT);
+    wordmark.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+    titleRow.addView(
+        wordmark,
+        new LinearLayout.LayoutParams(0, Math.max(d(48), wordmark.getLineHeight() + d(8)), 1));
+    ImageButton folders = Ui.icon(this, "folder", "扫描文件夹");
     titleRow.addView(folders, new LinearLayout.LayoutParams(d(48), d(48)));
     folders.setOnClickListener(v -> sources());
-    ImageButton settings = Ui.icon(this, "settings", "播放设置与说明");
+    ImageButton settings = Ui.icon(this, "settings", "设置");
     LinearLayout.LayoutParams sep = new LinearLayout.LayoutParams(d(48), d(48));
     sep.leftMargin = d(8);
     titleRow.addView(settings, sep);
     settings.setOnClickListener(v -> settings());
+
     LinearLayout searchSection = column();
     searchSection.setBackgroundColor(Ui.BG);
-    searchSection.setPadding(d(24), d(8), d(24), d(12));
+    searchSection.setPadding(d(16), d(8), d(16), d(8));
     LinearLayout searchBar = row();
-    Ui.surface(searchBar, Ui.SURFACE, 16);
-    LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(-1, d(52));
-    searchSection.addView(searchBar, sp);
+    Ui.surface(searchBar, Ui.SURFACE, 8);
+    searchSection.addView(searchBar, new LinearLayout.LayoutParams(-1, d(48)));
     ImageView glass = new ImageView(this);
     glass.setImageDrawable(new Ui.Icon("search", Ui.MUTED));
-    glass.setPadding(d(14), d(14), d(10), d(14));
-    searchBar.addView(glass, new LinearLayout.LayoutParams(d(48), d(52)));
+    glass.setPadding(d(12), d(12), d(12), d(12));
+    searchBar.addView(glass, new LinearLayout.LayoutParams(d(48), d(48)));
     glass.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
     search = new EditText(this);
-    search.setTextSize(15);
+    search.setTextSize(14);
     search.setTextColor(Ui.TEXT);
     search.setHintTextColor(Ui.MUTED);
-    search.setHint("搜索视频名称");
+    search.setHint("搜索视频");
     search.setContentDescription("按文件名搜索视频");
     search.setSingleLine(true);
     search.setBackgroundColor(android.graphics.Color.TRANSPARENT);
     search.setPadding(0, 0, d(8), 0);
     search.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH);
+    searchBar.getLayoutParams().height = Math.max(d(48), search.getLineHeight() + d(16));
     searchBar.addView(search, new LinearLayout.LayoutParams(0, -1, 1));
+    ImageButton clear = Ui.icon(this, "close", "清空搜索");
+    clear.setVisibility(query.isEmpty() ? View.INVISIBLE : View.VISIBLE);
     search.addTextChangedListener(
         new TextWatcher() {
           public void beforeTextChanged(CharSequence s, int st, int c, int a) {}
 
           public void onTextChanged(CharSequence s, int st, int before, int c) {
             query = s.toString();
+            clear.setVisibility(s.length() == 0 ? View.INVISIBLE : View.VISIBLE);
             filter();
           }
 
           public void afterTextChanged(Editable e) {}
         });
-    ImageButton clear = Ui.icon(this, "close", "清空搜索");
-    clear.setBackgroundColor(android.graphics.Color.TRANSPARENT);
     searchBar.addView(clear, new LinearLayout.LayoutParams(d(48), d(48)));
     clear.setOnClickListener(v -> search.setText(""));
+
     LinearLayout randomSection = column();
     randomSection.setBackgroundColor(Ui.BG);
-    randomSection.setPadding(d(24), d(4), d(24), d(16));
-    LinearLayout random = row();
-    random.setPadding(d(18), d(16), d(18), d(16));
-    Ui.ripple(random, android.graphics.Color.rgb(30, 58, 51), 20);
-    LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(-1, -2);
-    randomSection.addView(random, rp);
-    random.setContentDescription("播放随机视频，自动开启随机连播");
+    randomSection.setPadding(d(16), 0, d(16), d(8));
+    Button random = new Button(this);
+    random.setText("随机播放");
+    random.setTextSize(14);
+    random.setSingleLine(true);
+    random.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+    random.setTextColor(Ui.ON_ACCENT);
+    random.setAllCaps(false);
+    random.setGravity(Gravity.CENTER);
+    random.setPadding(d(16), 0, d(16), 0);
+    random.setMinWidth(0);
+    random.setMinimumWidth(d(128));
+    random.setStateListAnimator(null);
+    random.setElevation(0);
+    Ui.Icon shuffle = new Ui.Icon("shuffle", Ui.ON_ACCENT);
+    shuffle.setBounds(0, 0, d(20), d(20));
+    random.setCompoundDrawables(shuffle, null, null, null);
+    random.setCompoundDrawablePadding(d(8));
+    Ui.ripple(random, Ui.ACCENT, 8);
+    random.setContentDescription("随机播放，开启随机连播");
     random.setOnClickListener(v -> playRandom());
-    LinearLayout randomCopy = column();
-    random.addView(randomCopy, new LinearLayout.LayoutParams(0, -2, 1));
-    TextView randomTitle = Ui.text(this, "播放随机视频", 18, Ui.ACCENT);
-    randomTitle.setTypeface(null, Typeface.BOLD);
-    randomCopy.addView(randomTitle);
-    TextView randomSub = Ui.text(this, "换一个片段，发现一点新鲜。", 12, Ui.TEXT);
-    LinearLayout.LayoutParams rs = new LinearLayout.LayoutParams(-1, -2);
-    rs.topMargin = d(6);
-    randomCopy.addView(randomSub, rs);
-    ImageView shuffle = new ImageView(this);
-    shuffle.setImageDrawable(new Ui.Icon("shuffle", Ui.ACCENT));
-    shuffle.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-    random.addView(shuffle, new LinearLayout.LayoutParams(d(28), d(28)));
+    randomSection.addView(
+        random, new LinearLayout.LayoutParams(-2, Math.max(d(48), random.getLineHeight() + d(16))));
+    // Share the toolbar at ordinary text sizes; larger accessibility text gets its own row.
+    int randomWidth =
+        Math.max(d(128), (int) Math.ceil(random.getPaint().measureText("随机播放")) + d(60));
+    int toolbarWidth = getResources().getDisplayMetrics().widthPixels - d(24);
+    if (wordmark.getPaint().measureText("映序") + d(112) + randomWidth <= toolbarWidth) {
+      randomSection.removeView(random);
+      randomSection.setPadding(0, 0, 0, 0);
+      titleRow.addView(random, 1, new LinearLayout.LayoutParams(randomWidth, d(48)));
+    }
+
     LinearLayout librarySection = column();
     librarySection.setBackgroundColor(Ui.BG);
-    librarySection.setPadding(d(24), d(4), d(24), d(10));
+    librarySection.setPadding(d(16), 0, d(8), d(8));
     LinearLayout library = row();
+    library.setMinimumHeight(d(48));
     librarySection.addView(library, new LinearLayout.LayoutParams(-1, -2));
-    TextView title = Ui.text(this, "全部视频", 18, Ui.TEXT);
-    title.setTypeface(null, Typeface.BOLD);
-    library.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
-    sortButton = Ui.text(this, "", 12, Ui.MUTED);
-    sortButton.setCompoundDrawablesWithIntrinsicBounds(null, null, null, null);
+    LinearLayout summary = column();
+    summary.setGravity(Gravity.CENTER_VERTICAL);
+    library.addView(summary, new LinearLayout.LayoutParams(0, -2, 1));
+    TextView title = Ui.text(this, "全部视频", 16, Ui.TEXT);
+    title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+    title.setSingleLine(true);
+    summary.addView(title);
+    count = Ui.text(this, "", 12, Ui.MUTED);
+    count.setMaxLines(2);
+    LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(-1, -2);
+    cp.topMargin = d(4);
+    summary.addView(count, cp);
+    sortButton = Ui.text(this, "", 12, Ui.TEXT);
     sortButton.setPadding(d(12), 0, d(12), 0);
     sortButton.setGravity(Gravity.CENTER);
-    Ui.ripple(sortButton, Ui.SURFACE, 12);
-    library.addView(sortButton, new LinearLayout.LayoutParams(-2, d(48)));
+    sortButton.setSingleLine(true);
+    Ui.ripple(sortButton, android.graphics.Color.TRANSPARENT, 8);
+    int sortHeight = Math.max(d(48), sortButton.getLineHeight() + d(16));
+    library.addView(sortButton, new LinearLayout.LayoutParams(-2, sortHeight));
+    library.setMinimumHeight(sortHeight);
     sortButton.setOnClickListener(v -> sortDialog());
-    scanButton = Ui.icon(this, "scan", "立即扫描视频");
+    scanButton = Ui.icon(this, "scan", "刷新视频目录");
     LinearLayout.LayoutParams scanp = new LinearLayout.LayoutParams(d(48), d(48));
     scanp.leftMargin = d(8);
     library.addView(scanButton, scanp);
     scanButton.setOnClickListener(v -> scan(true));
-    count = Ui.text(this, "正在读取视频目录…", 12, Ui.MUTED);
-    LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(-1, -2);
-    cp.topMargin = d(2);
-    librarySection.addView(count, cp);
     libraryHeader.setSections(titleRow, searchSection, randomSection, librarySection);
+
     FrameLayout body = new FrameLayout(this);
     refresh = new SwipeRefreshLayout(this);
     refresh.setColorSchemeColors(Ui.ACCENT);
-    refresh.setProgressBackgroundColorSchemeColor(Ui.SURFACE);
+    refresh.setProgressBackgroundColorSchemeColor(Ui.BG);
     body.addView(refresh, new FrameLayout.LayoutParams(-1, -1));
     refresh.setOnRefreshListener(() -> scan(true));
     list = new RecyclerView(this);
     list.setLayoutManager(new LinearLayoutManager(this));
     list.setClipToPadding(false);
-    list.setPadding(d(16), 0, d(20), d(16));
+    list.setPadding(d(8), 0, d(12), d(16));
     list.setItemAnimator(null);
     adapter = new VideoAdapter();
     list.setAdapter(adapter);
@@ -236,54 +265,60 @@ public class MainActivity extends Activity {
           }
         });
     fastScroller = new LibraryFastScroller(this, list);
-    FrameLayout.LayoutParams scrollbar = new FrameLayout.LayoutParams(d(48), -1, Gravity.RIGHT);
-    body.addView(fastScroller, scrollbar);
+    body.addView(fastScroller, new FrameLayout.LayoutParams(d(48), -1, Gravity.RIGHT));
     libraryHeader.addOnLayoutChangeListener(
         (v, l, t, r, b, ol, ot, or, ob) ->
             fastScroller.setTopInset(
                 Math.round(libraryHeader.collapseRange() - libraryHeader.collapseOffset())));
+
     empty = column();
     empty.setGravity(Gravity.CENTER);
-    empty.setPadding(d(32), d(8), d(32), d(24));
+    empty.setPadding(d(24), d(8), d(24), d(24));
     body.addView(empty, new FrameLayout.LayoutParams(-1, -1));
-    ImageView emptyIcon = new ImageView(this);
-    emptyIcon.setImageDrawable(new Ui.Icon("video", Ui.MUTED));
-    empty.addView(emptyIcon, new LinearLayout.LayoutParams(d(48), d(48)));
-    emptyTitle = Ui.text(this, "把你的片库带进来", 19, Ui.TEXT);
+    emptyTitle = Ui.text(this, "暂无视频", 16, Ui.TEXT);
     emptyTitle.setGravity(Gravity.CENTER);
-    LinearLayout.LayoutParams et = new LinearLayout.LayoutParams(-1, -2);
-    et.topMargin = d(18);
-    empty.addView(emptyTitle, et);
-    emptyDetail = Ui.text(this, "允许读取视频后，自动发现手机中的本地视频。", 13, Ui.MUTED);
+    empty.addView(emptyTitle, new LinearLayout.LayoutParams(-1, -2));
+    emptyDetail = Ui.text(this, "", 13, Ui.MUTED);
     emptyDetail.setGravity(Gravity.CENTER);
-    emptyDetail.setLineSpacing(d(5), 1);
+    emptyDetail.setVisibility(View.GONE);
     LinearLayout.LayoutParams ed = new LinearLayout.LayoutParams(-1, -2);
-    ed.topMargin = d(10);
+    ed.topMargin = d(8);
     empty.addView(emptyDetail, ed);
     emptyAction = new Button(this);
-    emptyAction.setText("允许读取视频");
-    emptyAction.setTextColor(Ui.INK);
+    emptyAction.setText("授权");
+    emptyAction.setTextColor(Ui.ON_ACCENT);
     emptyAction.setTextSize(14);
     emptyAction.setAllCaps(false);
-    emptyAction.setPadding(d(24), 0, d(24), 0);
-    Ui.ripple(emptyAction, Ui.ACCENT, 14);
-    LinearLayout.LayoutParams ea = new LinearLayout.LayoutParams(-2, d(50));
-    ea.topMargin = d(22);
+    emptyAction.setPadding(d(16), 0, d(16), 0);
+    emptyAction.setStateListAnimator(null);
+    emptyAction.setElevation(0);
+    Ui.ripple(emptyAction, Ui.ACCENT, 8);
+    LinearLayout.LayoutParams ea =
+        new LinearLayout.LayoutParams(-2, Math.max(d(48), emptyAction.getLineHeight() + d(16)));
+    ea.topMargin = d(16);
     empty.addView(emptyAction, ea);
     emptyAction.setOnClickListener(
         v -> {
-          if (!mediaPermission() && !partialPermission()) permissions();
+          if (!hasLibraryAccess()) permissions();
           else sources();
         });
-    LibraryViewport viewport = new LibraryViewport(this, libraryHeader, body, list);
-    root.addView(viewport, new LinearLayout.LayoutParams(-1, 0, 1));
-    status = Ui.text(this, "首次使用请允许读取视频", 11, Ui.MUTED);
+    root.addView(
+        new LibraryViewport(this, libraryHeader, body, list),
+        new LinearLayout.LayoutParams(-1, 0, 1));
+    status = Ui.text(this, "", 12, Ui.MUTED);
     status.setGravity(Gravity.CENTER);
-    status.setMinimumHeight(d(32));
-    status.setPadding(d(24), d(6), d(24), d(8));
+    status.setPadding(d(16), d(8), d(16), d(8));
     status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+    status.setVisibility(View.GONE);
     root.addView(status, new LinearLayout.LayoutParams(-1, -2));
     filter();
+  }
+
+  private void libraryStatus(String message, View.OnClickListener action) {
+    status.setText(message);
+    status.setOnClickListener(action);
+    status.setMinimumHeight(d(action == null ? 32 : 48));
+    status.setVisibility(message.isEmpty() ? View.GONE : View.VISIBLE);
   }
 
   private boolean mediaPermission() {
@@ -298,6 +333,30 @@ public class MainActivity extends Activity {
     return Build.VERSION.SDK_INT >= 34
         && checkSelfPermission(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED)
             == PackageManager.PERMISSION_GRANTED;
+  }
+
+  /** Access checks only: never enumerate files or start a library scan. */
+  private boolean hasLibraryAccess() {
+    if (mediaPermission()
+        || partialPermission()
+        || (Build.VERSION.SDK_INT >= 30 && Environment.isExternalStorageManager())) return true;
+    List<UriPermission> grants = null;
+    for (String source : repository.getSources()) {
+      if (source.startsWith("content://")) {
+        if (grants == null) grants = getContentResolver().getPersistedUriPermissions();
+        Uri configured = Uri.parse(source);
+        for (UriPermission grant : grants)
+          if (grant.isReadPermission() && configured.equals(grant.getUri())) return true;
+      } else {
+        try {
+          java.io.File directory = new java.io.File(source);
+          if (directory.isDirectory() && directory.canRead()) return true;
+        } catch (SecurityException inaccessible) {
+          // A configured path alone does not prove that its permission is still valid.
+        }
+      }
+    }
+    return false;
   }
 
   private void permissions() {
@@ -323,10 +382,10 @@ public class MainActivity extends Activity {
     super.onRequestPermissionsResult(code, p, r);
     if (code == 40) {
       scan(false);
-      if (!mediaPermission() && !partialPermission())
+      if (!hasLibraryAccess())
         new AlertDialog.Builder(this)
-            .setTitle("尚未获得视频权限")
-            .setMessage("可以在系统设置中允许访问视频，也可以添加一个文件夹来授权读取。所有视频都保留在手机本地。")
+            .setTitle("视频权限")
+            .setMessage("在系统设置中允许访问视频，或选择要授权的文件夹。")
             .setPositiveButton(
                 "系统设置",
                 (a, b) ->
@@ -335,7 +394,7 @@ public class MainActivity extends Activity {
                             Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
                             Uri.parse("package:" + getPackageName())),
                         44))
-            .setNeutralButton("添加文件夹", (a, b) -> pickFolder())
+            .setNeutralButton("添加目录", (a, b) -> pickFolder())
             .setNegativeButton("稍后", null)
             .show();
     }
@@ -376,11 +435,7 @@ public class MainActivity extends Activity {
 
   private void scan(boolean manual) {
     if (destroyed) return;
-    if (manual
-        && !mediaPermission()
-        && !partialPermission()
-        && repository.getSources().isEmpty()
-        && !(Build.VERSION.SDK_INT >= 30 && Environment.isExternalStorageManager())) {
+    if (manual && !hasLibraryAccess()) {
       refresh.setRefreshing(false);
       permissions();
       return;
@@ -391,7 +446,7 @@ public class MainActivity extends Activity {
     }
     scanning = true;
     scanButton.setEnabled(false);
-    status.setText("正在扫描本地视频…");
+    libraryStatus("", null);
     if (manual) refresh.setRefreshing(true);
     worker.execute(
         () -> {
@@ -409,24 +464,20 @@ public class MainActivity extends Activity {
                   scanButton.setEnabled(true);
                   filter();
                   boolean limited = partialPermission() && !mediaPermission();
-                  String note =
-                      !warnings.isEmpty()
-                          ? "部分目录未读取，点此查看"
-                          : limited ? "当前只获准读取所选视频 · 点此扩大授权" : "已更新 · 下拉或点扫描按钮刷新";
-                  if (!mediaPermission() && !partialPermission() && items.isEmpty())
-                    note = "允许读取视频，或添加扫描文件夹";
-                  status.setText(note);
-                  status.setOnClickListener(
-                      v -> {
-                        if (limited) permissions();
-                        else if (!warnings.isEmpty())
-                          new AlertDialog.Builder(this)
-                              .setTitle("扫描提示")
-                              .setMessage(android.text.TextUtils.join("\n\n", warnings))
-                              .setPositiveButton("知道了", null)
-                              .show();
-                        else sources();
-                      });
+                  if (!warnings.isEmpty()) {
+                    libraryStatus(
+                        "部分目录未读",
+                        v ->
+                            new AlertDialog.Builder(this)
+                                .setTitle("扫描提示")
+                                .setMessage(android.text.TextUtils.join("\n\n", warnings))
+                                .setPositiveButton("知道了", null)
+                                .show());
+                  } else if (limited) {
+                    libraryStatus("部分视频授权", v -> permissions());
+                  } else if (items.isEmpty() && !hasLibraryAccess()) {
+                    libraryStatus("未授权", v -> permissions());
+                  } else libraryStatus("", null);
                   if (scanAgain && active) {
                     scanAgain = false;
                     scan(false);
@@ -439,8 +490,7 @@ public class MainActivity extends Activity {
                   if (destroyed) return;
                   refresh.setRefreshing(false);
                   scanButton.setEnabled(true);
-                  status.setText("扫描未完成，点击重新扫描");
-                  status.setOnClickListener(v -> scan(true));
+                  libraryStatus("扫描失败", v -> scan(true));
                   toast("扫描失败：" + safeMessage(error));
                 });
           }
@@ -461,7 +511,7 @@ public class MainActivity extends Activity {
       option.setTextColor(Ui.TEXT);
       option.setTextSize(16);
       option.setMinHeight(d(52));
-      option.setButtonTintList(android.content.res.ColorStateList.valueOf(Ui.ACCENT));
+      option.setButtonTintList(android.content.res.ColorStateList.valueOf(Ui.CONTROL));
       fields.addView(option, new RadioGroup.LayoutParams(-1, -2));
     }
     fields.check(fields.getChildAt(sort / 2).getId());
@@ -481,9 +531,13 @@ public class MainActivity extends Activity {
     reverse.setContentDescription("倒序排列，关闭时使用正序");
     reverse.setChecked(sort / 2 < 2 ? sort % 2 == 0 : sort % 2 == 1);
     panel.addView(reverse, new LinearLayout.LayoutParams(-1, -2));
+    ScrollView scroll = new ScrollView(this);
+    scroll.setFillViewport(false);
+    scroll.setVerticalScrollBarEnabled(true);
+    scroll.addView(panel, new ScrollView.LayoutParams(-1, -2));
     new AlertDialog.Builder(this)
         .setTitle("视频排序")
-        .setView(panel)
+        .setView(scroll)
         .setNegativeButton("取消", null)
         .setPositiveButton(
             "应用",
@@ -526,6 +580,10 @@ public class MainActivity extends Activity {
     visible.sort(comparator.thenComparing(v -> v.id));
     if (adapter == null) return;
     adapter.notifyDataSetChanged();
+    if (restoredListState != null && !visible.isEmpty()) {
+      list.getLayoutManager().onRestoreInstanceState(restoredListState);
+      restoredListState = null;
+    }
     long bytes = 0;
     for (VideoItem v : visible) bytes += v.size;
     count.setText(
@@ -538,25 +596,25 @@ public class MainActivity extends Activity {
               "大小 ↓"
             }
             [sort]);
+    sortButton.setContentDescription("排序：" + sortButton.getText());
+    sortButton.setTooltipText("视频排序");
     empty.setVisibility(visible.isEmpty() ? View.VISIBLE : View.GONE);
+    emptyDetail.setText("");
+    emptyDetail.setVisibility(View.GONE);
     if (!needle.isEmpty()) {
-      emptyTitle.setText("没有找到相关视频");
-      emptyDetail.setText("试试更短的关键词，或清空搜索查看全部视频。");
+      emptyTitle.setText("无搜索结果");
       emptyAction.setVisibility(View.GONE);
     } else {
-      emptyTitle.setText(mediaPermission() || partialPermission() ? "视频库还是空的" : "把你的片库带进来");
-      emptyDetail.setText(
-          mediaPermission() || partialPermission()
-              ? "下拉刷新，或添加视频所在的文件夹。\nMP4、MKV、AVI 等本地视频均可加入。"
-              : "允许读取视频后，自动发现手机中的本地视频。");
-      emptyAction.setText(mediaPermission() || partialPermission() ? "添加视频文件夹" : "允许读取视频");
+      boolean accessible = !visible.isEmpty() || hasLibraryAccess();
+      emptyTitle.setText(accessible ? "暂无视频" : "未授权");
+      emptyAction.setText(accessible ? "添加目录" : "授权");
       emptyAction.setVisibility(View.VISIBLE);
     }
   }
 
   private void open(int index, boolean shuffle) {
     if (visible.isEmpty()) {
-      toast("请先添加一些视频");
+      toast("暂无视频");
       return;
     }
     search.clearFocus();
@@ -567,8 +625,8 @@ public class MainActivity extends Activity {
 
   private void playRandom() {
     if (visible.isEmpty()) {
-      if (!mediaPermission() && !partialPermission()) permissions();
-      else toast("视频库为空，请先添加视频");
+      if (!hasLibraryAccess()) permissions();
+      else toast("暂无视频");
       return;
     }
     open(new Random().nextInt(visible.size()), true);
@@ -577,11 +635,11 @@ public class MainActivity extends Activity {
   private void sources() {
     List<String> items = repository.getSources();
     String[] options = new String[4 + items.size()];
-    options[0] = "选择文件夹（推荐）";
-    options[1] = "手动输入文件夹路径";
-    options[2] = "全盘访问与扫描";
-    options[3] = "视频访问权限";
-    for (int i = 0; i < items.size(); i++) options[4 + i] = "管理：" + Uri.decode(items.get(i));
+    options[0] = "选择文件夹";
+    options[1] = "输入路径";
+    options[2] = "全盘扫描";
+    options[3] = "视频权限";
+    for (int i = 0; i < items.size(); i++) options[4 + i] = Uri.decode(items.get(i));
     new AlertDialog.Builder(this)
         .setTitle("扫描位置")
         .setItems(
@@ -594,7 +652,7 @@ public class MainActivity extends Activity {
               else {
                 String source = items.get(which - 4);
                 new AlertDialog.Builder(this)
-                    .setTitle("移除扫描位置？")
+                    .setTitle("移除目录？")
                     .setMessage(Uri.decode(source) + "\n\n只移除扫描授权记录，视频文件不会删除。媒体库仍可能显示这个位置的视频。")
                     .setPositiveButton(
                         "移除",
@@ -635,11 +693,10 @@ public class MainActivity extends Activity {
             | android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
     LinearLayout wrap = column();
     wrap.setPadding(d(24), d(8), d(24), 0);
-    wrap.addView(Ui.text(this, "填写完整路径；需要全盘访问权限。", 13, Ui.MUTED));
     wrap.addView(input);
     AlertDialog dialog =
         new AlertDialog.Builder(this)
-            .setTitle("添加文件夹路径")
+            .setTitle("输入路径")
             .setView(wrap)
             .setPositiveButton("添加", null)
             .setNegativeButton("取消", null)
@@ -675,11 +732,11 @@ public class MainActivity extends Activity {
     if (Build.VERSION.SDK_INT >= 30) {
       if (Environment.isExternalStorageManager()) {
         scan(true);
-        toast("全盘访问已开启，正在扫描共享存储空间");
+        toast("正在扫描");
         return;
       }
       new AlertDialog.Builder(this)
-          .setTitle("开启全盘视频扫描")
+          .setTitle("全盘扫描")
           .setMessage(
               "下一步在系统页面允许“管理所有文件”。映序会扫描手机共享存储和可访问的存储卡，用于发现未被媒体库收录的视频，也支持手动路径。\n\n"
                   + "安卓限制的其他应用私有目录无法读取。")
@@ -703,19 +760,21 @@ public class MainActivity extends Activity {
   }
 
   private void settings() {
-    String[] choices = {"滑动进度手感", "扫描位置与权限", "使用说明", "关于映序"};
+    String[] choices = {"外观", "灵敏度", "扫描设置", "使用说明", "关于映序"};
     new AlertDialog.Builder(this)
         .setTitle("设置")
         .setItems(
             choices,
             (a, b) -> {
               if (b == 0) {
+                appearance();
+              } else if (b == 1) {
                 float current = getSharedPreferences("player", 0).getFloat("seek_sensitivity", 1f);
                 int selected = current < .8f ? 0 : current > 1.2f ? 2 : 1;
                 new AlertDialog.Builder(this)
-                    .setTitle("滑动进度手感")
+                    .setTitle("灵敏度")
                     .setSingleChoiceItems(
-                        new String[] {"细腻 · 更容易定位到秒", "均衡 · 推荐", "敏捷 · 更快跳过长片段"},
+                        new String[] {"精细", "均衡", "快速"},
                         selected,
                         (dialog, which) -> {
                           getSharedPreferences("player", 0)
@@ -726,33 +785,30 @@ public class MainActivity extends Activity {
                         })
                     .setNegativeButton("取消", null)
                     .show();
-              } else if (b == 1) sources();
-              else if (b == 2)
+              } else if (b == 2) sources();
+              else if (b == 3)
                 new AlertDialog.Builder(this)
-                    .setTitle("随手就能用")
+                    .setTitle("使用说明")
                     .setMessage(
-                        "视频库\n"
-                            + "关闭最近任务后，第一次启动应用时自动更新一次；从播放器返回、切回前台都不会扫描。其余时间可下拉刷新或点扫描按钮。更多视频可在文件夹按钮中添加。\n\n"
-                            + "播放\n"
-                            + "点按显示控制；双击播放/暂停；左右短滑精细调整，长滑逐渐加速，松手后跳转。拖动时显示画面预览；长按临时倍速，松手恢复。左侧上下滑调亮度，右侧上下滑调音量。可在设置中调整进度手感。\n\n"
-                            + "连播\n"
-                            + "模式按钮切换顺序连播、单集循环、随机连播。方向按钮一键切换竖屏/横屏，始终按原比例适配。\n\n"
-                            + "文件管理\n"
-                            + "点视频右侧菜单，可查看详情、重命名或删除。安卓可能要求再次确认。\n\n"
-                            + "保存时间是媒体库收录时间；文件夹来源没有该记录时使用修改时间。")
+                        "点按：显示或隐藏控制\n"
+                            + "双击：播放或暂停\n"
+                            + "左右滑动：调整进度\n"
+                            + "长按：临时倍速\n"
+                            + "全屏左侧上下滑动：亮度\n"
+                            + "全屏右侧上下滑动：音量\n"
+                            + "竖屏上下滑动：切集；当前视频循环\n\n"
+                            + "关闭最近任务后的首次启动会扫描视频。其他时间可下拉刷新，或点刷新按钮。\n\n"
+                            + "保存时间为媒体库收录时间；无记录时使用修改时间。")
                     .setPositiveButton("知道了", null)
                     .show();
               else
                 new AlertDialog.Builder(this)
-                    .setTitle("映序  1.3.0")
+                    .setTitle("映序  " + appVersion())
                     .setMessage(
-                        "MediaMaster\n"
-                            + "你的本地片库，随心播放。\n\n"
-                            + "离线运行，无广告，无账号，无上传。\n"
-                            + "支持安卓 8.0 及以上，为安卓 14 设计。\n\n"
-                            + "播放器使用 AndroidX Media3（Apache 2.0）和 LibVLC（LGPL"
-                            + " 2.1）。源码包包含许可与可重建工程。\n\n"
-                            + "应用与界面图标使用 Google Material Icons（Apache 2.0）。")
+                        "MediaMaster\nAndroid 8.0+\n\n"
+                            + "AndroidX Media3 · Apache 2.0\n"
+                            + "LibVLC · LGPL 2.1\n"
+                            + "Google Material Icons · Apache 2.0")
                     .setNeutralButton("开源许可", (x, y) -> showLicenses())
                     .setNegativeButton(
                         "图标来源",
@@ -771,6 +827,32 @@ public class MainActivity extends Activity {
             })
         .setNegativeButton("关闭", null)
         .show();
+  }
+
+  private void appearance() {
+    int selected = Ui.isDark(this) ? 1 : 0;
+    new AlertDialog.Builder(this)
+        .setTitle("外观")
+        .setSingleChoiceItems(
+            new String[] {"浅色", "深色"},
+            selected,
+            (dialog, choice) -> {
+              dialog.dismiss();
+              boolean next = choice == 1;
+              if (next == Ui.isDark(this)) return;
+              Ui.setDark(this, next);
+              recreate();
+            })
+        .setNegativeButton("取消", null)
+        .show();
+  }
+
+  private String appVersion() {
+    try {
+      return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+    } catch (PackageManager.NameNotFoundException unavailable) {
+      return "";
+    }
   }
 
   private void showLicenses() {
@@ -813,7 +895,7 @@ public class MainActivity extends Activity {
               else if (b == 2) details(item);
               else
                 new AlertDialog.Builder(this)
-                    .setTitle("删除这个视频？")
+                    .setTitle("删除视频？")
                     .setMessage(item.name + "\n\n此操作会删除手机中的原始文件，无法在映序内撤销。")
                     .setNegativeButton("取消", null)
                     .setPositiveButton("删除", (x, y) -> mutate(item, null, true))
@@ -833,7 +915,7 @@ public class MainActivity extends Activity {
     wrap.addView(input);
     AlertDialog dialog =
         new AlertDialog.Builder(this)
-            .setTitle("重命名视频")
+            .setTitle("重命名")
             .setView(wrap)
             .setPositiveButton("保存", null)
             .setNegativeButton("取消", null)
@@ -859,7 +941,7 @@ public class MainActivity extends Activity {
 
   private void mutate(VideoItem item, String name, boolean delete) {
     if (mutationInFlight) {
-      toast("正在等待文件操作完成");
+      toast("操作处理中");
       return;
     }
     mutationInFlight = true;
@@ -876,7 +958,7 @@ public class MainActivity extends Activity {
                   mutationInFlight = false;
                   if (destroyed || isFinishing()) return;
                   pendingItem = null;
-                  toast(delete ? "视频已删除" : "名称已更新");
+                  toast(delete ? "已删除" : "已重命名");
                   scan(false);
                 });
           } catch (MutationConsentException consent) {
@@ -949,9 +1031,7 @@ public class MainActivity extends Activity {
       }
     } else if (request == 43 || request == 44) {
       // Returning from an explicitly requested permission flow is a user action, not a resume scan.
-      if (mediaPermission()
-          || partialPermission()
-          || (Build.VERSION.SDK_INT >= 30 && Environment.isExternalStorageManager())) scan(true);
+      if (hasLibraryAccess()) scan(true);
     } else if (request == 42) {
       pendingWaitConsent = false;
       mutationInFlight = false;
@@ -959,12 +1039,12 @@ public class MainActivity extends Activity {
       if (result == RESULT_OK && item != null) {
         if (pendingConsentCompletes) {
           pendingItem = null;
-          toast("视频已删除");
+          toast("已删除");
           scan(false);
         } else mutate(item, pendingName, pendingDelete);
       } else {
         pendingItem = null;
-        toast("已取消文件操作");
+        toast("已取消");
       }
     }
   }
@@ -972,6 +1052,9 @@ public class MainActivity extends Activity {
   @Override
   protected void onSaveInstanceState(Bundle state) {
     super.onSaveInstanceState(state);
+    state.putString("library_query", query);
+    if (list != null && list.getLayoutManager() != null)
+      state.putParcelable("library_scroll", list.getLayoutManager().onSaveInstanceState());
     if (pendingWaitConsent && pendingItem != null) {
       state.putBoolean("pending_consent", true);
       state.putSerializable("pending_item", pendingItem);
@@ -993,44 +1076,43 @@ public class MainActivity extends Activity {
     public VideoHolder onCreateViewHolder(ViewGroup parent, int type) {
       LinearLayout line = row();
       line.setLayoutParams(new RecyclerView.LayoutParams(-1, -2));
-      line.setPadding(d(8), d(12), 0, d(12));
-      line.setMinimumHeight(d(104));
-      Ui.ripple(line, Ui.BG, 14);
+      line.setPadding(d(8), d(8), 0, d(8));
+      line.setMinimumHeight(d(88));
+      Ui.ripple(line, Ui.BG, 8);
       FrameLayout art = new FrameLayout(MainActivity.this);
-      line.addView(art, new LinearLayout.LayoutParams(d(106), d(68)));
+      line.addView(art, new LinearLayout.LayoutParams(d(96), d(60)));
       ImageView image = new ImageView(MainActivity.this);
       image.setScaleType(ImageView.ScaleType.CENTER_CROP);
-      Ui.surface(image, Ui.SURFACE, 10);
+      Ui.surface(image, Ui.SURFACE, 8);
       image.setClipToOutline(true);
       image.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
       art.addView(image, new FrameLayout.LayoutParams(-1, -1));
-      TextView duration = Ui.text(MainActivity.this, "", 10, Ui.TEXT);
+      TextView duration = Ui.text(MainActivity.this, "", 11, Ui.ON_ACCENT);
       duration.setPadding(d(5), d(2), d(5), d(2));
-      Ui.surface(duration, 0xcc101416, 4);
+      Ui.surface(duration, 0xcc201d2c, 4);
       FrameLayout.LayoutParams dura =
           new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.RIGHT);
       dura.setMargins(0, 0, d(4), d(4));
       art.addView(duration, dura);
       LinearLayout copy = column();
       LinearLayout.LayoutParams copyP = new LinearLayout.LayoutParams(0, -2, 1);
-      copyP.leftMargin = d(16);
+      copyP.leftMargin = d(12);
       line.addView(copy, copyP);
-      TextView title = Ui.text(MainActivity.this, "", 15, Ui.TEXT);
+      TextView title = Ui.text(MainActivity.this, "", 14, Ui.TEXT);
       title.setMaxLines(2);
       title.setEllipsize(TextUtils.TruncateAt.END);
-      title.setTypeface(null, Typeface.BOLD);
+      title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
       copy.addView(title);
-      TextView date = Ui.text(MainActivity.this, "", 11, Ui.MUTED);
+      TextView date = Ui.text(MainActivity.this, "", 12, Ui.MUTED);
       LinearLayout.LayoutParams dateP = new LinearLayout.LayoutParams(-1, -2);
-      dateP.topMargin = d(7);
+      dateP.topMargin = d(4);
       copy.addView(date, dateP);
-      TextView size = Ui.text(MainActivity.this, "", 11, Ui.MUTED);
+      TextView size = Ui.text(MainActivity.this, "", 12, Ui.MUTED);
       LinearLayout.LayoutParams sizeP = new LinearLayout.LayoutParams(-1, -2);
-      sizeP.topMargin = d(3);
+      sizeP.topMargin = d(4);
       copy.addView(size, sizeP);
       ImageButton menu = Ui.icon(MainActivity.this, "more", "视频操作");
-      menu.setBackgroundColor(android.graphics.Color.TRANSPARENT);
-      line.addView(menu, new LinearLayout.LayoutParams(d(48), d(56)));
+      line.addView(menu, new LinearLayout.LayoutParams(d(48), d(48)));
       return new VideoHolder(line, image, duration, title, date, size, menu);
     }
 
@@ -1042,7 +1124,7 @@ public class MainActivity extends Activity {
           (sort / 2 == 1 ? "保存 " : "修改 ")
               + new SimpleDateFormat("yyyy/MM/dd HH:mm", Locale.CHINA).format(new Date(date)));
       h.size.setText(Ui.size(v.size) + "  ·  " + v.extension().toUpperCase(Locale.ROOT));
-      h.duration.setText(v.durationMs > 0 ? Ui.duration(v.durationMs) : "视频");
+      h.duration.setText(v.durationMs > 0 ? Ui.duration(v.durationMs) : "—");
       thumbnails.bind(v, h.image);
       h.itemView.setOnClickListener(
           x -> {
@@ -1056,6 +1138,7 @@ public class MainActivity extends Activity {
           });
       h.menu.setOnClickListener(x -> videoMenu(v));
       h.menu.setContentDescription("操作视频 " + v.name);
+      h.menu.setTooltipText("视频操作");
     }
 
     @Override

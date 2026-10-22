@@ -13,14 +13,15 @@ import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.animation.PathInterpolator;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
+import io.mediamaster.app.Ui;
 
 /** A narrow visible handle with a full 48dp hit area, backed by the list's own scroll metrics. */
 public final class LibraryFastScroller extends View {
   private final RecyclerView list;
   private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
   private final float density;
-  private float thumbTop, thumbHeight, opacity = .48f, expansion;
-  private float requestedOpacity = .48f, requestedExpansion;
+  private float thumbTop, thumbHeight, opacity = .62f, expansion;
+  private float requestedOpacity = .62f, requestedExpansion;
   private float grabOffset;
   private int topInset;
   private float dragY;
@@ -28,7 +29,7 @@ public final class LibraryFastScroller extends View {
   private int lastSection = -1;
   private long lastHaptic;
   private ValueAnimator fade;
-  private final Runnable settle = () -> animateState(.48f, 0);
+  private final Runnable settle = () -> animateState(.62f, 0);
 
   public LibraryFastScroller(Context context, RecyclerView list) {
     super(context);
@@ -99,7 +100,7 @@ public final class LibraryFastScroller extends View {
     if (!scrollable) return;
     float width = dp(4 + 3 * expansion);
     float right = getWidth() - dp(4);
-    paint.setColor(0xffc8e6dc);
+    paint.setColor(Ui.CONTROL);
     paint.setAlpha(Math.round(255 * opacity));
     canvas.drawRoundRect(
         right - width, thumbTop, right, thumbTop + thumbHeight, width / 2, width / 2, paint);

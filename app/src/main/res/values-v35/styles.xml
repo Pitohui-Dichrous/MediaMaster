@@ -2,4 +2,10 @@
     <style name="AppTheme" parent="AppThemeNavigation">
         <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>
     </style>
+    <style name="AppThemeDark" parent="AppThemeDarkNavigation">
+        <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>
+    </style>
+    <style name="PlayerTheme" parent="PlayerThemeNavigation">
+        <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>
+    </style>
 </resources>

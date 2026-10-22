@@ -230,4 +230,181 @@ public class PlayerLogicTest {
     assertEquals(candidate, order.next(false));
     assertEquals(current, order.peekPrevious());
   }
+
+  @Test
+  public void portraitSequentialAlwaysLoopsNaturallyButManualSwipesKeepDirectoryOrder() {
+    PlaybackOrder order = new PlaybackOrder(4, 1, PlaybackOrder.SEQUENTIAL);
+    assertFalse(order.repeatsCurrent());
+    order.setPortraitMode(true);
+    assertTrue(order.portraitMode());
+    assertTrue(order.repeatsCurrent());
+    assertEquals(PlaybackOrder.SEQUENTIAL, order.mode());
+    for (int i = 0; i < 12; i++) {
+      int current = order.current();
+      int candidate = order.peekNext();
+      for (int loop = 0; loop < 8; loop++) {
+        assertEquals(current, order.next(true));
+        assertEquals(candidate, order.peekNext());
+        assertEquals(current, order.current());
+      }
+      assertEquals((current + 1) % 4, order.next(false));
+      assertEquals(current, order.previous());
+      assertEquals(candidate, order.next(false));
+    }
+    order.setPortraitMode(false);
+    assertFalse(order.repeatsCurrent());
+    assertEquals(order.peekNext(), order.next(true));
+  }
+
+  @Test
+  public void portraitRandomNaturalLoopsNeverConsumePreloadedCandidatesOrWatchHistory() {
+    PlaybackOrder portrait = new PlaybackOrder(7, 2, PlaybackOrder.SHUFFLE, new Random(32));
+    PlaybackOrder manualBaseline = new PlaybackOrder(7, 2, PlaybackOrder.SHUFFLE, new Random(32));
+    portrait.setPortraitMode(true);
+    assertTrue(portrait.repeatsCurrent());
+    assertEquals(PlaybackOrder.SHUFFLE, portrait.mode());
+    for (int i = 0; i < 40; i++) {
+      int current = portrait.current();
+      int candidate = portrait.peekNext();
+      int previous = portrait.peekPrevious();
+      boolean hadPrevious = portrait.hasPrevious();
+      for (int loop = 0; loop < 12; loop++) {
+        assertEquals(current, portrait.next(true));
+        assertEquals(candidate, portrait.peekNext());
+        assertEquals(previous, portrait.peekPrevious());
+        assertEquals(hadPrevious, portrait.hasPrevious());
+      }
+      assertEquals(manualBaseline.next(false), candidate);
+      assertEquals(candidate, portrait.next(false));
+    }
+    int newest = portrait.current();
+    int future = portrait.peekNext();
+    portrait.previous();
+    assertEquals(newest, portrait.peekNext());
+    assertEquals(portrait.current(), portrait.next(true));
+    assertEquals(newest, portrait.next(false));
+    assertEquals(future, portrait.peekNext());
+  }
+
+  @Test
+  public void portraitChoiceNeverOverwritesFullScreenSingleRepeatPreference() {
+    PlaybackOrder order = new PlaybackOrder(5, 1, PlaybackOrder.SINGLE, new Random(12));
+    assertEquals(PlaybackOrder.SEQUENTIAL, order.portraitNavigationMode());
+    order.setPortraitMode(true);
+    assertEquals(PlaybackOrder.SEQUENTIAL, order.mode());
+    assertEquals(2, order.next(false));
+    order.setMode(PlaybackOrder.SHUFFLE);
+    assertEquals(PlaybackOrder.SHUFFLE, order.mode());
+    assertEquals(PlaybackOrder.SINGLE, order.fullScreenMode());
+    int current = order.current();
+    int randomCandidate = order.peekNext();
+    assertNotEquals(current, randomCandidate);
+    assertEquals(current, order.next(true));
+    assertEquals(randomCandidate, order.next(false));
+    order.setPortraitMode(false);
+    assertEquals(PlaybackOrder.SINGLE, order.mode());
+    assertEquals(PlaybackOrder.SHUFFLE, order.portraitNavigationMode());
+    assertTrue(order.repeatsCurrent());
+    assertEquals(randomCandidate, order.next(true));
+    assertEquals((randomCandidate + 1) % 5, order.next(false));
+    order.setPortraitMode(true);
+    assertEquals(PlaybackOrder.SHUFFLE, order.mode());
+    assertEquals(PlaybackOrder.SINGLE, order.fullScreenMode());
+  }
+
+  @Test
+  public void sameNavigationClassModeRoundTripsKeepShuffleHistoryAndPreparedCandidate() {
+    PlaybackOrder order = new PlaybackOrder(6, 0, PlaybackOrder.SHUFFLE, new Random(6));
+    int first = order.next(false);
+    int second = order.next(false);
+    int future = order.peekNext();
+    for (int i = 0; i < 10; i++) {
+      order.setPortraitMode(true);
+      assertTrue(order.repeatsCurrent());
+      assertEquals(second, order.next(true));
+      assertEquals(first, order.peekPrevious());
+      assertEquals(future, order.peekNext());
+      order.setPortraitMode(false);
+      assertFalse(order.repeatsCurrent());
+      assertEquals(first, order.peekPrevious());
+      assertEquals(future, order.peekNext());
+    }
+    assertEquals(first, order.previous());
+    order.setPortraitMode(true);
+    assertEquals(second, order.peekNext());
+    assertEquals(second, order.next(false));
+    order.setPortraitMode(false);
+    assertEquals(future, order.next(true));
+  }
+
+  @Test
+  public void restoringInactivePortraitChoiceLeavesFullScreenHistoryUntouched() {
+    PlaybackOrder order = new PlaybackOrder(6, 0, PlaybackOrder.SHUFFLE, new Random(9));
+    order.next(false);
+    int current = order.current();
+    int previous = order.peekPrevious();
+    int future = order.peekNext();
+    order.setPortraitNavigationMode(PlaybackOrder.SEQUENTIAL);
+    assertFalse(order.portraitMode());
+    assertEquals(PlaybackOrder.SHUFFLE, order.mode());
+    assertEquals(PlaybackOrder.SHUFFLE, order.fullScreenMode());
+    assertEquals(PlaybackOrder.SEQUENTIAL, order.portraitNavigationMode());
+    assertEquals(current, order.current());
+    assertEquals(previous, order.peekPrevious());
+    assertEquals(future, order.peekNext());
+    assertTrue(order.hasPrevious());
+    order.setPortraitNavigationMode(PlaybackOrder.SHUFFLE);
+    order.setPortraitMode(true);
+    assertEquals(previous, order.peekPrevious());
+    assertEquals(future, order.peekNext());
+    order.setPortraitNavigationMode(PlaybackOrder.SEQUENTIAL);
+    assertEquals((current + 1) % 6, order.peekNext());
+    assertEquals(PlaybackOrder.SHUFFLE, order.fullScreenMode());
+    order.setPortraitMode(false);
+    assertFalse("A genuine order-class change starts a fresh random context", order.hasPrevious());
+    assertEquals(current, order.peekPrevious());
+  }
+
+  @Test
+  public void portraitSingleSelectionMapsToSequentialNavigationAndKeepsFullPreference() {
+    PlaybackOrder order = new PlaybackOrder(4, 1, PlaybackOrder.SEQUENTIAL);
+    order.setPortraitNavigationMode(PlaybackOrder.SINGLE);
+    assertEquals(PlaybackOrder.SEQUENTIAL, order.portraitNavigationMode());
+    order.setPortraitMode(true);
+    order.setMode(PlaybackOrder.SINGLE);
+    assertEquals(PlaybackOrder.SEQUENTIAL, order.mode());
+    assertEquals(PlaybackOrder.SEQUENTIAL, order.fullScreenMode());
+    assertTrue(order.repeatsCurrent());
+    assertEquals(1, order.next(true));
+    assertEquals(2, order.next(false));
+    order.setPortraitMode(false);
+    assertFalse(order.repeatsCurrent());
+    assertEquals(3, order.next(true));
+  }
+
+  @Test
+  public void portraitRepeatAndManualCandidatesAreSafeForOneAndTwoVideosInEitherOrder() {
+    for (int fullMode :
+        new int[] {PlaybackOrder.SEQUENTIAL, PlaybackOrder.SINGLE, PlaybackOrder.SHUFFLE}) {
+      for (int portraitOrder : new int[] {PlaybackOrder.SEQUENTIAL, PlaybackOrder.SHUFFLE}) {
+        for (int count : new int[] {1, 2}) {
+          PlaybackOrder order = new PlaybackOrder(count, 0, fullMode, new Random(18));
+          order.setPortraitNavigationMode(portraitOrder);
+          order.setPortraitMode(true);
+          for (int i = 0; i < 10; i++) {
+            int current = order.current();
+            int candidate = order.peekNext();
+            assertEquals(current, order.next(true));
+            assertEquals(candidate, order.peekNext());
+            assertEquals(count == 1 ? current : 1 - current, candidate);
+            assertEquals(candidate, order.next(false));
+            assertEquals(current, order.previous());
+          }
+          order.setPortraitMode(false);
+          assertEquals(fullMode, order.mode());
+          assertEquals(fullMode == PlaybackOrder.SINGLE, order.repeatsCurrent());
+        }
+      }
+    }
+  }
 }

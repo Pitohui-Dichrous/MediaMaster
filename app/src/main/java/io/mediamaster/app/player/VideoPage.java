@@ -78,6 +78,8 @@ final class VideoPage extends FrameLayout {
   private boolean single, foreground, audible, warmingVlc, ended, vlcRunningRequested;
   private float speed = 1;
   private long vlcTextureBaseline, warmupDeadline;
+  private long vlcPreviousTime = -1, vlcSeekFenceTarget = -1, vlcSeekFenceDeadline;
+  private boolean vlcNearEndArmed;
 
   VideoPage(Context context, Supplier<LibVLC> vlcSupplier, Listener listener) {
     super(context);
@@ -94,8 +96,8 @@ final class VideoPage extends FrameLayout {
     vlcView.setVisibility(INVISIBLE);
     addView(vlcView, new LayoutParams(-1, -1));
     errorLabel = new TextView(context);
-    errorLabel.setText("此视频暂时无法播放\n可继续滑动查看其他视频");
-    errorLabel.setTextColor(0xffb6c4bf);
+    errorLabel.setText("无法播放，可滑动切集");
+    errorLabel.setTextColor(0xffd1ced8);
     errorLabel.setTextSize(14);
     errorLabel.setGravity(Gravity.CENTER);
     int padding = Math.round(24 * getResources().getDisplayMetrics().density);
@@ -253,9 +255,11 @@ final class VideoPage extends FrameLayout {
                       case MediaPlayer.Event.EndReached:
                         vlcRunningRequested = false;
                         if (active && playRequested && !ended) {
-                          ended = true;
-                          listener.onEnded(VideoPage.this);
+                          notifyVlcEnd(source);
                         }
+                        break;
+                      case MediaPlayer.Event.TimeChanged:
+                        observeVlcRepeatBoundary(source);
                         break;
                       case MediaPlayer.Event.EncounteredError:
                         fail(token);
@@ -273,7 +277,9 @@ final class VideoPage extends FrameLayout {
       } else media = new Media(library, uri);
       try {
         media.setHWDecoderEnabled(true, false);
-        if (single) media.addOption(":input-repeat=65535");
+        // LibVLC 3 has no live input-repeat setter. Keep its decoder looping and change only our
+        // completion policy, so a portrait/full-screen toggle never reopens the current input.
+        media.addOption(":input-repeat=65535");
         source.setMedia(media);
       } finally {
         media.release();
@@ -341,7 +347,80 @@ final class VideoPage extends FrameLayout {
     pendingSeek = 0;
     vlcTextureBaseline = textureTimestamp(findTexture(vlcView));
     // A native input-repeat must return to zero, not reapply a media-level start-time offset.
+    fenceVlcSeek(target);
     source.setTime(target);
+  }
+
+  private void resetVlcRepeatObservation() {
+    vlcPreviousTime = -1;
+    vlcNearEndArmed = false;
+    vlcSeekFenceTarget = -1;
+    vlcSeekFenceDeadline = 0;
+  }
+
+  private void fenceVlcSeek(long target) {
+    vlcPreviousTime = -1;
+    vlcNearEndArmed = false;
+    vlcSeekFenceTarget = Math.max(0, target);
+    vlcSeekFenceDeadline = SystemClock.uptimeMillis() + 1500;
+  }
+
+  /**
+   * Native input-repeat seeks inside the same decoder instead of sending EndReached. Observe that
+   * real clock wrap for non-repeat playback. VLC 3 publishes times about every 250 ms, so
+   * compatible decoding can advance that much later than the exact boundary; Exo uses its native
+   * repeat policy.
+   */
+  private void observeVlcRepeatBoundary(MediaPlayer source) {
+    if (!active || !playRequested || warmingVlc || !firstFrameReady || pendingSeek > 0 || ended) {
+      vlcPreviousTime = -1;
+      vlcNearEndArmed = false;
+      return;
+    }
+    // Read the current native clock, rather than an older queued event's timestamp. A manual seek
+    // can happen while TimeChanged events are waiting on the main looper.
+    long at = source.getTime();
+    long length = source.getLength();
+    if (length <= 0 && item != null) length = item.durationMs;
+    if (at < 0 || length <= 0) return;
+    long minimumDrop = Math.max(40, Math.min(400, length / 4));
+    if (vlcSeekFenceTarget >= 0) {
+      // Even for sub-second files, accepting the pre-seek clock must not allow the subsequent
+      // seek displacement itself to satisfy the natural-wrap distance test.
+      long tolerance = Math.max(10, Math.min(350, minimumDrop - 1));
+      if (Math.abs(at - vlcSeekFenceTarget) > tolerance
+          && SystemClock.uptimeMillis() < vlcSeekFenceDeadline) return;
+      // The first acknowledged post-seek sample is an anchor, never a natural completion.
+      vlcSeekFenceTarget = -1;
+      vlcPreviousTime = at;
+      vlcNearEndArmed = false;
+    }
+    long boundaryWindow = Math.max(120, Math.min(1500, length / 3));
+    boolean wrapped =
+        vlcNearEndArmed
+            && vlcPreviousTime >= 0
+            && vlcPreviousTime - at > minimumDrop
+            && at <= boundaryWindow;
+    vlcPreviousTime = at;
+    if (wrapped) {
+      vlcNearEndArmed = false;
+      if (!single) {
+        notifyVlcEnd(source);
+        return;
+      }
+    }
+    if (at >= Math.max(0, length - boundaryWindow)) vlcNearEndArmed = true;
+  }
+
+  private void notifyVlcEnd(MediaPlayer source) {
+    if (ended || !active || !playRequested) return;
+    ended = true;
+    playRequested = false;
+    audible = false;
+    vlcRunningRequested = false;
+    source.setVolume(0);
+    source.pause();
+    listener.onEnded(this);
   }
 
   void setPlayback(boolean active, boolean play, boolean audible) {
@@ -349,6 +428,10 @@ final class VideoPage extends FrameLayout {
     this.active = active;
     playRequested = play;
     this.audible = audible;
+    if (!active || !play) {
+      vlcPreviousTime = -1;
+      vlcNearEndArmed = false;
+    }
     applyPlayback();
   }
 
@@ -366,6 +449,7 @@ final class VideoPage extends FrameLayout {
     } else if (vlc != null) {
       MediaPlayer source = vlc;
       vlcTextureBaseline = textureTimestamp(findTexture(vlcView));
+      fenceVlcSeek(0);
       source.setTime(0);
       warmingVlc = true;
       applyVlcPlayback(source);
@@ -408,13 +492,12 @@ final class VideoPage extends FrameLayout {
     if (this.single == single) return;
     this.single = single;
     if (exo != null) exo.setRepeatMode(single ? Player.REPEAT_MODE_ONE : Player.REPEAT_MODE_OFF);
-    else if (vlc != null && item != null) {
-      VideoItem savedItem = item;
-      int savedIndex = index;
-      long at = position();
-      boolean savedActive = active, savedPlay = playRequested, savedAudible = audible;
-      prepare(savedItem, savedIndex, at, true, single, speed, foreground);
-      setPlayback(savedActive, savedPlay, savedAudible);
+    else if (vlc != null) {
+      // Policy-only change: preserve the MediaPlayer, texture, native input, time, pause and speed.
+      // Begin observing from the current clock so a previously queued wrap does not count again.
+      vlcPreviousTime = -1;
+      vlcNearEndArmed = false;
+      observeVlcRepeatBoundary(vlc);
     }
   }
 
@@ -425,6 +508,7 @@ final class VideoPage extends FrameLayout {
     ended = false;
     if (exo != null) exo.seekTo(at);
     else if (vlc != null) {
+      fenceVlcSeek(at);
       pendingSeek = at;
       if (at == 0) vlc.setTime(0);
       else applyPendingSeek(vlc);
@@ -466,6 +550,7 @@ final class VideoPage extends FrameLayout {
   }
 
   private void releaseEngine() {
+    resetVlcRepeatObservation();
     if (frameProbe != null) main.removeCallbacks(frameProbe);
     frameProbe = null;
     warmingVlc = false;

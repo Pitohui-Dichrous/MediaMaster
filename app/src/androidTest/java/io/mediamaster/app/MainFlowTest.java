@@ -10,13 +10,18 @@ import android.content.ContentUris;
 import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.database.Cursor;
+import android.graphics.Color;
+import android.graphics.drawable.ColorDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.SystemClock;
 import android.provider.MediaStore;
+import android.util.Xml;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.widget.EditText;
 import androidx.recyclerview.widget.LinearLayoutManager;
@@ -31,6 +36,7 @@ import io.mediamaster.app.media.VideoRepository;
 import io.mediamaster.app.player.PlaybackOrder;
 import io.mediamaster.app.player.PlayerActivity;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.reflect.Field;
@@ -48,6 +54,7 @@ import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.xmlpull.v1.XmlPullParser;
 
 /**
  * Real Activity flows with generated emulator fixtures; never renames or deletes those fixtures.
@@ -508,6 +515,87 @@ public final class MainFlowTest {
   }
 
   @Test
+  public void appearanceSwitchPersistsAndPreservesSearchWithoutRescanningTheSameTask()
+      throws Exception {
+    SharedPreferences preferences =
+        context.getSharedPreferences("appearance", Context.MODE_PRIVATE);
+    boolean hadPreference = preferences.contains("dark");
+    boolean originalDark = Ui.isDark(context);
+    File cache = null;
+    long originalCacheTime = 0;
+    try {
+      Ui.setDark(context, false);
+      launchLibrary();
+      int task = onMain(() -> activity.getTaskId());
+      int librarySize = onMain(() -> items("all").size());
+      cache = new File(context.getFilesDir(), "video-library-v4.json");
+      originalCacheTime = cache.lastModified();
+      long marker = 1_600_000_000_000L;
+      assertTrue(
+          "Create a scan-write sentinel after cold-start indexing", cache.setLastModified(marker));
+      String keyword = "aUrOrA";
+      onMain(
+          () -> {
+            ((EditText) read(activity, "search")).setText(keyword);
+            return null;
+          });
+      float initialLuminance = onMain(this::libraryBackgroundLuminance);
+      assertTrue("Light appearance is visibly light", initialLuminance > .5f);
+      for (boolean dark : new boolean[] {true, false}) {
+        chooseAppearanceThroughSettings(dark ? "深色" : "浅色");
+        long deadline = SystemClock.uptimeMillis() + 10000;
+        boolean restored = false;
+        while (SystemClock.uptimeMillis() < deadline) {
+          restored =
+              onMain(
+                  () ->
+                      !(Boolean) read(activity, "scanning") && items("all").size() == librarySize);
+          if (restored) break;
+          SystemClock.sleep(50);
+        }
+        assertTrue("The recreated screen loads the existing library", restored);
+        SystemClock.sleep(700);
+        assertEquals(
+            "Appearance recreation remains in the original task",
+            task,
+            onMain(() -> activity.getTaskId()).intValue());
+        assertEquals(
+            "Changing appearance must not scan or rewrite video metadata",
+            marker,
+            cache.lastModified());
+        assertEquals(dark, Ui.isDark(context));
+        assertAppearanceSavedToDisk(dark);
+        onMain(
+            () -> {
+              assertEquals(
+                  "Theme changes preserve the current search",
+                  keyword,
+                  ((EditText) read(activity, "search")).getText().toString());
+              assertFalse(items("visible").isEmpty());
+              for (VideoItem item : items("visible"))
+                assertTrue(item.name.toLowerCase(java.util.Locale.ROOT).contains("aurora"));
+              float luminance = libraryBackgroundLuminance();
+              assertTrue(
+                  "The recreated library visibly applies the selected appearance",
+                  dark ? luminance < .15f : luminance > .5f);
+              return null;
+            });
+      }
+    } finally {
+      SharedPreferences.Editor restore = preferences.edit();
+      if (hadPreference) restore.putBoolean("dark", originalDark);
+      else restore.remove("dark");
+      restore.commit();
+      onMain(
+          () -> {
+            Ui.configure(context);
+            return null;
+          });
+      if (cache != null && originalCacheTime > 0) cache.setLastModified(originalCacheTime);
+    }
+  }
+
+  @Test
   public void directoryChromeCollapsesOnlyNearTheTopAndFastHandleReallyScrolls() throws Exception {
     launchLibrary();
     List<VideoItem> original = onMain(() -> new ArrayList<>(items("all")));
@@ -687,6 +775,96 @@ public final class MainFlowTest {
           }
           return null;
         });
+  }
+
+  private float libraryBackgroundLuminance() {
+    ViewGroup content = activity.findViewById(android.R.id.content);
+    View root = content.getChildAt(0);
+    assertTrue(
+        "The library exposes its visible solid background",
+        root.getBackground() instanceof ColorDrawable);
+    return Color.luminance(((ColorDrawable) root.getBackground()).getColor());
+  }
+
+  private void chooseAppearanceThroughSettings(String choice) throws Exception {
+    onMain(
+        () -> {
+          View settings = viewWithDescription(activity.getWindow().getDecorView(), "设置");
+          assertNotNull("The library settings control is present", settings);
+          assertTrue(settings.isShown());
+          assertTrue(settings.performClick());
+          return null;
+        });
+    clickText(awaitWindowText("外观"), "外观");
+    AccessibilityNodeInfo options = awaitWindowText(choice);
+    assertTrue("The actual appearance dialog is open", hasExactText(options, "外观"));
+    assertTrue(hasExactText(options, "浅色"));
+    assertTrue(hasExactText(options, "深色"));
+    Instrumentation.ActivityMonitor monitor =
+        instrumentation.addMonitor(MainActivity.class.getName(), null, false);
+    try {
+      clickText(options, choice);
+      Activity recreated = instrumentation.waitForMonitorWithTimeout(monitor, 15000);
+      assertTrue(
+          "Selecting a different appearance recreates the library",
+          recreated instanceof MainActivity);
+      assertNotSame(activity, recreated);
+      activity = (MainActivity) recreated;
+    } finally {
+      instrumentation.removeMonitor(monitor);
+    }
+  }
+
+  private AccessibilityNodeInfo awaitWindowText(String text) {
+    long deadline = SystemClock.uptimeMillis() + 5000;
+    while (SystemClock.uptimeMillis() < deadline) {
+      AccessibilityNodeInfo root = instrumentation.getUiAutomation().getRootInActiveWindow();
+      if (root != null && hasExactText(root, text)) return root;
+      SystemClock.sleep(50);
+    }
+    throw new AssertionError("No visible dialog option: " + text);
+  }
+
+  private static boolean hasExactText(AccessibilityNodeInfo root, String text) {
+    for (AccessibilityNodeInfo node : root.findAccessibilityNodeInfosByText(text))
+      if (node.getText() != null && text.contentEquals(node.getText())) return true;
+    return false;
+  }
+
+  private void assertAppearanceSavedToDisk(boolean dark) throws Exception {
+    File saved = new File(context.getApplicationInfo().dataDir, "shared_prefs/appearance.xml");
+    long deadline = SystemClock.uptimeMillis() + 5000;
+    while (SystemClock.uptimeMillis() < deadline) {
+      if (saved.isFile()) {
+        try (InputStream input = new FileInputStream(saved)) {
+          XmlPullParser parser = Xml.newPullParser();
+          parser.setInput(input, "UTF-8");
+          for (int event = parser.next();
+              event != XmlPullParser.END_DOCUMENT;
+              event = parser.next()) {
+            if (event == XmlPullParser.START_TAG
+                && "boolean".equals(parser.getName())
+                && "dark".equals(parser.getAttributeValue(null, "name")))
+              if (Boolean.toString(dark).equals(parser.getAttributeValue(null, "value"))) return;
+          }
+        }
+      }
+      SystemClock.sleep(50);
+    }
+    fail("Appearance selection must be persisted to disk");
+  }
+
+  private static View viewWithDescription(View view, String description) {
+    CharSequence label = view.getContentDescription();
+    if (label != null && description.contentEquals(label)) return view;
+    if (view instanceof ViewGroup) {
+      ViewGroup group = (ViewGroup) view;
+      for (int i = 0; i < group.getChildCount(); i++) {
+        View found = viewWithDescription(group.getChildAt(i), description);
+        if (found != null) return found;
+      }
+    }
+    return null;
   }
 
   private void awaitScanIdle() throws Exception {

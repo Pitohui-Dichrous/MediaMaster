@@ -49,6 +49,7 @@ import androidx.media3.common.Player;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.ui.PlayerView;
+import io.mediamaster.app.Ui;
 import io.mediamaster.app.media.VideoItem;
 import java.io.File;
 import java.util.ArrayList;
@@ -60,10 +61,7 @@ import org.videolan.libvlc.util.VLCVideoLayout;
 /** Local playback with an uninterrupted Exo repeat pipeline and VLC codec fallback. */
 @UnstableApi
 public final class PlayerActivity extends Activity {
-  private static final int ACCENT = 0xff60e0c0,
-      INK = 0xff081310,
-      TEXT = 0xfff4f8f7,
-      MUTED = 0xffb6c4bf;
+  private static final int ACCENT = Ui.ACCENT, TEXT = 0xfffaf9fc, MUTED = 0xffd1ced8;
   private static final String EXTRA_QUEUE = "queue",
       EXTRA_INDEX = "index",
       EXTRA_SHUFFLE = "shuffle";
@@ -104,10 +102,15 @@ public final class PlayerActivity extends Activity {
   private ImageButton playButton, modeButton, rotateButton, portraitButton;
   private boolean portraitMode, pageTransitioning, pageSuspended;
   private int pageGeneration;
+  private long completionGeneration, pendingCompletionGeneration = -1;
   private VelocityTracker pageVelocity;
   private ThreeWindowPager pager;
   private VideoPage previousPage, currentPage, nextPage;
-  private final Runnable automaticAdvance = this::advanceAutomatically;
+  private final Runnable automaticAdvance =
+      () -> {
+        if (this.handlingEnd && pendingCompletionGeneration == completionGeneration)
+          advanceAutomatically();
+      };
   private ProgressBar loading;
   private SeekBar seek;
   private DirectionalThumbDrawable seekThumb;
@@ -203,6 +206,15 @@ public final class PlayerActivity extends Activity {
       useVlc = state.getBoolean("vlc");
       speed = state.getFloat("speed", 1f);
     }
+    int navigationMode =
+        getSharedPreferences("player", MODE_PRIVATE)
+            .getInt(
+                "portrait_navigation_mode",
+                mode == PlaybackOrder.SHUFFLE ? PlaybackOrder.SHUFFLE : PlaybackOrder.SEQUENTIAL);
+    if (getIntent().getBooleanExtra(EXTRA_SHUFFLE, false)) navigationMode = PlaybackOrder.SHUFFLE;
+    if (state != null) navigationMode = state.getInt("portrait_navigation_mode", navigationMode);
+    order.setPortraitNavigationMode(navigationMode);
+    order.setPortraitMode(portraitMode);
     audioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
     setVolumeControlStream(AudioManager.STREAM_MUSIC);
     previewLoader = new SeekPreviewLoader(this);
@@ -273,19 +285,30 @@ public final class PlayerActivity extends Activity {
 
     topBar = new LinearLayout(this);
     topBar.setGravity(Gravity.CENTER_VERTICAL);
-    topBar.setPadding(dp(8), dp(6), dp(8), dp(6));
-    ImageButton back = icon(PlayerIcons.BACK, "返回视频库", 48, TEXT);
+    topBar.setPadding(dp(8), dp(4), dp(8), dp(4));
+    ImageButton back = icon(PlayerIcons.BACK, "返回", 48, TEXT);
     back.setOnClickListener(v -> finish());
     topBar.addView(back);
-    title = text(14, TEXT);
+    title = text(15, TEXT);
     title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
     title.setMaxLines(1);
     title.setEllipsize(TextUtils.TruncateAt.END);
     title.setPadding(dp(8), 0, dp(8), 0);
     topBar.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
-    subtitle = text(12, TEXT);
+    subtitle = text(12, MUTED);
+    subtitle.setSingleLine(true);
     subtitle.setPadding(dp(4), 0, dp(8), 0);
     topBar.addView(subtitle);
+    rotateButton = icon(PlayerIcons.ROTATE, "旋转", 48, TEXT);
+    rotateButton.setContentDescription("旋转画面，长按恢复自动方向");
+    rotateButton.setOnClickListener(v -> toggleOrientation());
+    rotateButton.setOnLongClickListener(
+        v -> {
+          orientationOverride = false;
+          adaptOrientation(videoWidth(), videoHeight());
+          return true;
+        });
+    topBar.addView(rotateButton);
     ImageButton more = icon(PlayerIcons.MORE, "播放设置", 48, TEXT);
     more.setOnClickListener(v -> showSettings());
     topBar.addView(more);
@@ -293,27 +316,29 @@ public final class PlayerActivity extends Activity {
 
     bottomBar = new LinearLayout(this);
     bottomBar.setOrientation(LinearLayout.VERTICAL);
-    bottomBar.setPadding(dp(20), dp(4), dp(20), dp(8));
+    bottomBar.setPadding(dp(16), dp(8), dp(16), dp(8));
     LinearLayout times = new LinearLayout(this);
     times.setGravity(Gravity.CENTER_VERTICAL);
     currentTime = text(12, TEXT);
     currentTime.setTypeface(Typeface.MONOSPACE);
+    currentTime.setSingleLine(true);
     totalTime = text(12, TEXT);
     totalTime.setTypeface(Typeface.MONOSPACE);
+    totalTime.setSingleLine(true);
     totalTime.setGravity(Gravity.RIGHT);
     times.addView(currentTime, new LinearLayout.LayoutParams(0, -2, 1));
     times.addView(totalTime);
     bottomBar.addView(times);
     seek = new SeekBar(this);
     seek.setMax(10000);
-    seek.setProgressTintList(ColorStateList.valueOf(0xe6ffffff));
-    seek.setProgressBackgroundTintList(ColorStateList.valueOf(0x55ffffff));
+    seek.setProgressTintList(ColorStateList.valueOf(ACCENT));
+    seek.setProgressBackgroundTintList(ColorStateList.valueOf(0x66ffffff));
     seekThumb = new DirectionalThumbDrawable(this);
     seek.setThumb(seekThumb);
     seek.setSplitTrack(false);
     if (Build.VERSION.SDK_INT >= 29) {
-      seek.setMinHeight(dp(2));
-      seek.setMaxHeight(dp(2));
+      seek.setMinHeight(dp(3));
+      seek.setMaxHeight(dp(3));
     }
     // Leave the full irregular artwork visible at both ends of the track.
     seek.setPadding(dp(18), 0, dp(18), 0);
@@ -354,39 +379,36 @@ public final class PlayerActivity extends Activity {
         });
     LinearLayout controls = new LinearLayout(this);
     controls.setGravity(Gravity.CENTER);
-    modeButton = icon(PlayerIcons.REPEAT, "切换播放模式", 48, TEXT);
+    modeButton = icon(PlayerIcons.REPEAT, "播放模式", 48, TEXT);
     modeButton.setOnClickListener(v -> cycleMode());
+    modeButton.setOnLongClickListener(
+        v -> {
+          choosePlaybackMode();
+          return true;
+        });
     controls.addView(modeButton);
     space(controls);
-    ImageButton previous = icon(PlayerIcons.PREVIOUS, "上一个视频", 48, TEXT);
+    ImageButton previous = icon(PlayerIcons.PREVIOUS, "上一条", 48, TEXT);
     previous.setOnClickListener(v -> changeVideo(order.previous()));
     controls.addView(previous);
-    playButton = icon(PlayerIcons.PAUSE, "暂停", 48, TEXT);
-    playButton.setPadding(dp(9), dp(9), dp(9), dp(9));
+    playButton = icon(PlayerIcons.PAUSE, "暂停", 56, TEXT);
+    playButton.setPadding(dp(14), dp(14), dp(14), dp(14));
+    playButton.setBackground(ripple(0x33272637));
     playButton.setOnClickListener(
         v -> {
           setPlaying(!playRequested());
           showChrome();
         });
-    LinearLayout.LayoutParams playParams = new LinearLayout.LayoutParams(dp(48), dp(48));
+    LinearLayout.LayoutParams playParams = new LinearLayout.LayoutParams(dp(56), dp(56));
     playParams.setMargins(dp(8), 0, dp(8), 0);
     controls.addView(playButton, playParams);
-    ImageButton next = icon(PlayerIcons.NEXT, "下一个视频", 48, TEXT);
+    ImageButton next = icon(PlayerIcons.NEXT, "下一条", 48, TEXT);
     next.setOnClickListener(v -> changeVideo(order.next(false)));
     controls.addView(next);
     space(controls);
     portraitButton = icon(PlayerIcons.PORTRAIT_MODE, "竖屏播放", 48, TEXT);
     portraitButton.setOnClickListener(v -> setPortraitMode(!portraitMode));
     controls.addView(portraitButton);
-    rotateButton = icon(PlayerIcons.ROTATE, "切换横竖屏，长按恢复自动适配", 48, TEXT);
-    rotateButton.setOnClickListener(v -> toggleOrientation());
-    rotateButton.setOnLongClickListener(
-        v -> {
-          orientationOverride = false;
-          adaptOrientation(videoWidth(), videoHeight());
-          return true;
-        });
-    controls.addView(rotateButton);
     bottomBar.addView(controls);
     root.addView(bottomBar, new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM));
 
@@ -413,7 +435,7 @@ public final class PlayerActivity extends Activity {
     gestureHud = new LinearLayout(this);
     gestureHud.setGravity(Gravity.CENTER_VERTICAL);
     gestureHud.setPadding(dp(12), dp(8), dp(12), dp(8));
-    gestureHud.setBackground(rounded(0x55000000, 12));
+    gestureHud.setBackground(rounded(0xb3201d2c, 10));
     gestureHud.setVisibility(View.GONE);
     hudIcon = new ImageView(this);
     gestureHud.addView(hudIcon, new LinearLayout.LayoutParams(dp(22), dp(22)));
@@ -437,9 +459,9 @@ public final class PlayerActivity extends Activity {
             right = Math.max(right, insets.getDisplayCutout().getSafeInsetRight());
             top = Math.max(top, insets.getDisplayCutout().getSafeInsetTop());
           }
-          topBar.setPadding(dp(8) + left, dp(6) + top, dp(8) + right, dp(6));
-          int gutter = getResources().getConfiguration().screenWidthDp < 360 ? dp(8) : dp(20);
-          bottomBar.setPadding(gutter + left, dp(4), gutter + right, dp(8) + bottom);
+          topBar.setPadding(dp(8) + left, dp(4) + top, dp(8) + right, dp(4));
+          int gutter = getResources().getConfiguration().screenWidthDp < 360 ? dp(8) : dp(16);
+          bottomBar.setPadding(gutter + left, dp(8), gutter + right, dp(8) + bottom);
           FrameLayout.LayoutParams hp = (FrameLayout.LayoutParams) gestureHud.getLayoutParams();
           hp.topMargin = dp(62) + top;
           gestureHud.setLayoutParams(hp);
@@ -589,6 +611,8 @@ public final class PlayerActivity extends Activity {
     cancelInteractions();
     cancelTapRecognition();
     portraitMode = enabled;
+    order.setPortraitMode(enabled);
+    applyRepeatPolicy();
     if (enabled) ensurePortraitWindow();
     else {
       previousPage.release();
@@ -598,6 +622,7 @@ public final class PlayerActivity extends Activity {
     else if (orientationOverride) setRequestedOrientation(desiredOrientation);
     else adaptOrientation(videoWidth(), videoHeight());
     updatePresentationUi();
+    updateModeUi();
     portraitButton.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
     showChrome();
   }
@@ -690,7 +715,7 @@ public final class PlayerActivity extends Activity {
 
   /** Promote by rotating references. All three native video surfaces remain attached. */
   private void adoptPreparedPage(int direction) {
-    handler.removeCallbacks(automaticAdvance);
+    invalidateCompletion();
     currentPage.setPlayback(false, false, false);
     currentPage.rewindIfEnded();
     if (direction > 0) {
@@ -738,8 +763,7 @@ public final class PlayerActivity extends Activity {
   private void prepareNeighbor(VideoPage page, int index) {
     page.setPlayback(false, false, false);
     if (page.index == index && (page.exo != null || page.vlc != null || page.failed)) return;
-    page.prepare(
-        queue.get(index), index, 0, false, order.mode() == PlaybackOrder.SINGLE, speed, false);
+    page.prepare(queue.get(index), index, 0, false, order.repeatsCurrent(), speed, false);
   }
 
   private void showSeekPreview(long at) {
@@ -887,6 +911,7 @@ public final class PlayerActivity extends Activity {
 
   @Override
   protected void onStop() {
+    invalidateCompletion();
     cancelInteractions();
     if (order != null) {
       restorePosition = position();
@@ -916,7 +941,8 @@ public final class PlayerActivity extends Activity {
     if (order == null) return;
     state.putString(EXTRA_QUEUE, queueToken);
     state.putInt(EXTRA_INDEX, order.current());
-    state.putInt("mode", order.mode());
+    state.putInt("mode", order.fullScreenMode());
+    state.putInt("portrait_navigation_mode", order.portraitNavigationMode());
     state.putLong("position", started ? position() : restorePosition);
     state.putBoolean("playing", started ? playRequested() : shouldPlay);
     state.putBoolean("orientation_override", orientationOverride);
@@ -967,10 +993,14 @@ public final class PlayerActivity extends Activity {
             if (page != currentPage || !started || handlingEnd) return;
             handlingEnd = true;
             final long generation = page.generation;
+            final long completion = ++completionGeneration;
+            pendingCompletionGeneration = completion;
             handler.post(
                 () -> {
-                  if (started && currentPage == page && page.generation == generation)
-                    advanceAutomatically();
+                  if (started
+                      && currentPage == page
+                      && page.generation == generation
+                      && completionGeneration == completion) advanceAutomatically();
                 });
           }
 
@@ -1029,7 +1059,7 @@ public final class PlayerActivity extends Activity {
         order.current(),
         start,
         forceVlc,
-        order.mode() == PlaybackOrder.SINGLE,
+        order.repeatsCurrent(),
         playbackRate(),
         true);
     syncCurrentPage();
@@ -1075,11 +1105,11 @@ public final class PlayerActivity extends Activity {
     shouldPlay = false;
     updatePlayUi();
     showChrome();
-    new AlertDialog.Builder(this)
-        .setTitle("暂时无法播放")
+    new AlertDialog.Builder(this, Ui.dialogTheme(this))
+        .setTitle("无法播放")
         .setMessage("文件可能尚未下载完成、已移动，或使用了设备无法解码的格式。可选择下一个视频继续观看。")
-        .setNegativeButton("返回视频库", (d, w) -> finish())
-        .setPositiveButton("下一个", (d, w) -> changeVideo(order.next(false)))
+        .setNegativeButton("返回", (d, w) -> finish())
+        .setPositiveButton("下一条", (d, w) -> changeVideo(order.next(false)))
         .show();
   }
 
@@ -1122,7 +1152,7 @@ public final class PlayerActivity extends Activity {
   }
 
   private void changeVideo(int index) {
-    handler.removeCallbacks(automaticAdvance);
+    invalidateCompletion();
     cancelInteractions();
     if (portraitMode && currentPage.index != index) {
       if (nextPage.index == index && pageReady(nextPage)) {
@@ -1143,21 +1173,32 @@ public final class PlayerActivity extends Activity {
     showChrome();
   }
 
+  private void invalidateCompletion() {
+    completionGeneration++;
+    pendingCompletionGeneration = -1;
+    handlingEnd = false;
+    handler.removeCallbacks(automaticAdvance);
+  }
+
   private void advanceAutomatically() {
     if (!started) return;
-    if (portraitMode && (gestureKind == GESTURE_PAGE || pageTransitioning)) {
+    if (!playRequested()) {
+      invalidateCompletion();
+      return;
+    }
+    if (scrubbing
+        || gestureSeeking
+        || (portraitMode && (gestureKind == GESTURE_PAGE || pageTransitioning))) {
       handler.removeCallbacks(automaticAdvance);
       handler.postDelayed(automaticAdvance, 150);
       return;
     }
-    if (order.mode() == PlaybackOrder.SINGLE && useVlc) {
+    if (order.repeatsCurrent()) {
       // input-repeat normally handles this internally; this only handles EOF from a
       // demuxer that ignores input-repeat. Keep the existing decoder/view alive.
       handlingEnd = false;
-      if (vlc != null) {
-        currentPage.seekTo(0);
-        vlc.play();
-      }
+      currentPage.seekTo(0);
+      applyCurrentPlayback(shouldPlay);
       return;
     }
     order.next(true);
@@ -1192,11 +1233,18 @@ public final class PlayerActivity extends Activity {
   }
 
   private void seekTo(long at) {
+    boolean resume = playRequested();
+    boolean completing = handlingEnd;
+    invalidateCompletion();
     currentPage.seekTo(GestureSeek.targetMs(0, at, duration()));
+    // VLC closes its native playback gate when reporting EOF. A deliberate rewind supersedes
+    // that completion and restores the user's earlier play/pause choice.
+    if (completing && vlc != null) applyCurrentPlayback(resume);
     updateProgress();
   }
 
   private void setPlaying(boolean play) {
+    if (!play) invalidateCompletion();
     shouldPlay = play;
     if (play && exo != null && exo.getPlaybackState() == Player.STATE_ENDED) currentPage.seekTo(0);
     applyCurrentPlayback(play);
@@ -1224,6 +1272,7 @@ public final class PlayerActivity extends Activity {
       playButton.setImageDrawable(
           new PlayerIcons(playing ? PlayerIcons.PAUSE : PlayerIcons.PLAY, TEXT));
       playButton.setContentDescription(playing ? "暂停" : "播放");
+      playButton.setTooltipText(playing ? "暂停" : "播放");
       if (playing) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
       else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     }
@@ -1238,7 +1287,12 @@ public final class PlayerActivity extends Activity {
   }
 
   private void cycleMode() {
-    setPlaybackMode((order.mode() + 1) % 3);
+    setPlaybackMode(
+        portraitMode
+            ? (order.mode() == PlaybackOrder.SHUFFLE
+                ? PlaybackOrder.SEQUENTIAL
+                : PlaybackOrder.SHUFFLE)
+            : (order.mode() + 1) % 3);
   }
 
   private void setPlaybackMode(int mode) {
@@ -1251,18 +1305,23 @@ public final class PlayerActivity extends Activity {
     order.setMode(mode);
     getSharedPreferences("player", MODE_PRIVATE)
         .edit()
-        .putInt("playback_mode", order.mode())
+        .putInt("playback_mode", order.fullScreenMode())
+        .putInt("portrait_navigation_mode", order.portraitNavigationMode())
         .apply();
-    boolean single = order.mode() == PlaybackOrder.SINGLE;
-    currentPage.setRepeat(single);
-    previousPage.setRepeat(single);
-    nextPage.setRepeat(single);
-    syncCurrentPage();
+    applyRepeatPolicy();
     applyCurrentPlayback(shouldPlay);
     ensurePortraitWindow();
     modeButton.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
     updateModeUi();
     showChrome();
+  }
+
+  private void applyRepeatPolicy() {
+    boolean single = order.repeatsCurrent();
+    currentPage.setRepeat(single);
+    previousPage.setRepeat(single);
+    nextPage.setRepeat(single);
+    syncCurrentPage();
   }
 
   private void updateModeUi() {
@@ -1276,7 +1335,12 @@ public final class PlayerActivity extends Activity {
                 ? PlayerIcons.REPEAT_ONE
                 : mode == PlaybackOrder.SHUFFLE ? PlayerIcons.SHUFFLE : PlayerIcons.REPEAT,
             TEXT));
-    modeButton.setContentDescription("当前" + name + "，点击切换播放模式");
+    modeButton.setTooltipText(
+        portraitMode ? (mode == PlaybackOrder.SHUFFLE ? "随机切集" : "顺序切集") : name);
+    modeButton.setContentDescription(
+        portraitMode
+            ? "当前视频循环，" + (mode == PlaybackOrder.SHUFFLE ? "随机" : "顺序") + "切集，点击切换"
+            : "当前" + name + "，点击切换播放模式");
   }
 
   private void toggleOrientation() {
@@ -1312,51 +1376,61 @@ public final class PlayerActivity extends Activity {
 
   private void showSettings() {
     handler.removeCallbacks(hideChrome);
-    new AlertDialog.Builder(this)
-        .setTitle("播放设置")
-        .setItems(
-            new String[] {
-              "播放速度 · " + speed + "×",
-              "滑动灵敏度",
-              "恢复自动横竖屏",
-              "手势使用说明",
-              "播放模式",
-              portraitMode ? "切回全屏播放" : "竖屏播放"
-            },
-            (d, item) -> {
-              if (item == 0) chooseSpeed();
-              else if (item == 1) chooseSensitivity();
-              else if (item == 2) {
-                orientationOverride = false;
-                adaptOrientation(videoWidth(), videoHeight());
-                toast(portraitMode ? "退出竖屏模式后按视频方向适配" : "按视频方向自动适配");
-              } else if (item == 4) choosePlaybackMode();
-              else if (item == 5) setPortraitMode(!portraitMode);
-              else
-                new AlertDialog.Builder(this)
-                    .setTitle("手势使用说明")
-                    .setMessage(
-                        "在画面中左右滑动调整进度，松手后跳转。\n\n"
-                            + "小幅滑动按秒精调；距离越长，快进或后退的跨度越大。向回滑动即可缩小跨度。\n\n"
-                            + "拖动进度条或左右滑动时显示附近画面预览。长按画面临时两倍速，松手恢复。\n\n"
-                            + "全屏模式：左侧上下滑动调亮度，右侧上下滑动调音量。\n\n"
-                            + "竖屏模式：上滑下一条，下滑上一条；左右滑动仍调进度。切集遵循顺序/随机模式，单集循环也允许手动切集。\n\n"
-                            + "手机图标进入竖屏，展开图标切回全屏。单击显示控制，双击播放暂停。原方向键切换横竖屏，长按恢复自动适配。")
-                    .setPositiveButton("知道了", (dialog, w) -> showChrome())
-                    .show();
-            })
+    ArrayList<String> labels = new ArrayList<>();
+    ArrayList<Runnable> actions = new ArrayList<>();
+    labels.add("倍速 · " + speed + "×");
+    actions.add(this::chooseSpeed);
+    labels.add("灵敏度");
+    actions.add(this::chooseSensitivity);
+    labels.add(portraitMode ? "切集顺序" : "播放模式");
+    actions.add(this::choosePlaybackMode);
+    labels.add(portraitMode ? "全屏播放" : "竖屏播放");
+    actions.add(() -> setPortraitMode(!portraitMode));
+    if (!portraitMode) {
+      labels.add("自动方向");
+      actions.add(
+          () -> {
+            orientationOverride = false;
+            adaptOrientation(videoWidth(), videoHeight());
+            toast("自动适配");
+          });
+    }
+    labels.add("手势说明");
+    actions.add(this::showGestureHelp);
+    new AlertDialog.Builder(this, Ui.dialogTheme(this))
+        .setTitle("设置")
+        .setItems(labels.toArray(new String[0]), (d, item) -> actions.get(item).run())
         .setOnDismissListener(d -> scheduleHide())
         .show();
   }
 
+  private void showGestureHelp() {
+    new AlertDialog.Builder(this, Ui.dialogTheme(this))
+        .setTitle("手势说明")
+        .setMessage(
+            "横滑调进度，短滑微调、长滑加速；松手定位。长按临时两倍速。\n\n"
+                + "全屏：左侧上下调亮度，右侧调音量。\n\n"
+                + "竖屏：当前视频循环，上滑下一条、下滑上一条；切集可选顺序或随机。\n\n"
+                + "单击显示控件，双击播放或暂停。手机与展开图标切换模式；旋转键切换方向，长按恢复自动适配。")
+        .setPositiveButton("关闭", (dialog, which) -> showChrome())
+        .show();
+  }
+
   private void choosePlaybackMode() {
-    new AlertDialog.Builder(this)
-        .setTitle("播放模式")
+    final boolean navigation = portraitMode;
+    String[] choices =
+        navigation ? new String[] {"顺序", "随机"} : new String[] {"顺序连播", "单集循环", "随机播放"};
+    int selected = navigation ? (order.mode() == PlaybackOrder.SHUFFLE ? 1 : 0) : order.mode();
+    new AlertDialog.Builder(this, Ui.dialogTheme(this))
+        .setTitle(navigation ? "切集顺序" : "播放模式")
         .setSingleChoiceItems(
-            new String[] {"顺序连播", "单集循环", "随机播放"},
-            order.mode(),
-            (dialog, selected) -> {
-              setPlaybackMode(selected);
+            choices,
+            selected,
+            (dialog, choice) -> {
+              setPlaybackMode(
+                  navigation
+                      ? (choice == 1 ? PlaybackOrder.SHUFFLE : PlaybackOrder.SEQUENTIAL)
+                      : choice);
               dialog.dismiss();
             })
         .setNegativeButton("取消", (dialog, which) -> showChrome())
@@ -1365,11 +1439,11 @@ public final class PlayerActivity extends Activity {
 
   private void chooseSpeed() {
     float[] values = {.5f, .75f, 1f, 1.25f, 1.5f, 2f};
-    String[] labels = {"0.5×", "0.75×", "1× 正常", "1.25×", "1.5×", "2×"};
+    String[] labels = {"0.5×", "0.75×", "1×", "1.25×", "1.5×", "2×"};
     int selected = 2;
     for (int i = 0; i < values.length; i++) if (values[i] == speed) selected = i;
-    new AlertDialog.Builder(this)
-        .setTitle("播放速度")
+    new AlertDialog.Builder(this, Ui.dialogTheme(this))
+        .setTitle("倍速")
         .setSingleChoiceItems(
             labels,
             selected,
@@ -1388,10 +1462,10 @@ public final class PlayerActivity extends Activity {
   private void chooseSensitivity() {
     float[] values = {.65f, 1f, 1.5f};
     int selected = sensitivity < .9f ? 0 : sensitivity > 1.2f ? 2 : 1;
-    new AlertDialog.Builder(this)
-        .setTitle("滑动灵敏度")
+    new AlertDialog.Builder(this, Ui.dialogTheme(this))
+        .setTitle("灵敏度")
         .setSingleChoiceItems(
-            new String[] {"精细 · 更长的精调范围", "均衡 · 推荐", "快速 · 较短滑动跨越更多"},
+            new String[] {"精细", "均衡", "快速"},
             selected,
             (dialog, item) -> {
               sensitivity = values[item];
@@ -1483,9 +1557,10 @@ public final class PlayerActivity extends Activity {
     ImageButton button = new ImageButton(this);
     button.setImageDrawable(new PlayerIcons(glyph, color));
     button.setContentDescription(label);
+    button.setTooltipText(label);
     button.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER);
-    button.setPadding(dp(14), dp(14), dp(14), dp(14));
-    button.setBackground(ripple(0x10000000));
+    button.setPadding(dp(12), dp(12), dp(12), dp(12));
+    button.setBackground(ripple(Color.TRANSPARENT));
     button.setLayoutParams(new LinearLayout.LayoutParams(dp(size), dp(size)));
     return button;
   }
@@ -1512,7 +1587,7 @@ public final class PlayerActivity extends Activity {
 
   private RippleDrawable ripple(int base) {
     return new RippleDrawable(
-        ColorStateList.valueOf(0x4060e0c0), rounded(base, 60), rounded(Color.WHITE, 60));
+        ColorStateList.valueOf(0x33ffffff), rounded(base, 12), rounded(Color.WHITE, 12));
   }
 
   private int dp(float value) {

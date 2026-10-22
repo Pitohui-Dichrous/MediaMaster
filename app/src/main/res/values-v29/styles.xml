@@ -1,0 +1,14 @@
+<resources>
+    <style name="AppThemeNavigation" parent="AppThemeBase">
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:forceDarkAllowed">false</item>
+    </style>
+    <style name="AppThemeDarkNavigation" parent="AppThemeDarkBase">
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:forceDarkAllowed">false</item>
+    </style>
+    <style name="PlayerThemeNavigation" parent="PlayerThemeBase">
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:forceDarkAllowed">false</item>
+    </style>
+</resources>

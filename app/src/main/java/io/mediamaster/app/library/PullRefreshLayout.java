@@ -8,6 +8,11 @@ import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.RectF;
+import android.media.AudioAttributes;
+import android.os.SystemClock;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
+import android.provider.Settings;
 import android.view.HapticFeedbackConstants;
 import android.view.MotionEvent;
 import android.view.View;
@@ -37,6 +42,9 @@ public final class PullRefreshLayout extends FrameLayout {
   private float downX, downY, pullStartY, pullDistance;
   private boolean possiblePull, dragging, refreshing, returning, pendingRefresh;
   private ValueAnimator returnAnimator;
+  private final HapticPulseQueue hapticPulses;
+  private final Vibrator vibrator;
+  private final AudioAttributes hapticAttributes;
 
   public PullRefreshLayout(Context context) {
     super(context);
@@ -50,6 +58,50 @@ public final class PullRefreshLayout extends FrameLayout {
     setWillNotDraw(false);
     setClipChildren(true);
     setFocusable(false);
+    vibrator = (Vibrator) context.getSystemService(Context.VIBRATOR_SERVICE);
+    hapticAttributes =
+        new AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+            .build();
+    hapticPulses =
+        new HapticPulseQueue(
+            new HapticPulseQueue.Scheduler() {
+              @Override
+              public long nowMillis() {
+                return SystemClock.uptimeMillis();
+              }
+
+              @Override
+              public void postDelayed(Runnable action, long delayMillis) {
+                PullRefreshLayout.this.postDelayed(action, delayMillis);
+              }
+
+              @Override
+              public void remove(Runnable action) {
+                removeCallbacks(action);
+              }
+            },
+            this::performPullClick);
+  }
+
+  private boolean performPullClick() {
+    if (!isAttachedToWindow() || !hasWindowFocus() || !isHapticFeedbackEnabled()) return false;
+    if (Settings.System.getInt(
+            getContext().getContentResolver(), Settings.System.HAPTIC_FEEDBACK_ENABLED, 1)
+        == 0) return false;
+    if (vibrator == null || !vibrator.hasVibrator()) return false;
+    try {
+      // Texture ticks can be unsupported; OEM click effects can outlast the next distance step.
+      // A 20ms touch pulse leaves a quiet gap before the queue's next 40ms slot. Sonification
+      // attributes classify it as TOUCH so Android's touch intensity and DND settings still apply.
+      vibrator.vibrate(
+          VibrationEffect.createOneShot(20, VibrationEffect.DEFAULT_AMPLITUDE), hapticAttributes);
+      return true;
+    } catch (SecurityException denied) {
+      // The normal VIBRATE permission is declared; keep a native fallback for restricted builds.
+      return performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
+    }
   }
 
   public void setOnRefreshListener(Runnable listener) {
@@ -116,6 +168,7 @@ public final class PullRefreshLayout extends FrameLayout {
   }
 
   private void beginTouch(MotionEvent event) {
+    hapticPulses.cancel();
     resetTouchTracking();
     if (refreshing || returning || target == null) return;
     activePointer = event.getPointerId(0);
@@ -225,15 +278,19 @@ public final class PullRefreshLayout extends FrameLayout {
     if (fromFinger && movingForward && next >= revealDistance) {
       float progress = Math.min(1, (next - revealDistance) / (triggerDistance - revealDistance));
       int reached = Math.min(4, (int) Math.floor(progress * 4 + .0001f));
-      while (lastHapticStep < reached) {
-        lastHapticStep++;
-        // No ignore-settings flags. Retraction and return animation never call this path.
-        performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+      if (lastHapticStep < reached) {
+        lastHapticStep = reached;
+        // Distance earns each click once. Queue crossed thresholds instead of submitting them
+        // simultaneously, which can replace the previous vibration before it has been felt.
+        hapticPulses.advanceTo(reached);
       }
     }
   }
 
   private void finishPull(boolean commit) {
+    // A normal committed release keeps earned clicks (at most 160ms) during the 180ms return.
+    // Cancellation must never leave tactile feedback running after the gesture is abandoned.
+    if (!commit) hapticPulses.cancel();
     resetTouchTracking();
     cancelReturnAnimation();
     pendingRefresh = commit && refreshListener != null;
@@ -294,6 +351,7 @@ public final class PullRefreshLayout extends FrameLayout {
   }
 
   private void cancelPendingAndReset() {
+    if (hapticPulses != null) hapticPulses.cancel();
     boolean hadPendingRefresh = pendingRefresh;
     pendingRefresh = false;
     cancelReturnAnimation();

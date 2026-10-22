@@ -6,15 +6,15 @@
 
 100% vibe coding
 
-个人使用的安卓本地视频播放器。当前正式版 **1.3.0**，最低支持 Android 8.0，主要面向 Android 14。
+个人使用的安卓本地视频播放器。当前正式版 **1.4.0**，最低支持 Android 8.0，主要面向 Android 14。
 
 支持基础文件管理和视频搜索，支持横屏播放和竖屏播放。首页可以一键播放随机视频。
 
 ## 安装
 
-下载 APK 后直接安装。
+下载 APK 后直接安装。1.4.0 沿用“映序预览”，可覆盖已有预览版并保留设置，与原正式版 1.3.0 并存；不会覆盖 1.3.0 或自动迁移其设置。
 
-Release 同时附有源码包 `MediaMaster-1.3.0-source.zip`、安装说明 `INSTALL.txt`、验证记录 `VERIFICATION.txt` 和校验清单 `SHA256SUMS.txt`。
+Release 同时附有源码包 `MediaMaster-1.4.0-source.zip`、安装说明 `INSTALL.txt`、验证记录 `VERIFICATION.txt` 和校验清单 `SHA256SUMS.txt`。
 
 首次打开允许读取视频；需要扫描整个共享存储空间时，在文件夹菜单中授予全盘访问权限。完整说明见 [安装与使用](安装与使用.txt)。
 
@@ -38,16 +38,16 @@ Java 17、Android SDK 35、Gradle Wrapper 8.11.1、Android Gradle Plugin 8.9.2�
 用 Android Studio 打开项目，或在已配置 `JAVA_HOME` 与 `ANDROID_HOME` 的环境执行：
 
 ```sh
-./gradlew assembleDebug
-./gradlew testDebugUnitTest lintDebug
+./gradlew assembleDebug -PpreviewInstall=true
+./gradlew testDebugUnitTest lintDebug -PpreviewInstall=true
 ```
 
 Windows 可使用 `gradlew.bat`，当前本机还可运行：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1 assembleRelease
+powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1 assembleRelease -PpreviewInstall=true
 ```
 
-发布签名不在仓库中。没有本机发布签名配置时，构建使用调试密钥，无法覆盖已安装的正式版。后续正式更新必须保留并使用同一发布签名。
+1.4.0 沿用预览版包名 `io.mediamaster.app.preview` 和签名；原 1.3.0 的发布密钥已丢失。签名密钥不在仓库中，其他机器自行构建的 APK 不一定能覆盖安装。后续更新必须保留并使用 1.4.0 的同一包名和签名密钥。
 
 <!-- 维护约定：保持本页简洁，仅在十分必要时增加功能描述。 -->

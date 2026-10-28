@@ -49,6 +49,7 @@ import androidx.media3.common.Player;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.ui.PlayerView;
+import io.mediamaster.app.TaskIdentity;
 import io.mediamaster.app.Ui;
 import io.mediamaster.app.media.VideoItem;
 import java.io.File;
@@ -168,6 +169,7 @@ public final class PlayerActivity extends Activity {
   @Override
   protected void onCreate(Bundle state) {
     super.onCreate(state);
+    TaskIdentity.update(this);
     requestWindowFeature(Window.FEATURE_NO_TITLE);
     getWindow().setStatusBarColor(Color.TRANSPARENT);
     getWindow().setNavigationBarColor(Color.BLACK);
@@ -568,7 +570,9 @@ public final class PlayerActivity extends Activity {
           gestureSeeking = false;
           seekTo(gestureTarget);
           updateLoadingIndicator();
-          showChrome();
+          // A screen swipe returns straight to the video once its seek is committed.
+          // SeekBar dragging retains its separate, visible-controls completion behavior.
+          setChrome(false);
         } else if (finished == GESTURE_BOOST) {
           endBoost();
         } else if (finished == GESTURE_PAGE) {
@@ -877,6 +881,7 @@ public final class PlayerActivity extends Activity {
   }
 
   private void cancelInteractions() {
+    boolean cancelScreenSeek = gestureSeeking || gestureKind == GESTURE_SEEK;
     touchDown = false;
     handler.removeCallbacks(longPress);
     handler.removeCallbacks(hideHud);
@@ -889,6 +894,7 @@ public final class PlayerActivity extends Activity {
     hideSeekPreview();
     updateLoadingIndicator();
     if (gestureHud != null) gestureHud.setVisibility(View.GONE);
+    if (cancelScreenSeek) setChrome(false);
   }
 
   @Override
@@ -907,6 +913,12 @@ public final class PlayerActivity extends Activity {
     startCurrent(restorePosition);
     handler.post(ticker);
     showChrome();
+  }
+
+  @Override
+  protected void onResume() {
+    super.onResume();
+    TaskIdentity.update(this);
   }
 
   @Override

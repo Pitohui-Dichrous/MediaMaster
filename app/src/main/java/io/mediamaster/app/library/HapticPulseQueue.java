@@ -18,7 +18,7 @@ final class HapticPulseQueue {
   private final Scheduler scheduler;
   private final BooleanSupplier pulse;
   private final Runnable dispatch = this::dispatchNext;
-  private int requested, sent;
+  private int pending;
   private long nextPulseAt;
   private boolean scheduled, rejected;
 
@@ -27,28 +27,29 @@ final class HapticPulseQueue {
     this.pulse = pulse;
   }
 
-  void advanceTo(int step) {
-    if (rejected || step < 0) return;
-    requested = Math.max(requested, Math.min(STEPS - 1, step) + 1);
-    if (!scheduled && sent < requested) dispatchNext();
+  void enqueue(int count) {
+    if (rejected || count <= 0) return;
+    pending = Math.min(STEPS, pending + Math.min(STEPS, count));
+    if (!scheduled) dispatchNext();
   }
 
   private void dispatchNext() {
     scheduled = false;
-    if (rejected || sent >= requested) return;
+    if (rejected || pending == 0) return;
     long now = scheduler.nowMillis();
     if (now < nextPulseAt) {
       schedule(nextPulseAt - now);
       return;
     }
-    sent++;
+    pending--;
     if (!pulse.getAsBoolean()) {
       // Respect disabled system/view feedback; do not retry until the next gesture.
       rejected = true;
+      pending = 0;
       return;
     }
     nextPulseAt = scheduler.nowMillis() + INTERVAL_MS;
-    if (sent < requested) schedule(INTERVAL_MS);
+    if (pending > 0) schedule(INTERVAL_MS);
   }
 
   private void schedule(long delay) {
@@ -56,11 +57,16 @@ final class HapticPulseQueue {
     scheduler.postDelayed(dispatch, delay);
   }
 
-  void cancel() {
+  /** Retraction drops old clicks without allowing a new pulse to overlap the last one. */
+  void discardPending() {
     scheduler.remove(dispatch);
     scheduled = false;
+    pending = 0;
+  }
+
+  void cancel() {
+    discardPending();
     rejected = false;
-    requested = sent = 0;
     nextPulseAt = 0;
   }
 }

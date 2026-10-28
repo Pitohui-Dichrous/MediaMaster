@@ -58,6 +58,7 @@ public class MainActivity extends Activity {
     Ui.configure(this);
     setTheme(Ui.isDark(this) ? R.style.AppThemeDark : R.style.AppTheme);
     super.onCreate(state);
+    TaskIdentity.update(this);
     getWindow().setStatusBarColor(Ui.BG);
     getWindow().setNavigationBarColor(Ui.BG);
     updateSystemBarAppearance();
@@ -407,6 +408,7 @@ public class MainActivity extends Activity {
   @Override
   protected void onResume() {
     super.onResume();
+    TaskIdentity.update(this);
     active = true;
     thumbnails.setPaused(false);
     if (startupRefreshPending) {

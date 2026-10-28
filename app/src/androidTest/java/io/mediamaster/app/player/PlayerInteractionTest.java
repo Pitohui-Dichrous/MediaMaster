@@ -290,10 +290,102 @@ public final class PlayerInteractionTest {
         () -> {
           assertEquals(target, ((ExoPlayer) read("exo")).getCurrentPosition(), 250);
           assertEquals(View.GONE, ((View) read("seekPreview")).getVisibility());
+          assertScreenSeekFinishedAndChromeHidden();
           return null;
         });
     SystemClock.sleep(ViewConfiguration.getLongPressTimeout() + 80);
-    assertFalse(onMain(() -> (Boolean) read("boosting")));
+    onMain(
+        () -> {
+          assertFalse((Boolean) read("boosting"));
+          assertScreenSeekFinishedAndChromeHidden();
+          assertFalse(
+              "A paused swipe must not start playback",
+              ((ExoPlayer) read("exo")).getPlayWhenReady());
+          return null;
+        });
+  }
+
+  @Test
+  public void playingHorizontalSeekHidesControlsImmediatelyAndLateUpdatesDoNotReopenThem()
+      throws Exception {
+    float width = touch.getWidth(), y = touch.getHeight() * .45f, x = width * .4f;
+    send(MotionEvent.ACTION_DOWN, x, y);
+    send(MotionEvent.ACTION_MOVE, x + width * .08f, y);
+    onMain(
+        () -> {
+          assertTrue((Boolean) read("gestureSeeking"));
+          assertEquals(View.VISIBLE, ((View) read("bottomBar")).getVisibility());
+          assertEquals(View.VISIBLE, ((View) read("seekPreview")).getVisibility());
+          return null;
+        });
+    send(MotionEvent.ACTION_UP, x + width * .08f, y);
+    onMain(
+        () -> {
+          assertScreenSeekFinishedAndChromeHidden();
+          assertTrue(
+              "Screen seeking retains the playing state",
+              ((ExoPlayer) read("exo")).getPlayWhenReady());
+          return null;
+        });
+    // Let seek completion, preview extraction and the progress ticker deliver their callbacks.
+    SystemClock.sleep(ViewConfiguration.getLongPressTimeout() + 150);
+    onMain(
+        () -> {
+          assertScreenSeekFinishedAndChromeHidden();
+          return null;
+        });
+  }
+
+  @Test
+  public void cancelledHorizontalSeekHidesControlsWithoutSeekingAndTheNextTapStillWorks()
+      throws Exception {
+    onMain(
+        () -> {
+          ExoPlayer player = (ExoPlayer) read("exo");
+          player.pause();
+          player.seekTo(1000);
+          return null;
+        });
+    SystemClock.sleep(180);
+    float width = touch.getWidth(), x = width * .35f, y = touch.getHeight() * .45f;
+    send(MotionEvent.ACTION_DOWN, x, y);
+    send(MotionEvent.ACTION_MOVE, x + width * .18f, y);
+    assertEquals(View.VISIBLE, onMain(() -> ((View) read("bottomBar")).getVisibility()).intValue());
+    send(MotionEvent.ACTION_CANCEL, x + width * .18f, y);
+    onMain(
+        () -> {
+          assertScreenSeekFinishedAndChromeHidden();
+          assertEquals(
+              "Cancellation does not commit the preview",
+              1000,
+              ((ExoPlayer) read("exo")).getCurrentPosition(),
+              150);
+          assertFalse(((ExoPlayer) read("exo")).getPlayWhenReady());
+          return null;
+        });
+    SystemClock.sleep(ViewConfiguration.getLongPressTimeout() + 80);
+    onMain(
+        () -> {
+          assertScreenSeekFinishedAndChromeHidden();
+          assertFalse((Boolean) read("boosting"));
+          return null;
+        });
+    send(MotionEvent.ACTION_DOWN, x, y);
+    send(MotionEvent.ACTION_UP, x, y);
+    await(() -> onMain(() -> ((View) read("bottomBar")).getVisibility() == View.VISIBLE), 1200);
+  }
+
+  private void assertScreenSeekFinishedAndChromeHidden() throws Exception {
+    assertFalse((Boolean) read("touchDown"));
+    assertFalse((Boolean) read("gestureSeeking"));
+    assertEquals(0, ((Integer) read("gestureKind")).intValue());
+    assertFalse((Boolean) read("chromeVisible"));
+    assertEquals(View.INVISIBLE, ((View) read("topBar")).getVisibility());
+    assertEquals(View.INVISIBLE, ((View) read("bottomBar")).getVisibility());
+    assertEquals(View.GONE, ((View) read("seekPreview")).getVisibility());
+    assertNull(
+        "A late preview callback cannot restore the image",
+        ((ImageView) read("previewImage")).getDrawable());
   }
 
   @Test
@@ -357,6 +449,10 @@ public final class PlayerInteractionTest {
           bar.dispatchTouchEvent(up);
           up.recycle();
           assertEquals(View.GONE, ((View) read("seekPreview")).getVisibility());
+          assertEquals(
+              "SeekBar dragging keeps the controls visible",
+              View.VISIBLE,
+              ((View) read("bottomBar")).getVisibility());
           return null;
         });
   }

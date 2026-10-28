@@ -686,6 +686,14 @@ public final class PortraitPlaybackTest {
         1000, onMain(() -> ((ExoPlayer) read("exo")).getCurrentPosition()).longValue(), 100);
     assertEquals(View.VISIBLE, onMain(() -> ((View) read("bottomBar")).getVisibility()).intValue());
     send(MotionEvent.ACTION_UP, x + 31.5f * density, y);
+    onMain(
+        () -> {
+          assertFalse((Boolean) read("chromeVisible"));
+          assertEquals(View.INVISIBLE, ((View) read("topBar")).getVisibility());
+          assertEquals(View.INVISIBLE, ((View) read("bottomBar")).getVisibility());
+          assertEquals(View.GONE, ((View) read("seekPreview")).getVisibility());
+          return null;
+        });
     assertEquals(
         target, onMain(() -> ((ExoPlayer) read("exo")).getCurrentPosition()).longValue(), 120);
     assertTrue(portrait());

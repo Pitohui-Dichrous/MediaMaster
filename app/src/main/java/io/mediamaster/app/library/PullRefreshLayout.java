@@ -43,6 +43,7 @@ public final class PullRefreshLayout extends FrameLayout {
   private boolean possiblePull, dragging, refreshing, returning, pendingRefresh;
   private ValueAnimator returnAnimator;
   private final HapticPulseQueue hapticPulses;
+  private final PullHapticSteps hapticSteps;
   private final Vibrator vibrator;
   private final AudioAttributes hapticAttributes;
 
@@ -83,6 +84,7 @@ public final class PullRefreshLayout extends FrameLayout {
               }
             },
             this::performPullClick);
+    hapticSteps = new PullHapticSteps(hapticPulses, revealDistance, triggerDistance, dp(2));
   }
 
   private boolean performPullClick() {
@@ -168,7 +170,7 @@ public final class PullRefreshLayout extends FrameLayout {
   }
 
   private void beginTouch(MotionEvent event) {
-    hapticPulses.cancel();
+    hapticSteps.reset();
     resetTouchTracking();
     if (refreshing || returning || target == null) return;
     activePointer = event.getPointerId(0);
@@ -210,11 +212,16 @@ public final class PullRefreshLayout extends FrameLayout {
         return tryStartPull(event);
       case MotionEvent.ACTION_POINTER_DOWN:
         if (dragging) return true;
+        hapticSteps.reset();
         resetTouchTracking();
         return false;
       case MotionEvent.ACTION_UP:
+        if (dragging) return true;
+        resetTouchTracking();
+        return false;
       case MotionEvent.ACTION_CANCEL:
         if (dragging) return true;
+        hapticSteps.reset();
         resetTouchTracking();
         return false;
       default:
@@ -250,6 +257,7 @@ public final class PullRefreshLayout extends FrameLayout {
       case MotionEvent.ACTION_POINTER_DOWN:
       case MotionEvent.ACTION_CANCEL:
         if (!dragging) {
+          hapticSteps.reset();
           resetTouchTracking();
           return returning || refreshing;
         }
@@ -271,26 +279,19 @@ public final class PullRefreshLayout extends FrameLayout {
   private void setPullDistance(float distance, boolean fromFinger) {
     if (Float.isNaN(distance) || Float.isInfinite(distance)) distance = 0;
     float next = Math.max(0, Math.min(triggerDistance * 1.5f, distance));
-    boolean movingForward = next > pullDistance;
     pullDistance = next;
     if (target != null) target.setTranslationY(next);
     invalidate();
-    if (fromFinger && movingForward && next >= revealDistance) {
-      float progress = Math.min(1, (next - revealDistance) / (triggerDistance - revealDistance));
-      int reached = Math.min(4, (int) Math.floor(progress * 4 + .0001f));
-      if (lastHapticStep < reached) {
-        lastHapticStep = reached;
-        // Distance earns each click once. Queue crossed thresholds instead of submitting them
-        // simultaneously, which can replace the previous vibration before it has been felt.
-        hapticPulses.advanceTo(reached);
-      }
+    if (fromFinger) {
+      hapticSteps.moveTo(next);
+      lastHapticStep = hapticSteps.lastReachedStep();
     }
   }
 
   private void finishPull(boolean commit) {
     // A normal committed release keeps earned clicks (at most 160ms) during the 180ms return.
     // Cancellation must never leave tactile feedback running after the gesture is abandoned.
-    if (!commit) hapticPulses.cancel();
+    if (!commit) hapticSteps.reset();
     resetTouchTracking();
     cancelReturnAnimation();
     pendingRefresh = commit && refreshListener != null;
@@ -351,7 +352,7 @@ public final class PullRefreshLayout extends FrameLayout {
   }
 
   private void cancelPendingAndReset() {
-    if (hapticPulses != null) hapticPulses.cancel();
+    if (hapticSteps != null) hapticSteps.reset();
     boolean hadPendingRefresh = pendingRefresh;
     pendingRefresh = false;
     cancelReturnAnimation();

@@ -37,7 +37,6 @@ import io.mediamaster.app.library.LibraryFastScroller;
 import io.mediamaster.app.library.LibraryHeader;
 import io.mediamaster.app.library.PullRefreshLayout;
 import io.mediamaster.app.media.VideoItem;
-import io.mediamaster.app.media.VideoRepository;
 import io.mediamaster.app.player.PlaybackOrder;
 import io.mediamaster.app.player.PlayerActivity;
 import java.io.File;
@@ -295,10 +294,9 @@ public final class MainFlowTest {
   }
 
   @Test
-  public void externalChangesWaitForManualRefreshAndOwnedVideoCanBeRenamedAndDeleted()
+  public void publishedMediaAndExternalAndOwnedMutationsUpdateWithoutManualRefresh()
       throws Exception {
     launchLibrary();
-    int initialSize = onMain(() -> items("all").size());
     VideoItem fixture =
         onMain(
             () -> {
@@ -332,36 +330,32 @@ public final class MainFlowTest {
         ready.put(MediaStore.Video.Media.IS_PENDING, 0);
         resolver.update(owned, ready, null, null);
       }
-      // MediaStore notifications must not start a foreground rescan or change the visible library.
+      // Publishing a completed row must reconcile the foreground library without a manual action.
       resolver.notifyChange(owned, null);
-      long idleDeadline = SystemClock.uptimeMillis() + 2000;
-      while (SystemClock.uptimeMillis() < idleDeadline) {
-        onMain(
-            () -> {
-              assertFalse(
-                  "New media notifications do not trigger background scans",
-                  (Boolean) read(activity, "scanning"));
-              assertEquals(
-                  "The foreground library stays unchanged until refresh",
-                  initialSize,
-                  items("all").size());
-              for (VideoItem video : items("all")) assertFalse(video.name.equals(stem + ".mp4"));
-              return null;
-            });
-        SystemClock.sleep(100);
-      }
-      refreshLibrary();
       awaitLibraryName(stem + ".mp4", true);
-      VideoRepository repository = new VideoRepository(context);
+      String externalName = stem + "_external.mp4";
+      ContentValues externalRename = new ContentValues();
+      externalRename.put(MediaStore.Video.Media.DISPLAY_NAME, externalName);
+      assertEquals(1, resolver.update(owned, externalRename, null, null));
+      resolver.notifyChange(owned, null);
+      awaitLibraryName(externalName, true);
+      awaitLibraryName(stem + ".mp4", false);
       VideoItem item =
           onMain(
               () -> {
                 for (VideoItem video : items("all"))
-                  if (video.name.equals(stem + ".mp4")) return video;
+                  if (video.name.equals(externalName)) return video;
                 throw new AssertionError("Use the real library item and its scanned URI");
               });
       String renamedName = stem + "_renamed.mp4";
-      VideoItem renamed = repository.rename(item, renamedName);
+      onMain(
+          () -> {
+            invokeMutation(item, renamedName, false);
+            return null;
+          });
+      awaitLibraryName(renamedName, true);
+      awaitLibraryName(externalName, false);
+      VideoItem renamed = onMain(() -> libraryItem(renamedName));
       try (Cursor cursor =
           resolver.query(
               Uri.parse(renamed.uri),
@@ -373,10 +367,13 @@ public final class MainFlowTest {
         assertTrue(cursor.moveToFirst());
         assertEquals("Rename updates the stored file name", renamedName, cursor.getString(0));
       }
-      refreshLibrary();
-      awaitLibraryName(renamedName, true);
-      awaitLibraryName(stem + ".mp4", false);
-      repository.delete(renamed);
+      onMain(
+          () -> {
+            invokeMutation(renamed, null, true);
+            return null;
+          });
+      awaitLibraryName(renamedName, false);
+      awaitScanIdle();
       deleted = true;
       try (Cursor cursor =
           resolver.query(
@@ -388,8 +385,6 @@ public final class MainFlowTest {
         assertTrue(
             "Deletion removes the temporary media row", cursor == null || cursor.getCount() == 0);
       }
-      refreshLibrary();
-      awaitLibraryName(renamedName, false);
     } finally {
       // Only this test's returned insert URI is ever removed.
       if (!deleted) {
@@ -411,7 +406,59 @@ public final class MainFlowTest {
   }
 
   @Test
-  public void playerReturnAndBackgroundResumeNeverRewriteTheLibraryCache() throws Exception {
+  public void anExternalRenameWhileBackgroundedAppearsOnResumeWithoutManualRefresh()
+      throws Exception {
+    launchLibrary();
+    String stem = "MediaMaster_QA_Resume_" + UUID.randomUUID();
+    Uri owned = createPublishedCopy(stem + ".mp4");
+    boolean deleted = false;
+    try {
+      awaitLibraryName(stem + ".mp4", true);
+      onMain(
+          () -> {
+            assertTrue(activity.moveTaskToBack(true));
+            return null;
+          });
+      long deadline = SystemClock.uptimeMillis() + 10000;
+      while (onMain(() -> (Boolean) read(activity, "active"))
+          && SystemClock.uptimeMillis() < deadline) SystemClock.sleep(50);
+      assertFalse(onMain(() -> (Boolean) read(activity, "active")));
+      String renamed = stem + "_background.mp4";
+      ContentValues values = new ContentValues();
+      values.put(MediaStore.Video.Media.DISPLAY_NAME, renamed);
+      assertEquals(1, context.getContentResolver().update(owned, values, null, null));
+      context.startActivity(
+          new Intent(context, MainActivity.class)
+              .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP));
+      awaitLibraryName(renamed, true);
+      awaitLibraryName(stem + ".mp4", false);
+      assertTrue(onMain(() -> (Boolean) read(activity, "active")));
+      assertEquals(1, context.getContentResolver().delete(owned, null, null));
+      deleted = true;
+      awaitLibraryName(renamed, false);
+    } finally {
+      if (!deleted) context.getContentResolver().delete(owned, null, null);
+    }
+  }
+
+  @Test
+  public void folderMenuKeepsFullAndConfiguredFolderScansExplicit() throws Exception {
+    launchLibrary();
+    onMain(
+        () -> {
+          invoke(activity, "sources");
+          return null;
+        });
+    AccessibilityNodeInfo options = awaitWindowText("全盘扫描");
+    assertTrue("Full storage scanning stays in the secondary menu", hasExactText(options, "全盘扫描"));
+    assertTrue("Configured folders have an explicit scan action", hasExactText(options, "扫描文件夹"));
+    assertTrue("System folder selection remains available", hasExactText(options, "选择文件夹"));
+    clickText(options, "关闭");
+  }
+
+  @Test
+  public void unchangedPlayerReturnAndBackgroundResumeDoNotRewriteTheLibraryCache()
+      throws Exception {
     launchLibrary();
     File cache = new File(context.getFilesDir(), "video-library-v4.json");
     long marker = 1_600_000_000_000L;
@@ -434,8 +481,9 @@ public final class MainFlowTest {
             return null;
           });
       SystemClock.sleep(700);
+      awaitScanIdle();
       assertEquals(
-          "Returning from playback does not rescan or rewrite metadata",
+          "An unchanged lightweight index check does not rewrite metadata",
           marker,
           cache.lastModified());
       // This is the exact launcher resume path, with no Activity destruction or task replacement.
@@ -449,7 +497,8 @@ public final class MainFlowTest {
               .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
       context.startActivity(resume);
       SystemClock.sleep(700);
-      assertEquals("Switching back from Home does not rescan", marker, cache.lastModified());
+      awaitScanIdle();
+      assertEquals("An unchanged resume does not rewrite the cache", marker, cache.lastModified());
       onMain(
           () -> {
             assertFalse((Boolean) read(activity, "scanning"));
@@ -469,7 +518,7 @@ public final class MainFlowTest {
   }
 
   @Test
-  public void sameTaskRecreationSkipsScanButNewRecentTaskScansOnce() throws Exception {
+  public void recreationAndNewTasksReconcileWithoutRewritingAnUnchangedCache() throws Exception {
     launchLibrary();
     File cache = new File(context.getFilesDir(), "video-library-v4.json");
     long marker = 1_600_000_000_000L;
@@ -489,14 +538,13 @@ public final class MainFlowTest {
           recreated instanceof MainActivity);
       activity = (MainActivity) recreated;
       SystemClock.sleep(700);
+      awaitScanIdle();
       assertEquals(
           "The Activity is still inside the original task",
           originalTask,
           (int) onMain(() -> activity.getTaskId()));
       assertEquals(
-          "Configuration recreation reads cached metadata without scanning",
-          marker,
-          cache.lastModified());
+          "An unchanged recreated library preserves the cache", marker, cache.lastModified());
       onMain(
           () -> {
             activity.finishAndRemoveTask();
@@ -506,22 +554,23 @@ public final class MainFlowTest {
       activity =
           activityRule.launchActivity(
               new Intent(context, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
-      long deadline = SystemClock.uptimeMillis() + 45000;
-      while (cache.lastModified() == marker && SystemClock.uptimeMillis() < deadline)
-        SystemClock.sleep(100);
+      awaitLibraryName("01_Aurora.mp4", true);
+      awaitScanIdle();
       assertNotEquals(
           "A dismissed task gets a new task ID even if the process survives",
           originalTask,
           (int) onMain(() -> activity.getTaskId()));
-      assertTrue("First entry of a fresh task actually scans", cache.lastModified() > marker);
-      awaitScanIdle();
+      assertEquals(
+          "An unchanged new task also avoids a redundant cache write",
+          marker,
+          cache.lastModified());
     } finally {
       instrumentation.removeMonitor(monitor);
     }
   }
 
   @Test
-  public void appearanceSwitchPersistsAndPreservesSearchWithoutRescanningTheSameTask()
+  public void appearanceSwitchPersistsAndPreservesSearchWithoutRewritingTheSameCache()
       throws Exception {
     SharedPreferences preferences =
         context.getSharedPreferences("appearance", Context.MODE_PRIVATE);
@@ -566,7 +615,7 @@ public final class MainFlowTest {
             task,
             onMain(() -> activity.getTaskId()).intValue());
         assertEquals(
-            "Changing appearance must not scan or rewrite video metadata",
+            "Changing appearance does not rewrite unchanged video metadata",
             marker,
             cache.lastModified());
         assertEquals(dark, Ui.isDark(context));
@@ -829,12 +878,14 @@ public final class MainFlowTest {
       assertEquals("Holding past the trigger still has not indexed", marker, cache.lastModified());
       finishPull(refresh, down, MotionEvent.ACTION_UP, Ui.dp(context, 260));
       long deadline = SystemClock.uptimeMillis() + 20000;
-      while (cache.lastModified() == marker && SystemClock.uptimeMillis() < deadline)
-        SystemClock.sleep(40);
-      assertNotEquals(
-          "A real completed pull invokes the app's indexing callback",
-          marker,
-          cache.lastModified());
+      while (onMain(() -> items("all").size()) != original.size()
+          && SystemClock.uptimeMillis() < deadline) SystemClock.sleep(40);
+      assertEquals(
+          "A completed pull replaces synthetic rows with the actual media index",
+          original.size(),
+          onMain(() -> items("all").size()).intValue());
+      assertEquals(
+          "An unchanged index does not need a cache rewrite", marker, cache.lastModified());
       awaitScanIdle();
       awaitPullReturn(refresh);
       assertFalse(onMain(refresh::isRefreshing));
@@ -1018,8 +1069,22 @@ public final class MainFlowTest {
     onMain(
         () -> {
           items("all").clear();
-          for (int index = 0; index < 120; index++)
-            items("all").add(original.get(index % original.size()));
+          for (int index = 0; index < 120; index++) {
+            VideoItem item = original.get(index % original.size());
+            items("all")
+                .add(
+                    new VideoItem(
+                        "qa-repeat:" + index,
+                        item.name,
+                        item.uri,
+                        item.path,
+                        item.size,
+                        item.durationMs,
+                        item.modifiedMs,
+                        item.addedMs,
+                        item.width,
+                        item.height));
+          }
           invoke(activity, "filter");
           return null;
         });
@@ -1338,7 +1403,7 @@ public final class MainFlowTest {
       if (loaded) return;
       SystemClock.sleep(100);
     }
-    fail("Library scan must finish with all four generated QA fixtures within 45 seconds");
+    fail("Functional library setup must load all four generated QA fixtures");
   }
 
   private void refreshLibrary() throws Exception {
@@ -1363,7 +1428,54 @@ public final class MainFlowTest {
       if (found == present) return;
       SystemClock.sleep(100);
     }
-    fail("Manual library refresh must " + (present ? "discover " : "remove ") + name);
+    fail("Library reconciliation must " + (present ? "discover " : "remove ") + name);
+  }
+
+  private VideoItem libraryItem(String name) throws Exception {
+    for (VideoItem item : items("all")) if (item.name.equals(name)) return item;
+    throw new AssertionError("Missing library item " + name);
+  }
+
+  private Uri createPublishedCopy(String name) throws Exception {
+    VideoItem source = onMain(() -> libraryItem("01_Aurora.mp4"));
+    ContentResolver resolver = context.getContentResolver();
+    ContentValues values = new ContentValues();
+    values.put(MediaStore.Video.Media.DISPLAY_NAME, name);
+    values.put(MediaStore.Video.Media.MIME_TYPE, "video/mp4");
+    if (Build.VERSION.SDK_INT >= 29) {
+      values.put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/MediaMasterQA/Temporary/");
+      values.put(MediaStore.Video.Media.IS_PENDING, 1);
+    }
+    Uri owned = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values);
+    assertNotNull("A test owns its inserted media row", owned);
+    try {
+      try (InputStream input = resolver.openInputStream(Uri.parse(source.uri));
+          OutputStream output = resolver.openOutputStream(owned)) {
+        assertNotNull(input);
+        assertNotNull(output);
+        byte[] bytes = new byte[16384];
+        int read;
+        while ((read = input.read(bytes)) != -1) output.write(bytes, 0, read);
+      }
+      if (Build.VERSION.SDK_INT >= 29) {
+        ContentValues ready = new ContentValues();
+        ready.put(MediaStore.Video.Media.IS_PENDING, 0);
+        resolver.update(owned, ready, null, null);
+      }
+      resolver.notifyChange(owned, null);
+      return owned;
+    } catch (Exception failure) {
+      resolver.delete(owned, null, null);
+      throw failure;
+    }
+  }
+
+  private void invokeMutation(VideoItem item, String name, boolean delete) throws Exception {
+    Method method =
+        MainActivity.class.getDeclaredMethod(
+            "mutate", VideoItem.class, String.class, boolean.class);
+    method.setAccessible(true);
+    method.invoke(activity, item, name, delete);
   }
 
   private AccessibilityNodeInfo awaitSortDialog() {

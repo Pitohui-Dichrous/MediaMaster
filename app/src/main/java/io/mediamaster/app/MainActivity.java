@@ -27,9 +27,10 @@ public class MainActivity extends Activity {
   private final ExecutorService worker = Executors.newSingleThreadExecutor();
   private final Handler handler = new Handler(Looper.getMainLooper());
   private final List<VideoItem> all = new ArrayList<>(), visible = new ArrayList<>();
-  // Task IDs survive configuration changes but change after the user dismisses the recent task.
-  private static int lastAutoScanTaskId = -1;
-  private boolean startupRefreshPending;
+  private static final int INDEX_SCAN = 0, FOLDER_SCAN = 1, FULL_SCAN = 2;
+  private MediaIndexObserver mediaObserver;
+  private int queuedScan = -1;
+  private boolean queuedScanFeedback, scanShowingStatus, fullScanAfterPermission;
   private RecyclerView list;
   private LibraryHeader libraryHeader;
   private LibraryFastScroller fastScroller;
@@ -42,14 +43,21 @@ public class MainActivity extends Activity {
   private ImageButton scanButton;
   private boolean scanning, scanAgain, active, destroyed;
   private int sort = 0;
+  private int renderedDateKind = -1;
   private String query = "";
   private Parcelable restoredListState;
   private VideoItem pendingItem;
   private String pendingName;
   private boolean pendingDelete, pendingConsentCompletes, mutationInFlight, pendingWaitConsent;
+  private final Runnable reconcileMediaIndex =
+      () -> {
+        if (active && !destroyed) scan(false);
+      };
   private final Runnable clearRefreshStatus =
       () -> {
-        if (!scanning && status != null && "刷新成功".contentEquals(status.getText()))
+        if (!scanShowingStatus
+            && status != null
+            && ("刷新成功".contentEquals(status.getText()) || "扫描完成".contentEquals(status.getText())))
           libraryStatus("", null);
       };
 
@@ -63,11 +71,13 @@ public class MainActivity extends Activity {
     getWindow().setNavigationBarColor(Ui.BG);
     updateSystemBarAppearance();
     repository = new VideoRepository(this);
+    mediaObserver = new MediaIndexObserver(this, handler, this::scheduleMediaReconcile);
     thumbnails = new ThumbnailLoader(this);
     sort = getPreferences(0).getInt("sort", 0);
     if (state != null) {
       query = state.getString("library_query", "");
       restoredListState = state.getParcelable("library_scroll");
+      fullScanAfterPermission = state.getBoolean("full_scan_after_permission");
     }
     if (state != null && state.getBoolean("pending_consent")) {
       pendingItem = (VideoItem) state.getSerializable("pending_item");
@@ -77,8 +87,6 @@ public class MainActivity extends Activity {
       pendingWaitConsent = pendingItem != null;
       mutationInFlight = pendingWaitConsent;
     }
-    startupRefreshPending = lastAutoScanTaskId != getTaskId();
-    if (startupRefreshPending) lastAutoScanTaskId = getTaskId();
     buildUi();
     search.setText(query);
     search.setSelection(search.length());
@@ -386,7 +394,17 @@ public class MainActivity extends Activity {
   public void onRequestPermissionsResult(int code, String[] p, int[] r) {
     super.onRequestPermissionsResult(code, p, r);
     if (code == 40) {
-      scan(false);
+      if (active) {
+        mediaObserver.stop();
+        mediaObserver.start();
+      }
+      if (fullScanAfterPermission && mediaPermission()) {
+        fullScanAfterPermission = false;
+        deepScan(true);
+      } else {
+        fullScanAfterPermission = false;
+        scan(false);
+      }
       if (!hasLibraryAccess())
         new AlertDialog.Builder(this)
             .setTitle("视频权限")
@@ -411,10 +429,10 @@ public class MainActivity extends Activity {
     TaskIdentity.update(this);
     active = true;
     thumbnails.setPaused(false);
-    if (startupRefreshPending) {
-      startupRefreshPending = false;
-      if (!scanning && !mutationInFlight) scan(false);
-    }
+    mediaObserver.start();
+    // Query only the published media index; this also covers changes missed while backgrounded.
+    handler.removeCallbacks(reconcileMediaIndex);
+    scan(false);
   }
 
   @Override
@@ -435,7 +453,8 @@ public class MainActivity extends Activity {
   @Override
   protected void onPause() {
     active = false;
-    scanAgain = false;
+    mediaObserver.stop();
+    handler.removeCallbacks(reconcileMediaIndex);
     super.onPause();
   }
 
@@ -448,6 +467,7 @@ public class MainActivity extends Activity {
   @Override
   protected void onDestroy() {
     destroyed = true;
+    mediaObserver.stop();
     handler.removeCallbacksAndMessages(null);
     worker.shutdownNow();
     thumbnails.close();
@@ -455,25 +475,58 @@ public class MainActivity extends Activity {
   }
 
   private void scan(boolean manual) {
+    requestLibraryScan(INDEX_SCAN, manual);
+  }
+
+  private void scanFolders(boolean manual) {
+    requestLibraryScan(FOLDER_SCAN, manual);
+  }
+
+  private void deepScan(boolean manual) {
+    requestLibraryScan(FULL_SCAN, manual);
+  }
+
+  private void scheduleMediaReconcile() {
+    if (!active || destroyed) return;
+    // A download/rename may publish several notifications. One trailing query handles the batch.
+    handler.removeCallbacks(reconcileMediaIndex);
+    handler.postDelayed(reconcileMediaIndex, 250);
+  }
+
+  private void requestLibraryScan(int mode, boolean feedback) {
     if (destroyed) return;
-    if (manual && !hasLibraryAccess()) {
+    if (feedback && !hasLibraryAccess()) {
       refresh.setRefreshing(false);
       permissions();
       return;
     }
-    if (scanning) {
+    if (scanning || mutationInFlight) {
+      queuedScan = Math.max(queuedScan, mode);
+      queuedScanFeedback |= feedback;
       scanAgain = true;
       return;
     }
+    final int runMode = Math.max(mode, queuedScan);
+    final boolean showFeedback = feedback || queuedScanFeedback;
+    queuedScan = -1;
+    queuedScanFeedback = false;
+    scanAgain = false;
     scanning = true;
-    scanButton.setEnabled(false);
-    libraryStatus("正在刷新", null);
-    refresh.setRefreshing(true);
+    scanShowingStatus = showFeedback;
+    if (showFeedback) {
+      scanButton.setEnabled(false);
+      libraryStatus(runMode == INDEX_SCAN ? "正在刷新" : "正在扫描", null);
+      refresh.setRefreshing(true);
+    }
     worker.execute(
         () -> {
           try {
-            List<VideoItem> items = repository.scan();
-            repository.saveCache(items);
+            List<VideoItem> items =
+                runMode == FULL_SCAN
+                    ? repository.scan()
+                    : runMode == FOLDER_SCAN
+                        ? repository.scanFolders()
+                        : repository.refreshMediaIndex();
             List<String> warnings = repository.getWarnings();
             handler.post(
                 () -> {
@@ -481,45 +534,63 @@ public class MainActivity extends Activity {
                   all.clear();
                   all.addAll(items);
                   scanning = false;
-                  refresh.setRefreshing(false);
+                  scanShowingStatus = false;
+                  if (showFeedback) refresh.setRefreshing(false);
                   scanButton.setEnabled(true);
                   filter();
-                  boolean limited = partialPermission() && !mediaPermission();
-                  if (!warnings.isEmpty()) {
-                    libraryStatus(
-                        "部分目录未读",
-                        v ->
-                            new AlertDialog.Builder(this)
-                                .setTitle("扫描提示")
-                                .setMessage(android.text.TextUtils.join("\n\n", warnings))
-                                .setPositiveButton("知道了", null)
-                                .show());
-                  } else if (limited) {
-                    libraryStatus("部分视频授权", v -> permissions());
-                  } else if (items.isEmpty() && !hasLibraryAccess()) {
-                    libraryStatus("未授权", v -> permissions());
-                  } else {
-                    libraryStatus("刷新成功", null);
-                    handler.postDelayed(clearRefreshStatus, 1800);
-                  }
-                  if (manual && !warnings.isEmpty()) toast("刷新完成，请查看扫描提示");
-                  if (scanAgain && active) {
-                    scanAgain = false;
-                    scan(false);
-                  }
+                  showScanResult(items, warnings, showFeedback, runMode);
+                  runQueuedScan();
                 });
+            // Publishing rows does not wait for persistence. Unchanged snapshots do not rewrite it.
+            repository.saveCache(items);
           } catch (Exception error) {
             handler.post(
                 () -> {
                   scanning = false;
+                  scanShowingStatus = false;
                   if (destroyed) return;
-                  refresh.setRefreshing(false);
+                  if (showFeedback) refresh.setRefreshing(false);
                   scanButton.setEnabled(true);
-                  libraryStatus("扫描失败", v -> scan(true));
-                  toast("扫描失败：" + safeMessage(error));
+                  libraryStatus(
+                      runMode == INDEX_SCAN ? "更新失败" : "扫描失败",
+                      v -> requestLibraryScan(runMode, true));
+                  if (showFeedback) toast("更新失败：" + safeMessage(error));
+                  runQueuedScan();
                 });
           }
         });
+  }
+
+  private void runQueuedScan() {
+    if (active && !destroyed && !scanning && !mutationInFlight && queuedScan >= 0)
+      requestLibraryScan(queuedScan, queuedScanFeedback);
+  }
+
+  private void showScanResult(
+      List<VideoItem> items, List<String> warnings, boolean feedback, int mode) {
+    if (!warnings.isEmpty()) {
+      libraryStatus(
+          "部分目录未读",
+          v ->
+              new AlertDialog.Builder(this)
+                  .setTitle("扫描提示")
+                  .setMessage(android.text.TextUtils.join("\n\n", warnings))
+                  .setPositiveButton("知道了", null)
+                  .show());
+    } else if (partialPermission() && !mediaPermission()) {
+      libraryStatus("部分视频授权", v -> permissions());
+    } else if (items.isEmpty() && !hasLibraryAccess()) {
+      libraryStatus("未授权", v -> permissions());
+    } else if (feedback) {
+      libraryStatus(mode == INDEX_SCAN ? "刷新成功" : "扫描完成", null);
+      handler.postDelayed(clearRefreshStatus, 1800);
+    } else if ("部分目录未读".contentEquals(status.getText())
+        || "部分视频授权".contentEquals(status.getText())
+        || "未授权".contentEquals(status.getText())
+        || "更新失败".contentEquals(status.getText())) {
+      libraryStatus("", null);
+    }
+    if (feedback && !warnings.isEmpty()) toast("刷新完成，请查看扫描提示");
   }
 
   private static final String[] SORT_FIELDS = {"修改时间", "保存时间", "视频名称", "视频时长", "文件大小"};
@@ -579,9 +650,11 @@ public class MainActivity extends Activity {
   }
 
   private void filter() {
-    visible.clear();
+    List<VideoItem> oldVisible = new ArrayList<>(visible);
+    List<VideoItem> nextVisible = new ArrayList<>();
     String needle = query.trim().toLowerCase(Locale.ROOT);
-    for (VideoItem v : all) if (v.name.toLowerCase(Locale.ROOT).contains(needle)) visible.add(v);
+    for (VideoItem v : all)
+      if (v.name.toLowerCase(Locale.ROOT).contains(needle)) nextVisible.add(v);
     Comparator<VideoItem> comparator;
     switch (sort / 2) {
       case 1:
@@ -602,9 +675,63 @@ public class MainActivity extends Activity {
     }
     boolean reverse = sort < 4 ? sort % 2 == 0 : sort % 2 == 1;
     if (reverse) comparator = comparator.reversed();
-    visible.sort(comparator.thenComparing(v -> v.id));
+    nextVisible.sort(comparator.thenComparing(v -> v.id));
     if (adapter == null) return;
-    adapter.notifyDataSetChanged();
+    int dateKind = sort / 2 == 1 ? 1 : 0;
+    boolean datePresentationChanged = renderedDateKind != dateKind;
+    renderedDateKind = dateKind;
+    boolean same = !datePresentationChanged && oldVisible.size() == nextVisible.size();
+    for (int index = 0; same && index < oldVisible.size(); index++)
+      same = sameVideoContent(oldVisible.get(index), nextVisible.get(index));
+    if (!same) {
+      LinearLayoutManager layout = (LinearLayoutManager) list.getLayoutManager();
+      boolean atTop = !list.canScrollVertically(-1);
+      int first = layout.findFirstVisibleItemPosition();
+      VideoItem anchor = first >= 0 && first < oldVisible.size() ? oldVisible.get(first) : null;
+      View firstView = first >= 0 ? layout.findViewByPosition(first) : null;
+      int offset = firstView == null ? 0 : layout.getDecoratedTop(firstView) - list.getPaddingTop();
+      DiffUtil.DiffResult diff =
+          DiffUtil.calculateDiff(
+              new DiffUtil.Callback() {
+                @Override
+                public int getOldListSize() {
+                  return oldVisible.size();
+                }
+
+                @Override
+                public int getNewListSize() {
+                  return nextVisible.size();
+                }
+
+                @Override
+                public boolean areItemsTheSame(int before, int after) {
+                  return videoIdentity(oldVisible.get(before))
+                      .equals(videoIdentity(nextVisible.get(after)));
+                }
+
+                @Override
+                public boolean areContentsTheSame(int before, int after) {
+                  return !datePresentationChanged
+                      && sameVideoContent(oldVisible.get(before), nextVisible.get(after));
+                }
+              },
+              false);
+      visible.clear();
+      visible.addAll(nextVisible);
+      diff.dispatchUpdatesTo(adapter);
+      if (atTop && restoredListState == null && !visible.isEmpty()) {
+        layout.scrollToPositionWithOffset(0, 0);
+      } else if (anchor != null && restoredListState == null) {
+        for (int index = 0; index < visible.size(); index++) {
+          VideoItem candidate = visible.get(index);
+          if (videoIdentity(anchor).equals(videoIdentity(candidate))
+              || (!anchor.path.isEmpty() && anchor.path.equals(candidate.path))) {
+            layout.scrollToPositionWithOffset(index, offset);
+            break;
+          }
+        }
+      }
+    }
     if (restoredListState != null && !visible.isEmpty()) {
       list.getLayoutManager().onRestoreInstanceState(restoredListState);
       restoredListState = null;
@@ -637,6 +764,23 @@ public class MainActivity extends Activity {
     }
   }
 
+  private static String videoIdentity(VideoItem item) {
+    return item.id.isEmpty() ? item.uri : item.id;
+  }
+
+  private static boolean sameVideoContent(VideoItem a, VideoItem b) {
+    return videoIdentity(a).equals(videoIdentity(b))
+        && a.name.equals(b.name)
+        && a.uri.equals(b.uri)
+        && a.path.equals(b.path)
+        && a.size == b.size
+        && a.durationMs == b.durationMs
+        && a.modifiedMs == b.modifiedMs
+        && a.addedMs == b.addedMs
+        && a.width == b.width
+        && a.height == b.height;
+  }
+
   private void open(int index, boolean shuffle) {
     if (visible.isEmpty()) {
       toast("暂无视频");
@@ -659,12 +803,13 @@ public class MainActivity extends Activity {
 
   private void sources() {
     List<String> items = repository.getSources();
-    String[] options = new String[4 + items.size()];
+    String[] options = new String[5 + items.size()];
     options[0] = "选择文件夹";
     options[1] = "输入路径";
-    options[2] = "全盘扫描";
-    options[3] = "视频权限";
-    for (int i = 0; i < items.size(); i++) options[4 + i] = Uri.decode(items.get(i));
+    options[2] = "扫描文件夹";
+    options[3] = "全盘扫描";
+    options[4] = "视频权限";
+    for (int i = 0; i < items.size(); i++) options[5 + i] = Uri.decode(items.get(i));
     new AlertDialog.Builder(this)
         .setTitle("扫描位置")
         .setItems(
@@ -672,24 +817,40 @@ public class MainActivity extends Activity {
             (dialog, which) -> {
               if (which == 0) pickFolder();
               else if (which == 1) pathDialog();
-              else if (which == 2) allFiles();
-              else if (which == 3) permissions();
+              else if (which == 2) scanFolders(true);
+              else if (which == 3) allFiles();
+              else if (which == 4) permissions();
               else {
-                String source = items.get(which - 4);
+                String source = items.get(which - 5);
                 new AlertDialog.Builder(this)
-                    .setTitle("移除目录？")
-                    .setMessage(Uri.decode(source) + "\n\n只移除扫描授权记录，视频文件不会删除。媒体库仍可能显示这个位置的视频。")
-                    .setPositiveButton(
-                        "移除",
+                    .setTitle(Uri.decode(source))
+                    .setItems(
+                        new String[] {"重新扫描", "移除目录"},
                         (a, b) -> {
-                          repository.removeSource(source);
-                          scan(true);
+                          if (b == 0) scanFolders(true);
+                          else confirmRemoveSource(source);
                         })
                     .setNegativeButton("取消", null)
                     .show();
               }
             })
         .setNegativeButton("关闭", null)
+        .show();
+  }
+
+  private void confirmRemoveSource(String source) {
+    new AlertDialog.Builder(this)
+        .setTitle("移除目录？")
+        .setMessage(Uri.decode(source) + "\n\n只移除扫描授权记录，视频文件不会删除。媒体库仍可能显示这个位置的视频。")
+        .setPositiveButton(
+            "移除",
+            (a, b) ->
+                worker.execute(
+                    () -> {
+                      repository.removeSource(source);
+                      handler.post(() -> scanFolders(true));
+                    }))
+        .setNegativeButton("取消", null)
         .show();
   }
 
@@ -740,12 +901,12 @@ public class MainActivity extends Activity {
                       try {
                         if (Build.VERSION.SDK_INT >= 30
                             && !Environment.isExternalStorageManager()) {
-                          allFiles();
+                          requestAllFiles(false);
                           return;
                         }
                         repository.addPath(path);
                         dialog.dismiss();
-                        scan(true);
+                        scanFolders(true);
                       } catch (Exception e) {
                         input.setError(safeMessage(e));
                       }
@@ -754,20 +915,26 @@ public class MainActivity extends Activity {
   }
 
   private void allFiles() {
+    requestAllFiles(true);
+  }
+
+  private void requestAllFiles(boolean scanAfterGrant) {
     if (Build.VERSION.SDK_INT >= 30) {
       if (Environment.isExternalStorageManager()) {
-        scan(true);
-        toast("正在扫描");
+        if (scanAfterGrant) deepScan(true);
         return;
       }
       new AlertDialog.Builder(this)
-          .setTitle("全盘扫描")
+          .setTitle(scanAfterGrant ? "全盘扫描" : "文件访问")
           .setMessage(
-              "下一步在系统页面允许“管理所有文件”。映序会扫描手机共享存储和可访问的存储卡，用于发现未被媒体库收录的视频，也支持手动路径。\n\n"
+              (scanAfterGrant
+                      ? "下一步在系统页面允许“管理所有文件”，然后扫描手机共享存储和可访问的存储卡，查找未被媒体库收录的视频。\n\n"
+                      : "下一步在系统页面允许“管理所有文件”，然后可按完整路径添加文件夹。\n\n")
                   + "安卓限制的其他应用私有目录无法读取。")
           .setPositiveButton(
               "前往授权",
               (a, b) -> {
+                fullScanAfterPermission |= scanAfterGrant;
                 try {
                   startActivityForResult(
                       new Intent(
@@ -781,7 +948,12 @@ public class MainActivity extends Activity {
               })
           .setNegativeButton("取消", null)
           .show();
-    } else permissions();
+    } else if (mediaPermission()) {
+      if (scanAfterGrant) deepScan(true);
+    } else {
+      fullScanAfterPermission |= scanAfterGrant;
+      permissions();
+    }
   }
 
   private void settings() {
@@ -822,7 +994,7 @@ public class MainActivity extends Activity {
                             + "全屏左侧上下滑动：亮度\n"
                             + "全屏右侧上下滑动：音量\n"
                             + "竖屏上下滑动：切集；当前视频循环\n\n"
-                            + "关闭最近任务后的首次启动会扫描视频。其他时间可下拉刷新，或点刷新按钮。\n\n"
+                            + "媒体库中的新视频与改名会自动更新；下拉或点刷新只核对媒体索引。未入库的视频可在“扫描设置”中扫描文件夹或全盘。\n\n"
                             + "保存时间为媒体库收录时间；无记录时使用修改时间。")
                     .setPositiveButton("知道了", null)
                     .show();
@@ -977,15 +1149,8 @@ public class MainActivity extends Activity {
         () -> {
           try {
             if (delete) repository.delete(item);
-            else repository.rename(item, name);
-            handler.post(
-                () -> {
-                  mutationInFlight = false;
-                  if (destroyed || isFinishing()) return;
-                  pendingItem = null;
-                  toast(delete ? "已删除" : "已重命名");
-                  scan(false);
-                });
+            VideoItem replacement = delete ? null : repository.rename(item, name);
+            persistMutation(item, replacement, delete ? "已删除" : "已重命名");
           } catch (MutationConsentException consent) {
             handler.post(
                 () -> {
@@ -999,23 +1164,46 @@ public class MainActivity extends Activity {
                     pendingItem = null;
                     pendingWaitConsent = false;
                     mutationInFlight = false;
+                    runQueuedScan();
                   }
                 });
           } catch (Exception e) {
-            handler.post(
-                () -> {
-                  mutationInFlight = false;
-                  if (destroyed || isFinishing()) return;
-                  pendingItem = null;
-                  new AlertDialog.Builder(this)
-                      .setTitle(delete ? "未能删除视频" : "未能重命名")
-                      .setMessage(safeMessage(e) + "\n\n可尝试在“扫描位置”中重新授权文件夹或开启全盘访问。")
-                      .setPositiveButton("管理权限", (a, b) -> sources())
-                      .setNegativeButton("关闭", null)
-                      .show();
-                });
+            handler.post(() -> mutationFailed(delete, e));
           }
         });
+  }
+
+  /** Runs on the serial library worker, before any queued observer reconciliation. */
+  private void persistMutation(VideoItem original, VideoItem replacement, String message) {
+    repository.rememberMutation(original, replacement);
+    List<VideoItem> items = repository.snapshot();
+    handler.post(
+        () -> {
+          mutationInFlight = false;
+          pendingWaitConsent = false;
+          pendingItem = null;
+          if (destroyed || isFinishing()) return;
+          all.clear();
+          all.addAll(items);
+          filter();
+          toast(message);
+          runQueuedScan();
+          scheduleMediaReconcile();
+        });
+  }
+
+  private void mutationFailed(boolean deleting, Exception error) {
+    mutationInFlight = false;
+    pendingWaitConsent = false;
+    pendingItem = null;
+    if (destroyed || isFinishing()) return;
+    new AlertDialog.Builder(this)
+        .setTitle(deleting ? "未能删除视频" : "未能重命名")
+        .setMessage(safeMessage(error) + "\n\n可尝试在“扫描位置”中重新授权文件夹或开启全盘访问。")
+        .setPositiveButton("管理权限", (a, b) -> sources())
+        .setNegativeButton("关闭", null)
+        .show();
+    runQueuedScan();
   }
 
   private void details(VideoItem item) {
@@ -1050,12 +1238,18 @@ public class MainActivity extends Activity {
       Uri uri = data.getData();
       try {
         repository.addTree(uri);
-        scan(true);
+        scanFolders(true);
       } catch (Exception e) {
         toast("文件夹授权失败：" + safeMessage(e));
       }
-    } else if (request == 43 || request == 44) {
-      // Returning from an explicitly requested permission flow is a user action, not a resume scan.
+    } else if (request == 43) {
+      boolean deep = fullScanAfterPermission;
+      fullScanAfterPermission = false;
+      if (Build.VERSION.SDK_INT >= 30 && Environment.isExternalStorageManager()) {
+        if (deep) deepScan(true);
+        else scan(true);
+      }
+    } else if (request == 44) {
       if (hasLibraryAccess()) scan(true);
     } else if (request == 42) {
       pendingWaitConsent = false;
@@ -1063,13 +1257,21 @@ public class MainActivity extends Activity {
       VideoItem item = pendingItem;
       if (result == RESULT_OK && item != null) {
         if (pendingConsentCompletes) {
-          pendingItem = null;
-          toast("已删除");
-          scan(false);
+          mutationInFlight = true;
+          worker.execute(
+              () -> {
+                try {
+                  persistMutation(item, null, "已删除");
+                } catch (Exception error) {
+                  handler.post(() -> mutationFailed(true, error));
+                }
+              });
         } else mutate(item, pendingName, pendingDelete);
       } else {
         pendingItem = null;
         toast("已取消");
+        runQueuedScan();
+        scheduleMediaReconcile();
       }
     }
   }
@@ -1077,6 +1279,7 @@ public class MainActivity extends Activity {
   @Override
   protected void onSaveInstanceState(Bundle state) {
     super.onSaveInstanceState(state);
+    state.putBoolean("full_scan_after_permission", fullScanAfterPermission);
     state.putString("library_query", query);
     if (list != null && list.getLayoutManager() != null)
       state.putParcelable("library_scroll", list.getLayoutManager().onSaveInstanceState());
@@ -1098,6 +1301,24 @@ public class MainActivity extends Activity {
   }
 
   private final class VideoAdapter extends RecyclerView.Adapter<VideoHolder> {
+    private final Map<String, Long> stableIds = new HashMap<>();
+    private long nextStableId;
+
+    VideoAdapter() {
+      setHasStableIds(true);
+    }
+
+    @Override
+    public long getItemId(int position) {
+      String identity = videoIdentity(visible.get(position));
+      Long value = stableIds.get(identity);
+      if (value == null) {
+        value = nextStableId++;
+        stableIds.put(identity, value);
+      }
+      return value;
+    }
+
     public VideoHolder onCreateViewHolder(ViewGroup parent, int type) {
       PressFeedbackLayout line = new PressFeedbackLayout(MainActivity.this);
       line.setOrientation(LinearLayout.HORIZONTAL);

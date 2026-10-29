@@ -29,6 +29,7 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Paths;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -57,6 +58,7 @@ public final class VideoRepository {
   };
   private static final Set<String> SUPPORTED = new HashSet<>(Arrays.asList(EXTENSIONS));
   private static final String SOURCE_KEY = "sources";
+  private static final String MUTATIONS_KEY = "pending_media_mutations";
   private final Context context;
   private final ContentResolver resolver;
   private final SharedPreferences preferences;
@@ -66,6 +68,13 @@ public final class VideoRepository {
   private volatile List<String> warnings = Collections.emptyList();
   private volatile List<String> watchPaths = Collections.emptyList();
   private Map<String, VideoItem> previous = new HashMap<>();
+  private List<VideoItem> current;
+  private String lastSavedJson;
+  private String lastMutationsJson;
+  private final Map<String, Set<String>> sourceOrigins = new HashMap<>();
+  private final Set<String> sharedOrigins = new HashSet<>(), legacyOrigins = new HashSet<>();
+  private final MediaMutationOverlay mutations = new MediaMutationOverlay();
+  private boolean mutationsLoaded;
   private LibVLC metadataEngine;
 
   public VideoRepository(Context context) {
@@ -131,7 +140,11 @@ public final class VideoRepository {
     }
   }
 
-  public void removeSource(String source) {
+  public synchronized void removeSource(String source) {
+    ensureSnapshot();
+    // addPath stores a canonical source. Accept the same caller path at removal too, including
+    // Android's /data/user/0 versus /data/data aliases. This runs only for an explicit edit.
+    if (source != null && !source.startsWith("content://")) source = canonical(source);
     synchronized (sourcesLock) {
       List<String> sources = getSources();
       sources.remove(source);
@@ -145,48 +158,189 @@ public final class VideoRepository {
         }
       }
     }
+    List<VideoItem> retained = new ArrayList<>();
+    for (VideoItem item : current) {
+      String itemKey = key(item.uri, item.path);
+      Set<String> origins = sourceOrigins.get(itemKey);
+      boolean belonged = origins != null && origins.remove(source);
+      // Old v4 caches did not record provenance. A SAF URI still identifies its grant exactly.
+      if (item.id.startsWith("document:") && belongsToSource(item, source)) {
+        belonged = true;
+        legacyOrigins.remove(itemKey);
+      }
+      if (!belonged
+          || item.id.startsWith("media:")
+          || sharedOrigins.contains(itemKey)
+          || legacyOrigins.contains(itemKey)
+          || (origins != null && !origins.isEmpty())) retained.add(item);
+    }
+    indexPrevious(retained);
+    saveCache(retained);
+  }
+
+  /** Current immutable-item snapshot, including configured-folder discoveries. */
+  public synchronized List<VideoItem> snapshot() {
+    ensureSnapshot();
+    return new ArrayList<>(current);
+  }
+
+  private void ensureSnapshot() {
+    if (current == null) indexPrevious(loadCache());
+    if (!mutationsLoaded) {
+      mutationsLoaded = true;
+      try {
+        lastMutationsJson = preferences.getString(MUTATIONS_KEY, "[]");
+        JSONArray stored = new JSONArray(lastMutationsJson);
+        long now = System.currentTimeMillis();
+        for (int i = 0; i < stored.length(); i++) {
+          JSONObject value = stored.getJSONObject(i);
+          long expires = value.optLong("expires");
+          if (expires <= now || expires > now + MediaMutationOverlay.MAX_AGE_MS) continue;
+          List<VideoItem> staleVersions = new ArrayList<>();
+          JSONArray stale = value.optJSONArray("stale");
+          if (stale != null)
+            for (int j = 0; j < stale.length(); j++)
+              staleVersions.add(itemFromJson(stale.getJSONObject(j)));
+          if (staleVersions.isEmpty())
+            staleVersions.add(itemFromJson(value.getJSONObject("original")));
+          mutations.pending.add(
+              new MediaMutationOverlay.Pending(
+                  staleVersions,
+                  value.isNull("replacement")
+                      ? null
+                      : itemFromJson(value.getJSONObject("replacement")),
+                  expires));
+        }
+      } catch (Exception ignored) {
+      }
+    }
+  }
+
+  /** No directory traversal, per-file stat, or extractor work occurs on this path. */
+  public synchronized List<VideoItem> refreshMediaIndex() {
+    ensureSnapshot();
+    return reconcile(false, false);
+  }
+
+  /** Explicitly reconciles configured paths and SAF trees, without walking other storage roots. */
+  public synchronized List<VideoItem> scanFolders() {
+    ensureSnapshot();
+    try {
+      return reconcile(false, true);
+    } finally {
+      releaseMetadataEngine();
+    }
+  }
+
+  /** Records a successful local edit before observer-driven reads can see an older index row. */
+  public synchronized void rememberMutation(VideoItem original, VideoItem replacement) {
+    ensureSnapshot();
+    mutations.remember(original, replacement, System.currentTimeMillis());
+    List<VideoItem> next = new ArrayList<>(current);
+    next.removeIf(
+        item ->
+            MediaMutationOverlay.sameIdentity(item, original)
+                || (replacement != null && MediaMutationOverlay.sameIdentity(item, replacement)));
+    String oldKey = key(original.uri, original.path);
+    Set<String> origins = sourceOrigins.remove(oldKey);
+    boolean shared = sharedOrigins.remove(oldKey), legacy = legacyOrigins.remove(oldKey);
+    if (replacement != null) {
+      next.add(replacement);
+      String newKey = key(replacement.uri, replacement.path);
+      if (origins != null) sourceOrigins.put(newKey, origins);
+      if (shared) sharedOrigins.add(newKey);
+      if (legacy || (!shared && (origins == null || origins.isEmpty()))) legacyOrigins.add(newKey);
+    }
+    indexPrevious(next);
+    persistMutations();
+    saveCache(next);
   }
 
   /** Reconciles all visible shared videos and configured folders. Never removes files. */
   public synchronized List<VideoItem> scan() {
+    ensureSnapshot();
     try {
-      return scanInternal();
+      return reconcile(true, true);
     } finally {
-      if (metadataEngine != null) {
-        metadataEngine.release();
-        metadataEngine = null;
-      }
+      releaseMetadataEngine();
     }
   }
 
-  private List<VideoItem> scanInternal() {
+  private void releaseMetadataEngine() {
+    if (metadataEngine != null) {
+      metadataEngine.release();
+      metadataEngine = null;
+    }
+  }
+
+  private List<VideoItem> reconcile(boolean wholeStorage, boolean folders) {
     checkInterrupted();
-    if (previous.isEmpty()) indexPrevious(loadCache());
     LinkedHashMap<String, VideoItem> found = new LinkedHashMap<>();
     List<String> issues = new ArrayList<>();
     LinkedHashSet<String> directories = new LinkedHashSet<>();
-    File primary = Environment.getExternalStorageDirectory();
-    addWatchDirectory(directories, primary);
-    for (String name : new String[] {"Download", "Movies", "DCIM", "Pictures", "Videos"}) {
-      addWatchDirectory(directories, new File(primary, name));
-    }
-    scanMediaStore(found, issues, directories);
+    Set<String> completedVolumes = new HashSet<>();
+    scanMediaStore(found, issues, directories, folders, completedVolumes);
+    List<VideoItem> indexed = new ArrayList<>(found.values());
     Set<String> traversed = new HashSet<>();
-    if (hasBroadFileAccess()) {
-      for (File root : storageRoots()) scanDirectory(root, found, issues, directories, traversed);
-    }
-    for (String source : getSources()) {
-      checkInterrupted();
-      if (source.startsWith("content://")) {
-        scanTree(Uri.parse(source), found, issues, directories);
-      } else {
-        scanDirectory(new File(source), found, issues, directories, traversed);
+    Set<String> nextShared = new HashSet<>(), nextLegacy = new HashSet<>();
+    Map<String, Set<String>> nextSources = new HashMap<>();
+    if (!wholeStorage) {
+      for (VideoItem item : current) {
+        if (item.id.startsWith("media:")) continue;
+        String itemKey = key(item.uri, item.path);
+        Set<String> origins = sourceOrigins.get(itemKey);
+        if (!folders
+            || sharedOrigins.contains(itemKey)
+            || legacyOrigins.contains(itemKey)
+            || origins == null
+            || origins.isEmpty()) {
+          found.putIfAbsent(itemKey, item);
+          if (sharedOrigins.contains(itemKey)) nextShared.add(itemKey);
+          if (legacyOrigins.contains(itemKey)
+              || (origins == null && !sharedOrigins.contains(itemKey))) nextLegacy.add(itemKey);
+          if (origins != null) nextSources.put(itemKey, new LinkedHashSet<>(origins));
+        }
       }
     }
-    List<VideoItem> result = new ArrayList<>(found.values());
+    if (wholeStorage && hasBroadFileAccess()) {
+      for (File root : storageRoots()) scanDirectory(root, found, issues, directories, traversed);
+      for (VideoItem item : found.values())
+        if (!item.id.startsWith("media:")) nextShared.add(key(item.uri, item.path));
+    }
+    if (folders) {
+      for (String source : getSources()) {
+        checkInterrupted();
+        if (source.startsWith("content://")) {
+          scanTree(Uri.parse(source), found, issues, directories);
+        } else {
+          File folder = new File(source);
+          if (!folder.isDirectory() || !folder.canRead()) {
+            for (VideoItem item : current)
+              if (!item.id.startsWith("media:") && belongsToSource(item, source))
+                found.putIfAbsent(key(item.uri, item.path), item);
+          }
+          scanDirectory(folder, found, issues, directories, traversed);
+        }
+        for (VideoItem item : found.values())
+          if (!item.id.startsWith("media:") && belongsToSource(item, source))
+            nextSources
+                .computeIfAbsent(key(item.uri, item.path), ignored -> new LinkedHashSet<>())
+                .add(source);
+      }
+    }
+    List<VideoItem> result =
+        mutations.apply(
+            indexed, new ArrayList<>(found.values()), completedVolumes, System.currentTimeMillis());
+    sourceOrigins.clear();
+    sourceOrigins.putAll(nextSources);
+    sharedOrigins.clear();
+    sharedOrigins.addAll(nextShared);
+    legacyOrigins.clear();
+    legacyOrigins.addAll(nextLegacy);
     indexPrevious(result);
+    persistMutations();
     warnings = Collections.unmodifiableList(issues);
-    watchPaths = Collections.unmodifiableList(new ArrayList<>(directories));
+    if (folders) watchPaths = Collections.unmodifiableList(new ArrayList<>(directories));
     return result;
   }
 
@@ -195,7 +349,11 @@ public final class VideoRepository {
   }
 
   private void scanMediaStore(
-      Map<String, VideoItem> found, List<String> issues, Set<String> directories) {
+      Map<String, VideoItem> found,
+      List<String> issues,
+      Set<String> directories,
+      boolean hydrateMetadata,
+      Set<String> completedVolumes) {
     String permission =
         Build.VERSION.SDK_INT >= 33
             ? Manifest.permission.READ_MEDIA_VIDEO
@@ -209,6 +367,7 @@ public final class VideoRepository {
         && !limited
         && !hasBroadFileAccess()) {
       issues.add("尚未授予视频读取权限；可以在设置中授权，或添加允许访问的文件夹。");
+      retainPrevious(found, "media:", null);
       return;
     }
     Set<String> volumes = new LinkedHashSet<>();
@@ -246,6 +405,7 @@ public final class VideoRepository {
     for (String volume : volumes) {
       checkInterrupted();
       Uri collection = MediaStore.Files.getContentUri(volume);
+      Map<String, VideoItem> volumeFound = new LinkedHashMap<>();
       try (Cursor cursor =
           resolver.query(
               collection,
@@ -287,19 +447,26 @@ public final class VideoRepository {
                   width,
                   height);
           VideoItem old = previous.get(itemUri);
+          if (old == null && !path.isEmpty()) old = previous.get(normalPath(path));
           if (old != null && old.modifiedMs == item.modifiedMs && old.size == item.size) {
             item = fillMissingMetadata(item, old);
-          } else if (item.durationMs == 0 || item.width == 0 || item.height == 0) {
+          } else if (hydrateMetadata
+              && (item.durationMs == 0 || item.width == 0 || item.height == 0)) {
             item = fillMissingMetadata(item, readMetadata(item));
           }
-          found.put(key(item.uri, item.path), item);
-          if (!path.isEmpty()) addWatchDirectory(directories, new File(path).getParentFile());
+          volumeFound.put(key(item.uri, item.path), item);
+          if (hydrateMetadata && !path.isEmpty())
+            addWatchDirectory(directories, new File(path).getParentFile());
         }
       } catch (Exception error) {
         if (error instanceof CancellationException) throw (CancellationException) error;
         retainPrevious(found, "media:" + volume + ":", null);
         issues.add("无法读取媒体索引（" + volume + "），暂时保留已有目录：" + safeMessage(error));
+        continue;
       }
+      // A failed cursor must not mix a partially renamed row with its saved old path/id.
+      found.putAll(volumeFound);
+      completedVolumes.add(volume);
     }
   }
 
@@ -559,7 +726,7 @@ public final class VideoRepository {
     }
   }
 
-  public List<VideoItem> loadCache() {
+  public synchronized List<VideoItem> loadCache() {
     synchronized (cacheLock) {
       List<VideoItem> result = new ArrayList<>();
       try (FileInputStream input = cache.openRead();
@@ -567,23 +734,31 @@ public final class VideoRepository {
         byte[] buffer = new byte[16384];
         int read;
         while ((read = input.read(buffer)) != -1) data.write(buffer, 0, read);
-        JSONArray items = new JSONArray(data.toString(StandardCharsets.UTF_8.name()));
+        String text = data.toString(StandardCharsets.UTF_8.name());
+        JSONArray items = new JSONArray(text);
+        boolean loadOrigins = current == null;
+        if (loadOrigins) {
+          sourceOrigins.clear();
+          sharedOrigins.clear();
+          legacyOrigins.clear();
+          lastSavedJson = text;
+        }
         for (int i = 0; i < items.length(); i++) {
           JSONObject value = items.getJSONObject(i);
-          long modified = value.optLong("modified");
-          long added = value.optLong("added");
-          result.add(
-              new VideoItem(
-                  value.optString("id"),
-                  value.optString("name"),
-                  value.optString("uri"),
-                  value.optString("path"),
-                  value.optLong("size"),
-                  value.optLong("duration"),
-                  modified,
-                  added > 0 ? added : modified,
-                  value.optInt("width"),
-                  value.optInt("height")));
+          VideoItem item = itemFromJson(value);
+          result.add(item);
+          if (loadOrigins && !item.id.startsWith("media:")) {
+            String itemKey = key(item.uri, item.path);
+            JSONArray sources = value.optJSONArray("sources");
+            if (sources != null) {
+              Set<String> origins = new LinkedHashSet<>();
+              for (int j = 0; j < sources.length(); j++) origins.add(sources.getString(j));
+              if (!origins.isEmpty()) sourceOrigins.put(itemKey, origins);
+            }
+            if (value.optBoolean("shared")) sharedOrigins.add(itemKey);
+            if (value.optBoolean("legacy") || (!value.has("sources") && !value.has("shared")))
+              legacyOrigins.add(itemKey);
+          }
         }
       } catch (Exception ignored) {
       }
@@ -591,32 +766,98 @@ public final class VideoRepository {
     }
   }
 
-  public void saveCache(List<VideoItem> items) {
+  public synchronized void saveCache(List<VideoItem> items) {
+    ensureSnapshot();
     synchronized (cacheLock) {
       FileOutputStream stream = null;
       try {
         JSONArray values = new JSONArray();
-        for (VideoItem item : items) {
-          JSONObject value = new JSONObject();
-          value
-              .put("id", item.id)
-              .put("name", item.name)
-              .put("uri", item.uri)
-              .put("path", item.path)
-              .put("size", item.size)
-              .put("duration", item.durationMs)
-              .put("modified", item.modifiedMs)
-              .put("added", item.addedMs)
-              .put("width", item.width)
-              .put("height", item.height);
+        List<VideoItem> ordered = new ArrayList<>(items);
+        ordered.sort(
+            java.util.Comparator.comparing((VideoItem item) -> item.id)
+                .thenComparing(item -> item.uri)
+                .thenComparing(item -> item.path));
+        for (VideoItem item : ordered) {
+          JSONObject value = itemToJson(item);
+          if (!item.id.startsWith("media:")) {
+            String itemKey = key(item.uri, item.path);
+            Set<String> origins = sourceOrigins.get(itemKey);
+            value.put(
+                "sources",
+                new JSONArray(
+                    origins == null ? Collections.emptyList() : new ArrayList<>(origins)));
+            value.put("shared", sharedOrigins.contains(itemKey));
+            value.put(
+                "legacy",
+                legacyOrigins.contains(itemKey)
+                    || (!sharedOrigins.contains(itemKey)
+                        && (origins == null || origins.isEmpty())));
+          }
           values.put(value);
         }
+        String text = values.toString();
+        indexPrevious(items);
+        if (text.equals(lastSavedJson)) return;
         stream = cache.startWrite();
-        stream.write(values.toString().getBytes(StandardCharsets.UTF_8));
+        stream.write(text.getBytes(StandardCharsets.UTF_8));
         cache.finishWrite(stream);
+        lastSavedJson = text;
       } catch (Exception error) {
         if (stream != null) cache.failWrite(stream);
       }
+    }
+  }
+
+  private static JSONObject itemToJson(VideoItem item) throws Exception {
+    return new JSONObject()
+        .put("id", item.id)
+        .put("name", item.name)
+        .put("uri", item.uri)
+        .put("path", item.path)
+        .put("size", item.size)
+        .put("duration", item.durationMs)
+        .put("modified", item.modifiedMs)
+        .put("added", item.addedMs)
+        .put("width", item.width)
+        .put("height", item.height);
+  }
+
+  private static VideoItem itemFromJson(JSONObject value) {
+    long modified = value.optLong("modified"), added = value.optLong("added");
+    return new VideoItem(
+        value.optString("id"),
+        value.optString("name"),
+        value.optString("uri"),
+        value.optString("path"),
+        value.optLong("size"),
+        value.optLong("duration"),
+        modified,
+        added > 0 ? added : modified,
+        value.optInt("width"),
+        value.optInt("height"));
+  }
+
+  private void persistMutations() {
+    try {
+      JSONArray values = new JSONArray();
+      for (MediaMutationOverlay.Pending edit : mutations.pending) {
+        JSONArray stale = new JSONArray();
+        for (VideoItem version : edit.staleVersions) stale.put(itemToJson(version));
+        values.put(
+            new JSONObject()
+                .put("original", itemToJson(edit.original))
+                .put("stale", stale)
+                .put(
+                    "replacement",
+                    edit.replacement == null ? JSONObject.NULL : itemToJson(edit.replacement))
+                .put("expires", edit.expiresAt));
+      }
+      String text = values.toString();
+      if (!text.equals(lastMutationsJson)) {
+        preferences.edit().putString(MUTATIONS_KEY, text).apply();
+        lastMutationsJson = text;
+      }
+    } catch (Exception ignored) {
     }
   }
 
@@ -806,9 +1047,10 @@ public final class VideoRepository {
     Map<String, VideoItem> next = new HashMap<>();
     for (VideoItem item : items) {
       next.put(item.uri, item);
-      if (!item.path.isEmpty()) next.put(canonical(item.path), item);
+      if (!item.path.isEmpty()) next.put(normalPath(item.path), item);
     }
     previous = next;
+    current = new ArrayList<>(items);
   }
 
   private void retainPrevious(Map<String, VideoItem> found, String idPrefix, String uriPrefix) {
@@ -878,7 +1120,7 @@ public final class VideoRepository {
         "primary".equalsIgnoreCase(volume)
             ? Environment.getExternalStorageDirectory()
             : new File("/storage", volume);
-    return canonical(new File(root, id.substring(colon + 1)).getPath());
+    return normalPath(new File(root, id.substring(colon + 1)).getPath());
   }
 
   private static boolean restrictedDirectory(String path) {
@@ -897,7 +1139,33 @@ public final class VideoRepository {
   }
 
   private static String key(String uri, String path) {
-    return path == null || path.isEmpty() ? uri : canonical(path);
+    return path == null || path.isEmpty() ? uri : normalPath(path);
+  }
+
+  private static String normalPath(String path) {
+    try {
+      return Paths.get(path).normalize().toString();
+    } catch (RuntimeException invalid) {
+      return path;
+    }
+  }
+
+  private static boolean belongsToSource(VideoItem item, String source) {
+    if (source == null || source.isEmpty()) return false;
+    String path = source;
+    if (source.startsWith("content://")) {
+      if (item.uri.startsWith(source + "/document/")) return true;
+      try {
+        Uri tree = Uri.parse(source);
+        path = documentPath(tree.getAuthority(), DocumentsContract.getTreeDocumentId(tree));
+      } catch (Exception invalid) {
+        return false;
+      }
+    }
+    if (path.isEmpty() || item.path.isEmpty()) return false;
+    path = normalPath(path);
+    String child = normalPath(item.path);
+    return child.equals(path) || child.startsWith(path + File.separator);
   }
 
   private static String canonical(String path) {

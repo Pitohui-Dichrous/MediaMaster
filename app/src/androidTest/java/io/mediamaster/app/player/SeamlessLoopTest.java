@@ -51,6 +51,8 @@ public class SeamlessLoopTest {
                 : Manifest.permission.READ_EXTERNAL_STORAGE);
     int previousMode =
         context.getSharedPreferences("player", Context.MODE_PRIVATE).getInt("playback_mode", 0);
+    boolean hadEngine = context.getSharedPreferences("player", 0).contains("engine_choice");
+    int previousEngine = context.getSharedPreferences("player", 0).getInt("engine_choice", 0);
     PlayerActivity activity = null;
     try {
       Uri uri = findPortraitFixture(context);
@@ -63,6 +65,7 @@ public class SeamlessLoopTest {
           .getSharedPreferences("player", Context.MODE_PRIVATE)
           .edit()
           .putInt("playback_mode", PlaybackOrder.SINGLE)
+          .putInt("engine_choice", 1)
           .commit();
       activity =
           activityRule.launchActivity(
@@ -133,11 +136,14 @@ public class SeamlessLoopTest {
           });
     } finally {
       if (activity != null) activityRule.finishActivity();
-      context
-          .getSharedPreferences("player", Context.MODE_PRIVATE)
-          .edit()
-          .putInt("playback_mode", previousMode)
-          .commit();
+      android.content.SharedPreferences.Editor restore =
+          context
+              .getSharedPreferences("player", Context.MODE_PRIVATE)
+              .edit()
+              .putInt("playback_mode", previousMode);
+      if (hadEngine) restore.putInt("engine_choice", previousEngine);
+      else restore.remove("engine_choice");
+      restore.commit();
     }
   }
 

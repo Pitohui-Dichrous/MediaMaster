@@ -16,7 +16,8 @@ import org.json.JSONObject;
  */
 final class PlaybackEngineHistory {
   private static final int MAX_ENTRIES = 64;
-  private static final String VERSION = "seek-v1/media3-1.8.0/libvlc-3.6.5/" + ("api-" + Build.VERSION.SDK_INT);
+  private static final String VERSION =
+      "native-first-v2/media3-1.8.0/libvlc-3.7.7/" + ("api-" + Build.VERSION.SDK_INT);
   private static PlaybackEngineHistory instance;
   private final SharedPreferences preferences;
   private final LinkedHashMap<String, SeekEnginePolicy> entries =
@@ -36,14 +37,8 @@ final class PlaybackEngineHistory {
       for (int i = Math.max(0, rows.length() - MAX_ENTRIES); i < rows.length(); i++) {
         JSONObject row = rows.getJSONObject(i);
         SeekEnginePolicy p = new SeekEnginePolicy();
-        p.samples = Math.max(0, Math.min(16, row.optInt("samples")));
-        p.slowSamples = Math.max(0, Math.min(16, row.optInt("slow")));
-        p.meanMs = Math.max(0, Math.min(3000, row.optDouble("mean", 0)));
-        p.exoFailed = row.optBoolean("exoFailed");
-        p.vlcFailed = row.optBoolean("vlcFailed");
-        p.vlcFailureUntilMs = row.optLong("vlcFailureUntil");
-        p.vlcReady = row.optBoolean("vlcReady");
-        p.trialUsed = row.optBoolean("trialUsed");
+        p.vlcFailureUntilMs = Math.max(0, row.optLong("vlcFailureUntil"));
+        p.softwareAvoidUntilMs = Math.max(0, row.optLong("softwareAvoidUntil"));
         entries.put(row.getString("key"), p);
       }
     } catch (Exception invalid) {
@@ -75,14 +70,8 @@ final class PlaybackEngineHistory {
         rows.put(
             new JSONObject()
                 .put("key", entry.getKey())
-                .put("samples", p.samples)
-                .put("slow", p.slowSamples)
-                .put("mean", p.meanMs)
-                .put("exoFailed", p.exoFailed)
-                .put("vlcFailed", p.vlcFailed)
                 .put("vlcFailureUntil", p.vlcFailureUntilMs)
-                .put("vlcReady", p.vlcReady)
-                .put("trialUsed", p.trialUsed));
+                .put("softwareAvoidUntil", p.softwareAvoidUntilMs));
       }
       preferences
           .edit()

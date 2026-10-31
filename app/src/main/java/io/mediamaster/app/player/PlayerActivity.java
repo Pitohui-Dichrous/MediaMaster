@@ -147,6 +147,7 @@ public final class PlayerActivity extends Activity {
   private MediaPlayer vlc;
   private AudioManager audioManager;
   private AudioFocusRequest vlcFocus;
+  private long vlcFocusGeneration;
   private boolean useVlc,
       started,
       shouldPlay = true,
@@ -1086,13 +1087,13 @@ public final class PlayerActivity extends Activity {
               if (portraitMode && page.firstFrameReady && !page.buffering) ensurePortraitWindow();
               return;
             }
-            boolean wasVlc = useVlc;
+            MediaPlayer previousNative = vlc;
             if (syncedPage == page
                 && syncedPageGeneration == page.generation
                 && (exo != null || vlc != null)
                 && (exo != page.exo || vlc != page.vlc)) shouldPlay = page.playRequested;
             syncCurrentPage();
-            if (!wasVlc && vlc != null) applyCurrentPlayback(shouldPlay);
+            if (vlc != null && vlc != previousNative) applyCurrentPlayback(shouldPlay);
             showLoading(page.buffering, "");
             updateProgress();
             if (!page.buffering && portraitMode) ensurePortraitWindow();
@@ -1141,8 +1142,7 @@ public final class PlayerActivity extends Activity {
     if (libVlc == null) {
       ArrayList<String> options = new ArrayList<>();
       options.add("--no-video-title-show");
-      options.add("--no-stats");
-      options.add("--aout=opensles");
+      options.add("--aout=android_audiotrack");
       options.add("--file-caching=750");
       libVlc = new LibVLC(this, options);
     }
@@ -1203,6 +1203,8 @@ public final class PlayerActivity extends Activity {
   }
 
   private void abandonVlcFocus() {
+    vlcFocusGeneration++;
+    focusPaused = false;
     if (vlcFocus != null && audioManager != null) {
       audioManager.abandonAudioFocusRequest(vlcFocus);
       vlcFocus = null;
@@ -1237,9 +1239,14 @@ public final class PlayerActivity extends Activity {
   }
 
   private boolean requestVlcFocus() {
-    if (vlcFocus != null)
-      return audioManager.requestAudioFocus(vlcFocus) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
+    if (vlcFocus != null) {
+      boolean granted =
+          audioManager.requestAudioFocus(vlcFocus) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
+      if (granted) currentPage.setNativeDucked(false);
+      return granted;
+    }
     final MediaPlayer focusOwner = vlc;
+    final long focusGeneration = ++vlcFocusGeneration;
     vlcFocus =
         new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
             .setAudioAttributes(
@@ -1249,24 +1256,32 @@ public final class PlayerActivity extends Activity {
                     .build())
             .setOnAudioFocusChangeListener(
                 change -> {
-                  if (vlc != focusOwner || !started) return;
+                  if (vlcFocusGeneration != focusGeneration
+                      || vlc != focusOwner
+                      || currentPage == null
+                      || currentPage.vlc != focusOwner
+                      || !started) return;
                   if (change == AudioManager.AUDIOFOCUS_LOSS
                       || change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
                     focusPaused = change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT && shouldPlay;
                     if (change == AudioManager.AUDIOFOCUS_LOSS) shouldPlay = false;
                     currentPage.setPlayback(true, false, false);
+                    currentPage.setNativeDucked(false);
                   } else if (change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK) {
-                    if (vlc != null)
-                      vlc.setVolume(!pageSuspended && currentPage.playRequested ? 25 : 0);
+                    currentPage.setNativeDucked(true);
                   } else if (change == AudioManager.AUDIOFOCUS_GAIN && vlc != null) {
                     boolean resume = (focusPaused && shouldPlay) || currentPage.playRequested;
                     focusPaused = false;
+                    currentPage.setNativeDucked(false);
                     currentPage.setPlayback(true, resume && !pageSuspended, !pageSuspended);
                   }
                   updatePlayUi();
                 })
             .build();
-    return audioManager.requestAudioFocus(vlcFocus) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
+    boolean granted =
+        audioManager.requestAudioFocus(vlcFocus) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
+    if (granted) currentPage.setNativeDucked(false);
+    return granted;
   }
 
   private Uri playbackUri(VideoItem item) {

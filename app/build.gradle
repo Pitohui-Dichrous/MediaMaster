@@ -7,14 +7,14 @@ def previewInstall = providers.gradleProperty('previewInstall').getOrElse('false
 
 android {
     namespace 'io.mediamaster.app'
-    compileSdk 35
+    compileSdk 36
     defaultConfig {
         applicationId previewInstall ? 'io.mediamaster.app.preview' : 'io.mediamaster.app'
         resValue 'string', 'app_name', '映序'
         minSdk 26
         targetSdk 35
-        versionCode 18
-        versionName '2.2.0-test.1'
+        versionCode 19
+        versionName '2.2.0-test.2'
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
     }
     compileOptions {
@@ -54,7 +54,7 @@ dependencies {
     implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'
     implementation 'androidx.media3:media3-exoplayer:1.8.0'
     implementation 'androidx.media3:media3-ui:1.8.0'
-    implementation 'org.videolan.android:libvlc-all:3.6.5'
+    implementation 'org.videolan.android:libvlc-all:3.7.7'
     testImplementation 'junit:junit:4.13.2'
     androidTestImplementation 'androidx.test:runner:1.6.2'
     androidTestImplementation 'androidx.test:rules:1.6.1'

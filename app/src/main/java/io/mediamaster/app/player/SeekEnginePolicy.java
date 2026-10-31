@@ -1,37 +1,43 @@
 package io.mediamaster.app.player;
 
-/** Conservative per-file selection. A slow seek is evidence about Exo, not proof VLC is faster. */
+/** Native-first playback with a bounded, per-file compatibility fallback; not a latency ranking. */
 final class SeekEnginePolicy {
-  static final int MIN_SLOW_SAMPLES = 3;
-  static final long SLOW_SEEK_MS = 450;
-  int samples, slowSamples;
-  double meanMs;
-  boolean exoFailed, vlcFailed, vlcReady, trialUsed;
+  static final long FAILURE_COOLDOWN_MS = 24 * 60 * 60 * 1000L;
   long vlcFailureUntilMs;
+  long softwareAvoidUntilMs;
 
-  boolean chooseVlc(boolean foreground) {
-    if (vlcFailed && vlcFailureUntilMs > 0 && System.currentTimeMillis() >= vlcFailureUntilMs)
-      vlcFailed = false;
-    if (vlcFailed) return false;
-    if (exoFailed && vlcReady) return true;
-    if (foreground && !trialUsed && slowSamples >= MIN_SLOW_SAMPLES && meanMs >= SLOW_SEEK_MS) {
-      trialUsed = true;
-      return true;
-    }
-    return false;
+  boolean shouldAvoidSoftware(long nowMs) {
+    return softwareAvoidUntilMs > nowMs;
   }
 
-  void recordVlcFailure() {
-    vlcFailed = true;
-    vlcFailureUntilMs = System.currentTimeMillis() + 24 * 60 * 60 * 1000L;
+  /** Record only after the replacement hardware-preferred player has rendered a real frame. */
+  void recordSoftwareFallback(long nowMs) {
+    softwareAvoidUntilMs = nowMs + FAILURE_COOLDOWN_MS;
   }
 
-  void recordExoSeek(long elapsedMs) {
-    if (elapsedMs < 0 || elapsedMs > 3000) return;
-    int weight = Math.min(samples, 15);
-    meanMs = (meanMs * weight + elapsedMs) / (weight + 1);
-    samples = Math.min(samples + 1, 16);
-    if (elapsedMs >= SLOW_SEEK_MS) slowSamples = Math.min(slowSamples + 1, 16);
-    else slowSamples = Math.max(0, slowSamples - 1);
+  boolean recordSoftwareSuccess() {
+    boolean changed = softwareAvoidUntilMs != 0;
+    softwareAvoidUntilMs = 0;
+    return changed;
+  }
+
+  /** The same file uses the same policy before and after its preloaded page is promoted. */
+  boolean chooseVlc(long nowMs) {
+    return vlcFailureUntilMs <= nowMs;
+  }
+
+  static boolean shouldRememberVlcFailure(boolean foreground, boolean active, boolean nativeError) {
+    return nativeError && (foreground || active);
+  }
+
+  /** Call only after a visible native playback error and an actual Media3 fallback frame. */
+  void recordCompatibleFallback(long nowMs) {
+    vlcFailureUntilMs = nowMs + FAILURE_COOLDOWN_MS;
+  }
+
+  boolean recordVlcSuccess() {
+    boolean changed = vlcFailureUntilMs != 0;
+    vlcFailureUntilMs = 0;
+    return changed;
   }
 }

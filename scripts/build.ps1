@@ -18,11 +18,11 @@ if (-not $env:JAVA_HOME -or -not (Test-Path -LiteralPath (Join-Path $env:JAVA_HO
 }
 
 $localSdk = Join-Path $toolsRoot 'android-sdk'
-if (Test-Path -LiteralPath (Join-Path $localSdk 'platforms/android-35/android.jar')) {
+if (Test-Path -LiteralPath (Join-Path $localSdk 'platforms/android-36/android.jar')) {
     $env:ANDROID_HOME = $localSdk
 }
 if (-not $env:ANDROID_HOME -or -not (Test-Path -LiteralPath $env:ANDROID_HOME)) {
-    throw 'Android SDK 35 is required. Set ANDROID_HOME, or install it in .tools/android-sdk.'
+    throw 'Android SDK 36 is required. Set ANDROID_HOME, or install it in .tools/android-sdk.'
 }
 
 $env:GRADLE_USER_HOME = Join-Path $toolsRoot 'gradle-user-home'

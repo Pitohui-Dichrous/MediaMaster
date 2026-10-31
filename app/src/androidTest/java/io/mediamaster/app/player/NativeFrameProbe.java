@@ -12,6 +12,7 @@ import android.view.PixelCopy;
 import android.view.SurfaceView;
 import android.view.TextureView;
 import android.view.View;
+import android.view.ViewGroup;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.ui.PlayerView;
 import io.mediamaster.app.media.VideoItem;
@@ -32,6 +33,24 @@ import java.util.concurrent.atomic.AtomicReference;
 @UnstableApi
 final class NativeFrameProbe {
   private NativeFrameProbe() {}
+
+  /** Call on the UI thread; only return a laid-out surface that can actually contain video. */
+  static View findVideoSurface(View root) {
+    if (root == null || root.getVisibility() != View.VISIBLE) return null;
+    if (root.getWidth() > 0 && root.getHeight() > 0) {
+      if (root instanceof TextureView && ((TextureView) root).isAvailable()) return root;
+      if (root instanceof SurfaceView && ((SurfaceView) root).getHolder().getSurface().isValid())
+        return root;
+    }
+    if (root instanceof ViewGroup) {
+      ViewGroup group = (ViewGroup) root;
+      for (int i = 0; i < group.getChildCount(); i++) {
+        View surface = findVideoSurface(group.getChildAt(i));
+        if (surface != null) return surface;
+      }
+    }
+    return null;
+  }
 
   static Bitmap capturePlayerSurface(Instrumentation instrumentation, PlayerView playerView)
       throws Exception {

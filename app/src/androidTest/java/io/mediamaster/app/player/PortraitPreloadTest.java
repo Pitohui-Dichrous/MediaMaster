@@ -17,8 +17,6 @@ import android.os.SystemClock;
 import android.provider.MediaStore;
 import android.util.Log;
 import android.view.MotionEvent;
-import android.view.SurfaceView;
-import android.view.TextureView;
 import android.view.View;
 import android.view.ViewGroup;
 import androidx.media3.common.MediaItem;
@@ -66,6 +64,8 @@ public final class PortraitPreloadTest {
   private int savedMode;
   private int savedPortraitNavigation;
   private boolean hadPortraitNavigation;
+  private boolean hadEngine;
+  private int savedEngine;
   private long downTime;
   private AudioExclusivityProbe audioProbe;
 
@@ -81,6 +81,8 @@ public final class PortraitPreloadTest {
                 ? Manifest.permission.READ_MEDIA_VIDEO
                 : Manifest.permission.READ_EXTERNAL_STORAGE);
     savedMode = context.getSharedPreferences("player", 0).getInt("playback_mode", 0);
+    hadEngine = context.getSharedPreferences("player", 0).contains("engine_choice");
+    savedEngine = context.getSharedPreferences("player", 0).getInt("engine_choice", 0);
     hadPortraitNavigation =
         context.getSharedPreferences("player", 0).contains("portrait_navigation_mode");
     savedPortraitNavigation =
@@ -92,6 +94,7 @@ public final class PortraitPreloadTest {
         .edit()
         .putInt("playback_mode", PlaybackOrder.SINGLE)
         .putInt("portrait_navigation_mode", PlaybackOrder.SEQUENTIAL)
+        .putInt("engine_choice", 1)
         .commit();
     fixtures = new ArrayList<>();
     // Three visibly different, real fixture files; explicit compatibility-engine coverage is below.
@@ -144,6 +147,8 @@ public final class PortraitPreloadTest {
       if (hadPortraitNavigation)
         preferences.putInt("portrait_navigation_mode", savedPortraitNavigation);
       else preferences.remove("portrait_navigation_mode");
+      if (hadEngine) preferences.putInt("engine_choice", savedEngine);
+      else preferences.remove("engine_choice");
       preferences.commit();
     }
     for (Bitmap bitmap : references) bitmap.recycle();
@@ -764,28 +769,24 @@ public final class PortraitPreloadTest {
   }
 
   private static View findSurface(View root) {
-    if ((root instanceof TextureView || root instanceof SurfaceView)
-        && root.getWidth() > 0
-        && root.getHeight() > 0) return root;
-    if (root instanceof ViewGroup) {
-      ViewGroup group = (ViewGroup) root;
-      for (int i = 0; i < group.getChildCount(); i++) {
-        View found = findSurface(group.getChildAt(i));
-        if (found != null) return found;
-      }
-    }
-    return null;
+    return NativeFrameProbe.findVideoSurface(root);
   }
 
   private VideoItem fixture(String name) {
+    // Real-phone runs opt into their dedicated generated-fixture directory, avoiding a user's
+    // unrelated video with an identical short name. Emulator fixtures retain the existing setup.
+    String root = InstrumentationRegistry.getArguments().getString("fixtureRoot", "");
+    String selection = root.isEmpty() ? "_display_name=?" : "_display_name=? AND _data=?";
+    String[] arguments =
+        root.isEmpty() ? new String[] {name} : new String[] {name, root + "/" + name};
     try (Cursor cursor =
         context
             .getContentResolver()
             .query(
                 MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
                 new String[] {"_id", "_size", "duration", "width", "height"},
-                "_display_name=?",
-                new String[] {name},
+                selection,
+                arguments,
                 null)) {
       assertNotNull(cursor);
       assertTrue("Generated fixture is installed: " + name, cursor.moveToFirst());

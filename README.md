@@ -33,7 +33,7 @@ Release 同时附有源码包 `MediaMaster-2.1.0-source.zip`、安装说明 `INS
 
 ## 构建
 
-Java 17、Android SDK 35、Gradle Wrapper 8.11.1、Android Gradle Plugin 8.9.2。使用 Java 原生 Android Views、Media3 和 LibVLC。
+Java 17、Android SDK 36、Gradle Wrapper 8.11.1、Android Gradle Plugin 8.9.2。使用 Java 原生 Android Views、Media3 和 LibVLC。
 
 用 Android Studio 打开项目，或在已配置 `JAVA_HOME` 与 `ANDROID_HOME` 的环境执行：
 

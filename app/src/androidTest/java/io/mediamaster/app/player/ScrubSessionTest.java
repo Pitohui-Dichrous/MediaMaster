@@ -10,10 +10,8 @@ import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.net.Uri;
 import android.os.Build;
-import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
 import android.provider.MediaStore;
-import android.util.Log;
 import android.view.TextureView;
 import android.view.View;
 import android.view.ViewGroup;
@@ -25,11 +23,8 @@ import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
 import androidx.test.rule.ActivityTestRule;
 import io.mediamaster.app.media.VideoItem;
-import java.io.ByteArrayOutputStream;
-import java.io.InputStream;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.concurrent.Callable;
 import java.util.concurrent.atomic.AtomicReference;
@@ -53,6 +48,8 @@ public final class ScrubSessionTest {
   private Context context;
   private PlayerActivity activity;
   private int savedMode;
+  private boolean hadEngine;
+  private int savedEngine;
 
   @Before
   public void permissionsAndPlaybackMode() {
@@ -65,18 +62,26 @@ public final class ScrubSessionTest {
                 ? Manifest.permission.READ_MEDIA_VIDEO
                 : Manifest.permission.READ_EXTERNAL_STORAGE);
     savedMode = context.getSharedPreferences("player", 0).getInt("playback_mode", 0);
+    hadEngine = context.getSharedPreferences("player", 0).contains("engine_choice");
+    savedEngine = context.getSharedPreferences("player", 0).getInt("engine_choice", 0);
     context
         .getSharedPreferences("player", 0)
         .edit()
         .putInt("playback_mode", PlaybackOrder.SEQUENTIAL)
+        .putInt("engine_choice", 1)
         .commit();
   }
 
   @After
   public void finish() {
     if (activity != null) rule.finishActivity();
-    if (context != null)
-      context.getSharedPreferences("player", 0).edit().putInt("playback_mode", savedMode).commit();
+    if (context != null) {
+      android.content.SharedPreferences.Editor restore =
+          context.getSharedPreferences("player", 0).edit().putInt("playback_mode", savedMode);
+      if (hadEngine) restore.putInt("engine_choice", savedEngine);
+      else restore.remove("engine_choice");
+      restore.commit();
+    }
   }
 
   @Test
@@ -368,50 +373,71 @@ public final class ScrubSessionTest {
                 () -> {
                   assertSame(replacement, page.vlc);
                   assertEquals("Fallback warmup must remain silent", 0, replacement.getVolume());
-                  return page.firstFrameReady && !page.buffering && !replacement.isPlaying();
+                  return page.firstFrameReady && !page.buffering && replacement.isPlaying();
                 }),
         20000,
-        "Fallback must finish silent warmup and pause");
-    // Let the already-paused warmup frame settle before recording the actual native texture.
+        "Fallback must finish warmup and retain the original running intent while muted");
+    NativeAudioProbe.assertMuted(instrumentation);
+    // Compare real decoder pixels across the coarse seek on both TextureView and SurfaceView.
     SystemClock.sleep(100);
     long beforeFollowUp = onMain(replacement::getTime);
-    long beforeTexture = onMain(() -> textureTimestamp(page.vlcView));
-    assertTrue("VLC warmup produced a timestamped native frame", beforeTexture > 0);
-    onMain(
-        () -> {
-          page.scrubTo(12300);
-          return null;
-        });
-    awaitVlcState(
-        page,
-        replacement,
-        () ->
-            onMain(
-                () -> {
-                  assertEquals(0, replacement.getVolume());
-                  assertFalse(
-                      "The new decoder stays paused during the same gesture",
-                      replacement.isPlaying());
-                  // Crossing the ten-second GOP must produce a new native frame while paused.
-                  // FAST need not report or render the exact 12.3 s target.
-                  long timestamp = textureTimestamp(page.vlcView);
-                  if (timestamp <= 0 || timestamp == beforeTexture) return false;
-                  Bitmap preview = page.captureScrubFrame();
-                  if (preview == null) return false;
-                  try {
-                    assertTrue(
-                        "The follow-up seek produces non-black native video pixels",
-                        NativeFrameProbe.nonBlackFraction(preview) > .1);
-                    return true;
-                  } finally {
-                    preview.recycle();
-                  }
-                }),
-        15000,
-        "The follow-up coarse seek must render a new native preview: beforeTime="
-            + beforeFollowUp
-            + ", beforeTexture="
-            + beforeTexture);
+    View nativeSurface = onMain(() -> NativeFrameProbe.findVideoSurface(page.vlcView));
+    assertNotNull("VLC warmup attached a readable native video surface", nativeSurface);
+    Bitmap beforePixels = NativeFrameProbe.captureSurface(instrumentation, nativeSurface);
+    try {
+      assertTrue(
+          "VLC warmup contains decoded video",
+          NativeFrameProbe.nonBlackFraction(beforePixels) > .1);
+      onMain(
+          () -> {
+            page.scrubTo(12100);
+            page.scrubTo(12300);
+            return null;
+          });
+      awaitVlcState(
+          page,
+          replacement,
+          () -> {
+            Bitmap preview =
+                onMain(
+                    () -> {
+                      assertEquals(0, replacement.getVolume());
+                      assertTrue(
+                          "The replacement preserves the original running intent during the"
+                              + " gesture",
+                          replacement.isPlaying());
+                      return page.captureScrubFrame();
+                    });
+            if (preview == null) return false;
+            Bitmap actual = null;
+            try {
+              View surface = onMain(() -> NativeFrameProbe.findVideoSurface(page.vlcView));
+              if (surface == null) return false;
+              actual = NativeFrameProbe.captureSurface(instrumentation, surface);
+              assertTrue(
+                  "The follow-up preview contains real video pixels",
+                  NativeFrameProbe.nonBlackFraction(preview) > .1);
+              assertTrue(
+                  "The native decoder still contains real video pixels",
+                  NativeFrameProbe.nonBlackFraction(actual) > .1);
+              // FAST need not render the exact12.3s point; both the main output and supplied
+              // preview
+              // must nevertheless change from warmup, without substituting a playback clock for
+              // pixels.
+              return NativeFrameProbe.averageRgbDistance(beforePixels, actual) > 1
+                  && NativeFrameProbe.averageRgbDistance(beforePixels, preview) > 1;
+            } finally {
+              preview.recycle();
+              if (actual != null) actual.recycle();
+            }
+          },
+          15000,
+          "The follow-up coarse seek must render changed native pixels and a preview: beforeTime="
+              + beforeFollowUp);
+    } finally {
+      beforePixels.recycle();
+    }
+    NativeAudioProbe.assertMuted(instrumentation);
     onMain(
         () -> {
           page.endScrub(12300, false);
@@ -650,69 +676,7 @@ public final class ScrubSessionTest {
   }
 
   private void assertOwnNativeAudioTrackAudible() throws Exception {
-    String pid = Integer.toString(android.os.Process.myPid());
-    long deadline = SystemClock.elapsedRealtime() + 5000;
-    String evidence = "No AudioFlinger dump read";
-    while (SystemClock.elapsedRealtime() < deadline) {
-      String dump;
-      try (InputStream input =
-              new ParcelFileDescriptor.AutoCloseInputStream(
-                  instrumentation
-                      .getUiAutomation()
-                      .executeShellCommand("dumpsys media.audio_flinger"));
-          ByteArrayOutputStream output = new ByteArrayOutputStream()) {
-        byte[] buffer = new byte[8192];
-        int count;
-        while ((count = input.read(buffer)) >= 0) output.write(buffer, 0, count);
-        dump = new String(output.toByteArray(), StandardCharsets.UTF_8);
-      }
-      boolean inLiveTable = false;
-      int tables = 0;
-      StringBuilder ownRows = new StringBuilder();
-      for (String line : dump.split("\\r?\\n")) {
-        String trimmed = line.trim();
-        if (trimmed.startsWith("Type")
-            && trimmed.contains("Active Client Session")
-            && trimmed.contains("G db  L dB  R dB")) {
-          inLiveTable = true;
-          tables++;
-          continue;
-        }
-        if (!inLiveTable) continue;
-        String[] cells = trimmed.split("\\s+");
-        // The optional Type column is blank for ordinary tracks and a letter for fast tracks.
-        int active =
-            cells.length > 1 && ("yes".equals(cells[1]) || "no".equals(cells[1]))
-                ? 1
-                : cells.length > 2 && ("yes".equals(cells[2]) || "no".equals(cells[2])) ? 2 : -1;
-        if (active < 0 || cells.length <= active + 14) {
-          // Stop at the end of the current table: historical AT::add/remove logs are not proof.
-          inLiveTable = false;
-          continue;
-        }
-        if (!pid.equals(cells[active + 1])) continue;
-        ownRows.append(trimmed).append('\n');
-        if ("yes".equals(cells[active])
-            && finiteDb(cells[active + 12])
-            && finiteDb(cells[active + 13])
-            && finiteDb(cells[active + 14])) {
-          Log.i("ScrubSessionTest", "Native audio resumed pid=" + pid + ": " + trimmed);
-          return;
-        }
-      }
-      evidence = "liveTables=" + tables + ", ownRows=" + ownRows;
-      SystemClock.sleep(100);
-    }
-    fail("No active unmuted AudioFlinger track for test process pid=" + pid + "; " + evidence);
-  }
-
-  private static boolean finiteDb(String value) {
-    try {
-      double gain = Double.parseDouble(value);
-      return !Double.isNaN(gain) && !Double.isInfinite(gain);
-    } catch (NumberFormatException nonFiniteOrUnsupported) {
-      return false;
-    }
+    NativeAudioProbe.assertAudible(instrumentation);
   }
 
   private static long textureTimestamp(View view) {

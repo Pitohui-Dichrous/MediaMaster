@@ -60,6 +60,8 @@ public final class PortraitPlaybackTest {
   private int savedMode;
   private int savedPortraitNavigation;
   private boolean hadPortraitNavigation;
+  private boolean hadEngine;
+  private int savedEngine;
 
   @Before
   public void launch() throws Exception {
@@ -73,6 +75,8 @@ public final class PortraitPlaybackTest {
                 ? Manifest.permission.READ_MEDIA_VIDEO
                 : Manifest.permission.READ_EXTERNAL_STORAGE);
     savedMode = context.getSharedPreferences("player", 0).getInt("playback_mode", 0);
+    hadEngine = context.getSharedPreferences("player", 0).contains("engine_choice");
+    savedEngine = context.getSharedPreferences("player", 0).getInt("engine_choice", 0);
     hadPortraitNavigation =
         context.getSharedPreferences("player", 0).contains("portrait_navigation_mode");
     savedPortraitNavigation =
@@ -84,6 +88,7 @@ public final class PortraitPlaybackTest {
         .edit()
         .putInt("playback_mode", PlaybackOrder.SINGLE)
         .putInt("portrait_navigation_mode", PlaybackOrder.SEQUENTIAL)
+        .putInt("engine_choice", 1)
         .commit();
     fixtures = new ArrayList<>();
     for (String name :
@@ -108,6 +113,8 @@ public final class PortraitPlaybackTest {
       if (hadPortraitNavigation)
         preferences.putInt("portrait_navigation_mode", savedPortraitNavigation);
       else preferences.remove("portrait_navigation_mode");
+      if (hadEngine) preferences.putInt("engine_choice", savedEngine);
+      else preferences.remove("engine_choice");
       preferences.commit();
     }
   }

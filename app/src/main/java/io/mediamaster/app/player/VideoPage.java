@@ -12,6 +12,7 @@ import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
 import android.view.Gravity;
 import android.view.LayoutInflater;
+import android.view.SurfaceView;
 import android.view.TextureView;
 import android.view.View;
 import android.view.ViewGroup;
@@ -27,19 +28,22 @@ import androidx.media3.common.util.UnstableApi;
 import androidx.media3.exoplayer.DefaultLoadControl;
 import androidx.media3.exoplayer.DefaultRenderersFactory;
 import androidx.media3.exoplayer.ExoPlayer;
+import androidx.media3.exoplayer.ScrubbingModeParameters;
 import androidx.media3.exoplayer.SeekParameters;
 import androidx.media3.ui.PlayerView;
 import io.mediamaster.app.R;
 import io.mediamaster.app.media.VideoItem;
 import java.io.File;
 import java.io.IOException;
+import java.util.Collections;
 import java.util.function.Supplier;
 import org.videolan.libvlc.LibVLC;
 import org.videolan.libvlc.Media;
 import org.videolan.libvlc.MediaPlayer;
+import org.videolan.libvlc.interfaces.IMedia;
 import org.videolan.libvlc.util.VLCVideoLayout;
 
-/** A permanently attached page with its own decoder and retained video texture. */
+/** A permanently attached page with its own decoder and retained video surface. */
 @UnstableApi
 final class VideoPage extends FrameLayout {
   interface Listener {
@@ -55,7 +59,7 @@ final class VideoPage extends FrameLayout {
   }
 
   final PlayerView exoView;
-  final VLCVideoLayout vlcView;
+  VLCVideoLayout vlcView;
   ExoPlayer exo;
   MediaPlayer vlc;
   int index = -1, prepareCount;
@@ -77,27 +81,34 @@ final class VideoPage extends FrameLayout {
   private ParcelFileDescriptor descriptor;
   private Runnable frameProbe;
   private Bitmap probeBitmap;
+  private final NativeSurfaceFrames nativeSurfaceFrames;
+  private boolean nativeSurfacePlayback, nativeSurfaceReattachPosted;
+  private boolean nativeSurfacePauseRestore;
+  private long nativeSurfacePauseTarget;
   private boolean single, foreground, audible, warmingVlc, ended, vlcRunningRequested;
+  private boolean nativeDucked;
   private float speed = 1;
+  private float appliedNativeRate = Float.NaN;
   private long vlcTextureBaseline, warmupDeadline;
   private long vlcPreviousTime = -1, vlcSeekFenceTarget = -1, vlcSeekFenceDeadline;
   private boolean vlcNearEndArmed;
   private static final long SCRUB_INTERVAL_MS = 80;
+  private static final long FIRST_SCRUB_DELAY_MS = 50;
   private static final long SCRUB_TOLERANCE_MS = 250;
   private final Runnable dispatchScrub = this::dispatchScrub;
-  private final Runnable observeSeekFrame = this::observeSeekFrame;
   private boolean scrubbing, scrubPending, triedExo, triedVlc;
-  private long scrubOrigin, scrubTarget, lastScrubDispatch, scrubTextureBaseline;
+  private boolean rememberVlcFailureOnExoFrame;
+  private boolean nativeSoftware, triedNativeHardware, rememberSoftwareFailureOnHardwareFrame;
+  private long nativeSelectionRequest;
+  private final SoftwareDecodeHealthPolicy nativeHealth = new SoftwareDecodeHealthPolicy();
+  private final Runnable nativeHealthProbe = this::sampleNativeHealth;
+  private boolean nativeHealthScheduled;
+  private long scrubOrigin, scrubTarget, scrubStartedAt, lastScrubDispatch, scrubTextureBaseline;
   private long capturedTextureTimestamp, scrubFrameBaseline;
   private long scrubSessionFrameBaseline, scrubSessionTextureBaseline;
   private final long[] scrubSubmittedTargets = new long[8];
   private int scrubSubmittedCount;
   long lastScrubPreviewPositionMs = -1;
-  private long observedSeekTarget = -1,
-      observedSeekStart,
-      observedTextureBaseline,
-      observedFrameBaseline;
-  private long observedGeneration;
   private volatile long engineFrameGeneration;
   volatile long lastRenderedPositionUs = C.TIME_UNSET;
   volatile long lastRenderedFrameSequence;
@@ -109,6 +120,39 @@ final class VideoPage extends FrameLayout {
     super(context);
     this.vlcSupplier = vlcSupplier;
     this.listener = listener;
+    nativeSurfaceFrames =
+        Build.VERSION.SDK_INT >= 34
+            ? new NativeSurfaceFrames(
+                new NativeSurfaceFrames.Listener() {
+                  @Override
+                  public void onSurfaceAvailable() {
+                    primeNativeSurface();
+                  }
+
+                  @Override
+                  public void onSurfaceUnavailable() {
+                    if (!nativeSurfacePlayback || vlc == null) return;
+                    if (firstFrameReady && !(active && playRequested)) {
+                      nativeSurfacePauseTarget = position();
+                      nativeSurfacePauseRestore = true;
+                    }
+                    firstFrameReady = false;
+                    buffering = true;
+                    warmingVlc = false;
+                    if (frameProbe != null) main.removeCallbacks(frameProbe);
+                    applyVlcPlayback(vlc);
+                    VideoPage.this.listener.onChanged(VideoPage.this);
+                  }
+
+                  @Override
+                  public void onFrameAvailable() {
+                    if (nativeSurfacePlayback
+                        && vlc != null
+                        && warmingVlc
+                        && getWindowVisibility() == VISIBLE) probeVlcFrame(generation, vlc);
+                  }
+                })
+            : null;
     engineHistory = PlaybackEngineHistory.get(context);
     setBackgroundColor(Color.BLACK);
     setClipChildren(true);
@@ -151,9 +195,12 @@ final class VideoPage extends FrameLayout {
     prepareCount++;
     buffering = true;
     final long token = generation;
-    boolean trialBefore = enginePolicy.trialUsed;
-    boolean preferVlc = !forceVlc && enginePolicy.chooseVlc(foreground);
-    if (trialBefore != enginePolicy.trialUsed) engineHistory.changed();
+    int engineChoice = PlaybackEngineChoice.get(getContext());
+    boolean preferVlc =
+        engineChoice == PlaybackEngineChoice.VLC
+            || (!forceVlc
+                && engineChoice == PlaybackEngineChoice.AUTO
+                && enginePolicy.chooseVlc(System.currentTimeMillis()));
     if (forceVlc || preferVlc) startVlc(token, pendingSeek);
     else startExo(token, pendingSeek);
   }
@@ -201,6 +248,13 @@ final class VideoPage extends FrameLayout {
       source.setVolume(0);
       source.setPlayWhenReady(false);
       source.setHandleAudioBecomingNoisy(true);
+      // Keep the audio renderer attached across gestures. Scrubbing suppresses playback and our
+      // volume gate mutes it; disabling/reselecting the audio track only adds work on every
+      // release.
+      source.setScrubbingModeParameters(
+          new ScrubbingModeParameters.Builder()
+              .setDisabledTrackTypes(Collections.emptySet())
+              .build());
       source.setSeekParameters(scrubbing ? coarseSeekParameters() : SeekParameters.EXACT);
       source.setScrubbingModeEnabled(scrubbing);
       source.setRepeatMode(single ? Player.REPEAT_MODE_ONE : Player.REPEAT_MODE_OFF);
@@ -245,16 +299,6 @@ final class VideoPage extends FrameLayout {
             public void onPlayerError(PlaybackException error) {
               if (!current()) return;
               long at = Math.max(0, source.getCurrentPosition());
-              if (enginePolicy != null
-                  && active
-                  && (error.errorCode == PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED
-                      || error.errorCode
-                          == PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES
-                      || error.errorCode
-                          == PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED)) {
-                enginePolicy.exoFailed = true;
-                engineHistory.changed();
-              }
               main.post(
                   () -> {
                     if (current()) {
@@ -278,22 +322,50 @@ final class VideoPage extends FrameLayout {
 
   private void startVlc(long token, long start) {
     if (generation != token || item == null) return;
+    long selection = ++nativeSelectionRequest;
+    boolean avoidSoftware =
+        enginePolicy != null && enginePolicy.shouldAvoidSoftware(System.currentTimeMillis());
+    NativeDecoderSelector.resolve(
+        getContext(),
+        item,
+        avoidSoftware,
+        software -> {
+          if (generation != token || nativeSelectionRequest != selection || item == null) return;
+          // Header selection is asynchronous. A seek made before an engine exists owns the
+          // latest target, including an explicit seek back to zero. An engine fallback instead
+          // retains its supplied position rather than borrowing an unrelated pending value.
+          long selectedStart = exo == null && vlc == null && pendingSeekSet ? pendingSeek : start;
+          startVlc(token, selectedStart, software);
+        });
+  }
+
+  private void startVlc(long token, long start, boolean software) {
+    if (generation != token || item == null) return;
+    nativeSelectionRequest++;
     releaseEngineForReplacement();
     if (scrubbing) start = scrubTarget;
     triedVlc = true;
+    nativeSoftware = software;
+    if (!software) triedNativeHardware = true;
     firstFrameReady = false;
     buffering = true;
     failed = false;
     pendingSeek = Math.max(0, start);
     pendingSeekSet = pendingSeek > 0;
     exoView.setVisibility(INVISIBLE);
+    nativeSurfacePlayback = nativeSurfaceFrames != null;
+    if (nativeSurfacePlayback) {
+      // A recycled far slot gets a fresh buffer queue. Promotion and mode switches never do this.
+      replaceVlcLayout();
+    }
     vlcView.setVisibility(VISIBLE);
     try {
       LibVLC library = vlcSupplier.get();
       MediaPlayer source = new MediaPlayer(library);
       vlc = source;
+      appliedNativeRate = Float.NaN;
       source.setVolume(0);
-      source.attachViews(vlcView, null, false, true);
+      source.attachViews(vlcView, null, false, !nativeSurfacePlayback);
       source.setVideoScale(MediaPlayer.ScaleType.SURFACE_BEST_FIT);
       vlcTextureBaseline = textureTimestamp(findTexture(vlcView));
       source.setEventListener(
@@ -307,7 +379,7 @@ final class VideoPage extends FrameLayout {
                       case MediaPlayer.Event.SeekableChanged:
                         applyPendingSeek(source);
                         if (event.type == MediaPlayer.Event.Playing) {
-                          source.setRate(speed);
+                          applyVlcRate(source);
                           Media.VideoTrack track = source.getCurrentVideoTrack();
                           if (track != null)
                             listener.onVideoSize(VideoPage.this, track.width, track.height);
@@ -317,6 +389,7 @@ final class VideoPage extends FrameLayout {
                         break;
                       case MediaPlayer.Event.Buffering:
                         buffering = event.getBuffering() < 100;
+                        syncNativeHealthProbe();
                         listener.onChanged(VideoPage.this);
                         break;
                       case MediaPlayer.Event.EndReached:
@@ -329,7 +402,7 @@ final class VideoPage extends FrameLayout {
                         observeVlcRepeatBoundary(source);
                         break;
                       case MediaPlayer.Event.EncounteredError:
-                        vlcFailed(token, Math.max(0, source.getTime()));
+                        vlcFailed(token, Math.max(0, source.getTime()), true);
                         break;
                       default:
                         break;
@@ -345,7 +418,7 @@ final class VideoPage extends FrameLayout {
       try {
         // Set this on Media before enabling HW decoding; otherwise LibVLC adds 1500ms here.
         media.addOption(":file-caching=250");
-        media.setHWDecoderEnabled(true, false);
+        media.setHWDecoderEnabled(!software, false);
         // LibVLC 3 has no live input-repeat setter. Keep its decoder looping and change
         // only our
         // completion policy, so a portrait/full-screen toggle never reopens the current
@@ -355,17 +428,19 @@ final class VideoPage extends FrameLayout {
       } finally {
         media.release();
       }
-      source.setRate(speed);
+      applyVlcRate(source);
       warmingVlc = true;
-      // Muted temporary playback primes a real TextureView frame, including an offscreen
-      // page.
+      // Muted temporary playback primes a real frame, including an offscreen page.
       source.play();
       vlcRunningRequested = true;
+      bindNativeSurface();
       listener.onChanged(this);
       applyPlayback();
       beginVlcFrameProbe(token, source);
     } catch (Exception | UnsatisfiedLinkError error) {
-      vlcFailed(token, start);
+      // Missing/unreadable input is not evidence that another decoder suits this file better.
+      vlcFailed(
+          token, start, !(error instanceof IOException || error instanceof SecurityException));
     }
   }
 
@@ -378,41 +453,186 @@ final class VideoPage extends FrameLayout {
 
   private void probeVlcFrame(long token, MediaPlayer source) {
     if (generation != token || vlc != source || firstFrameReady || failed) return;
+    if (nativeSurfacePlayback && getWindowVisibility() != VISIBLE) return;
     try {
       applyPendingSeek(source);
-      TextureView texture = findTexture(vlcView);
-      if (texture != null && texture.isAvailable()) {
-        if (probeBitmap == null) probeBitmap = Bitmap.createBitmap(8, 8, Bitmap.Config.ARGB_8888);
-        // getBitmap updates the hardware texture even while its attached page is clipped
-        // offscreen.
-        Bitmap frame = texture.getBitmap(probeBitmap);
-        long timestamp = textureTimestamp(texture);
-        if (frame != null && timestamp > 0 && timestamp != vlcTextureBaseline && !pendingSeekSet) {
-          warmingVlc = false;
-          buffering = false;
-          applyVlcPlayback(source);
-          markFirstFrame();
-          return;
+      if (nativeSurfacePlayback) {
+        bindNativeSurface();
+        if (nativeSurfaceFrames.isReady() && !pendingSeekSet) {
+          if (nativeSurfacePauseRestore && !(active && playRequested)) {
+            // Re-enabling a detached video track can advance its muted priming frame. Once that
+            // track actually renders, pause and accurately restore the saved pause position on
+            // this same input; only a new post-seek buffer may complete readiness.
+            long restore = nativeSurfacePauseTarget;
+            nativeSurfacePauseRestore = false;
+            warmingVlc = false;
+            applyVlcPlayback(source);
+            pendingSeek = restore;
+            pendingSeekSet = true;
+            fenceVlcSeek(restore);
+            if (source.isSeekable()) {
+              pendingSeek = 0;
+              pendingSeekSet = false;
+              source.setTime(restore, false);
+            }
+          } else {
+            nativeSurfacePauseRestore = false;
+            warmingVlc = false;
+            buffering = false;
+            applyVlcPlayback(source);
+            markFirstFrame();
+            return;
+          }
+        }
+        nativeSurfaceFrames.requestReadyProbe();
+      } else {
+        TextureView texture = findTexture(vlcView);
+        if (texture != null && texture.isAvailable()) {
+          if (probeBitmap == null) probeBitmap = Bitmap.createBitmap(8, 8, Bitmap.Config.ARGB_8888);
+          // getBitmap updates the hardware texture even while its attached page is clipped
+          // offscreen.
+          Bitmap frame = texture.getBitmap(probeBitmap);
+          long timestamp = textureTimestamp(texture);
+          if (frame != null
+              && timestamp > 0
+              && timestamp != vlcTextureBaseline
+              && !pendingSeekSet) {
+            warmingVlc = false;
+            buffering = false;
+            applyVlcPlayback(source);
+            markFirstFrame();
+            return;
+          }
         }
       }
     } catch (RuntimeException ignored) {
       // A texture can briefly be unavailable while an orientation change updates its bounds.
     }
     if (SystemClock.uptimeMillis() >= warmupDeadline) {
-      vlcFailed(token, pendingSeek);
+      // Surface availability and decoder pressure during preloading are transient, not a file rule.
+      vlcFailed(token, position(), false);
       return;
     }
-    if (frameProbe != null) main.postDelayed(frameProbe, 50);
+    if (frameProbe != null) {
+      main.removeCallbacks(frameProbe);
+      main.postDelayed(frameProbe, 50);
+    }
+  }
+
+  private void bindNativeSurface() {
+    if (!nativeSurfacePlayback || nativeSurfaceFrames == null) return;
+    SurfaceView surface = findSurface(vlcView);
+    if (surface != null && !nativeSurfaceFrames.isBoundTo(surface)) {
+      nativeSurfaceFrames.bind(surface);
+      if (scrubbing) nativeSurfaceFrames.beginPreview();
+    }
+  }
+
+  private void primeNativeSurface() {
+    if (!nativeSurfacePlayback
+        || nativeSurfaceFrames == null
+        || vlc == null
+        || !nativeSurfaceFrames.hasSurface()
+        || getWindowVisibility() != VISIBLE) return;
+    if (!vlc.getVLCVout().areViewsAttached()) {
+      reconnectNativeSurface();
+      return;
+    }
+    warmingVlc = true;
+    firstFrameReady = false;
+    buffering = true;
+    applyVlcPlayback(vlc);
+    beginVlcFrameProbe(generation, vlc);
+  }
+
+  private void replaceVlcLayout() {
+    int viewIndex = indexOfChild(vlcView);
+    removeView(vlcView);
+    vlcView = new VLCVideoLayout(getContext());
+    addView(vlcView, viewIndex, new LayoutParams(-1, -1));
+  }
+
+  private void reconnectNativeSurface() {
+    if (nativeSurfaceReattachPosted || vlc == null) return;
+    nativeSurfaceReattachPosted = true;
+    final long token = generation;
+    MediaPlayer source = vlc;
+    VLCVideoLayout oldLayout = vlcView;
+    // LibVLC detaches all holder callbacks after surfaceDestroyed. Reconnect outside that
+    // callback/bind stack; retain the native input, position, rate and playback intent.
+    main.post(
+        () -> {
+          if (generation != token || vlc != source || vlcView != oldLayout) return;
+          nativeSurfaceReattachPosted = false;
+          if (!nativeSurfacePlayback
+              || !nativeSurfaceFrames.hasSurface()
+              || getWindowVisibility() != VISIBLE) return;
+          if (source.getVLCVout().areViewsAttached()) {
+            primeNativeSurface();
+            return;
+          }
+          long at = scrubbing ? scrubTarget : position();
+          try {
+            source.setVolume(0);
+            firstFrameReady = false;
+            buffering = warmingVlc = true;
+            nativeSurfacePauseRestore = !(active && playRequested);
+            nativeSurfacePauseTarget = Math.max(0, at);
+            nativeSurfaceFrames.unbind();
+            source.detachViews();
+            // Drop the detached helper's layout listener with its old view tree. A fresh queue
+            // also prevents that surface's old pixels from satisfying the new first-frame gate.
+            replaceVlcLayout();
+            vlcView.setVisibility(VISIBLE);
+            source.attachViews(vlcView, null, false, false);
+            source.setVideoScale(MediaPlayer.ScaleType.SURFACE_BEST_FIT);
+            pendingSeek = Math.max(0, at);
+            pendingSeekSet = true;
+            bindNativeSurface();
+            applyPendingSeek(source);
+            applyVlcPlayback(source);
+            beginVlcFrameProbe(token, source);
+            listener.onChanged(this);
+          } catch (RuntimeException unavailable) {
+            vlcFailed(token, at, false);
+          }
+        });
+  }
+
+  @Override
+  protected void onWindowVisibilityChanged(int visibility) {
+    super.onWindowVisibilityChanged(visibility);
+    if (vlc != null) syncNativeHealthProbe();
+    if (!nativeSurfacePlayback || vlc == null) return;
+    if (visibility != VISIBLE) {
+      if (frameProbe != null) main.removeCallbacks(frameProbe);
+      applyVlcPlayback(vlc);
+    } else {
+      if (!firstFrameReady) primeNativeSurface();
+      else applyVlcPlayback(vlc);
+    }
   }
 
   private void markFirstFrame() {
     if (firstFrameReady) return;
     firstFrameReady = true;
-    if (vlc != null && enginePolicy != null && (!enginePolicy.vlcReady || enginePolicy.vlcFailed)) {
-      enginePolicy.vlcReady = true;
-      enginePolicy.vlcFailed = false;
-      engineHistory.changed();
+    if (enginePolicy != null) {
+      if (vlc != null) {
+        boolean changed = enginePolicy.recordVlcSuccess();
+        if (nativeSoftware) changed |= enginePolicy.recordSoftwareSuccess();
+        else if (rememberSoftwareFailureOnHardwareFrame) {
+          enginePolicy.recordSoftwareFallback(System.currentTimeMillis());
+          changed = true;
+        }
+        if (changed) engineHistory.changed();
+      } else if (exo != null && rememberVlcFailureOnExoFrame) {
+        enginePolicy.recordCompatibleFallback(System.currentTimeMillis());
+        engineHistory.changed();
+      }
     }
+    rememberVlcFailureOnExoFrame = false;
+    rememberSoftwareFailureOnHardwareFrame = false;
+    syncNativeHealthProbe();
     failed = false;
     errorLabel.setVisibility(GONE);
     listener.onChanged(this);
@@ -438,6 +658,12 @@ final class VideoPage extends FrameLayout {
   }
 
   private void fenceVlcSeek(long target) {
+    if (nativeSurfacePauseRestore) nativeSurfacePauseTarget = Math.max(0, target);
+    nativeHealth.reset();
+    if (nativeSurfacePlayback && nativeSurfaceFrames != null) {
+      bindNativeSurface();
+      nativeSurfaceFrames.beforeSeek(!firstFrameReady);
+    }
     vlcPreviousTime = -1;
     vlcNearEndArmed = false;
     vlcSeekFenceTarget = Math.max(0, target);
@@ -489,6 +715,7 @@ final class VideoPage extends FrameLayout {
             && at <= boundaryWindow;
     vlcPreviousTime = at;
     if (wrapped) {
+      nativeHealth.reset();
       vlcNearEndArmed = false;
       if (!single) {
         notifyVlcEnd(source);
@@ -514,6 +741,7 @@ final class VideoPage extends FrameLayout {
     if (active && play) rewindIfEnded();
     this.active = active;
     playRequested = play;
+    if (active && play) nativeSurfacePauseRestore = false;
     this.audible = audible;
     if (!active || !play) {
       vlcPreviousTime = -1;
@@ -558,23 +786,110 @@ final class VideoPage extends FrameLayout {
 
   private void applyVlcPlayback(MediaPlayer source) {
     source.setVolume(0);
-    boolean playing = active && playRequested && !scrubbing;
-    boolean run = playing || warmingVlc;
+    // Preserve the native playback clock while seeking; muting a playing scrub avoids the
+    // pause/seek/play restart cycle. An originally paused or inactive page still stays paused.
+    boolean playing = active && playRequested;
+    boolean run =
+        (playing || warmingVlc) && (!nativeSurfacePlayback || getWindowVisibility() == VISIBLE);
     if (run != vlcRunningRequested) {
       vlcRunningRequested = run;
       if (run) source.play();
       else source.pause();
     }
     if (run) {
-      source.setRate(speed);
-      if (playing && audible) source.setVolume(100);
+      applyVlcRate(source);
+      if (playing
+          && audible
+          && !scrubbing
+          && (!nativeSurfacePlayback || (!warmingVlc && nativeSurfaceFrames.isReady())))
+        source.setVolume(nativeDucked ? 25 : 100);
     }
+    syncNativeHealthProbe();
+  }
+
+  void setNativeDucked(boolean ducked) {
+    if (nativeDucked == ducked) return;
+    nativeDucked = ducked;
+    // Focus attenuation is a gain, not permission to make an inactive/warming/scrubbing page
+    // audible. Every native volume change follows the same eligibility gate.
+    if (vlc != null) applyVlcPlayback(vlc);
+  }
+
+  private boolean canObserveNativeHealth() {
+    return vlc != null
+        && nativeSoftware
+        && active
+        && playRequested
+        && audible
+        && firstFrameReady
+        && !warmingVlc
+        && !buffering
+        && !scrubbing
+        && !ended
+        && !pendingSeekSet
+        && Math.abs(speed - 1f) < .001f
+        && getWindowVisibility() == VISIBLE;
+  }
+
+  private void syncNativeHealthProbe() {
+    if (!canObserveNativeHealth()) {
+      main.removeCallbacks(nativeHealthProbe);
+      nativeHealthScheduled = false;
+      nativeHealth.reset();
+    } else if (!nativeHealthScheduled) {
+      nativeHealthScheduled = true;
+      main.postDelayed(nativeHealthProbe, 1000);
+    }
+  }
+
+  private void sampleNativeHealth() {
+    nativeHealthScheduled = false;
+    if (!canObserveNativeHealth()) {
+      nativeHealth.reset();
+      return;
+    }
+    MediaPlayer source = vlc;
+    boolean slow = false;
+    IMedia media = null;
+    try {
+      media = source.getMedia();
+      IMedia.Stats stats = media == null ? null : media.getStats();
+      IMedia.VideoTrack track = source.getCurrentVideoTrack();
+      if (stats == null || track == null || track.frameRateDen <= 0) nativeHealth.reset();
+      else
+        slow =
+            nativeHealth.update(
+                SystemClock.uptimeMillis(),
+                stats.decodedVideo,
+                stats.displayedPictures,
+                stats.lostPictures,
+                (float) track.frameRateNum / track.frameRateDen);
+    } catch (RuntimeException unavailable) {
+      nativeHealth.reset();
+    } finally {
+      if (media != null) media.release();
+    }
+    if (slow && !triedNativeHardware) {
+      // A sustained, eligible playback deficit is evidence; a seek or absent statistic is not.
+      // Persist this choice only if the hardware retry actually produces its first frame.
+      rememberSoftwareFailureOnHardwareFrame = true;
+      startVlc(generation, Math.max(0, source.getTime()), false);
+    } else syncNativeHealthProbe();
+  }
+
+  private void applyVlcRate(MediaPlayer source) {
+    if (source != vlc || appliedNativeRate == speed) return;
+    // Even identical rates enqueue native SET_RATE commands between pending seeks. The Java
+    // binding returns void, so cache only after it returns normally; exceptions remain retryable.
+    source.setRate(speed);
+    appliedNativeRate = speed;
   }
 
   void setSpeed(float speed) {
     this.speed = Math.max(.1f, speed);
     if (exo != null) exo.setPlaybackSpeed(this.speed);
-    if (vlc != null) vlc.setRate(this.speed);
+    if (vlc != null) applyVlcRate(vlc);
+    syncNativeHealthProbe();
   }
 
   void setRepeat(boolean single) {
@@ -594,9 +909,7 @@ final class VideoPage extends FrameLayout {
 
   /** Uses the visible decoder for interactive frames; no second thumbnail decoder is needed. */
   void beginScrub() {
-    if (scrubbing || failed || (exo == null && vlc == null)) return;
-    observedSeekTarget = -1;
-    main.removeCallbacks(observeSeekFrame);
+    if (scrubbing || failed || item == null) return;
     scrubOrigin = position();
     scrubTarget = scrubOrigin;
     scrubFrameBaseline = lastRenderedFrameSequence;
@@ -606,17 +919,23 @@ final class VideoPage extends FrameLayout {
     scrubSubmittedCount = 0;
     lastScrubPreviewPositionMs = -1;
     capturedTextureTimestamp = 0;
+    scrubStartedAt = SystemClock.uptimeMillis();
     lastScrubDispatch = 0;
     scrubPending = false;
     scrubbing = true;
+    syncNativeHealthProbe();
+    if (nativeSurfacePlayback && nativeSurfaceFrames != null) {
+      bindNativeSurface();
+      nativeSurfaceFrames.beginPreview();
+    }
     if (exo != null) {
-      // Scrubbing suppresses playback without losing the user's play/pause intent.
+      // A short tap should issue only its final exact seek. Enter scrubbing mode lazily when the
+      // first intermediate target is actually dispatched, preserving the user's play/pause intent.
       playRequested = exo.getPlayWhenReady();
       exo.setVolume(0);
-      exo.setSeekParameters(coarseSeekParameters());
-      exo.setScrubbingModeEnabled(true);
     }
-    if (vlc != null) applyVlcPlayback(vlc);
+    // Keep the native clock and play intent; all scrub requests stay muted until the finger lifts.
+    if (vlc != null) vlc.setVolume(0);
   }
 
   void scrubTo(long position) {
@@ -624,9 +943,20 @@ final class VideoPage extends FrameLayout {
     long target = clampPosition(position);
     if (target == scrubTarget && !scrubPending) return;
     scrubTarget = target;
+    if (nativeSurfacePauseRestore) nativeSurfacePauseTarget = target;
+    if (exo == null && vlc == null) {
+      pendingSeek = target;
+      pendingSeekSet = true;
+      scrubPending = false;
+      return;
+    }
     scrubPending = true;
     main.removeCallbacks(dispatchScrub);
-    long delay = Math.max(0, lastScrubDispatch + SCRUB_INTERVAL_MS - SystemClock.uptimeMillis());
+    long earliest =
+        scrubSubmittedCount == 0
+            ? scrubStartedAt + FIRST_SCRUB_DELAY_MS
+            : lastScrubDispatch + SCRUB_INTERVAL_MS;
+    long delay = Math.max(0, earliest - SystemClock.uptimeMillis());
     if (delay == 0) dispatchScrub();
     else main.postDelayed(dispatchScrub, delay);
   }
@@ -652,8 +982,13 @@ final class VideoPage extends FrameLayout {
     scrubSubmittedCount++;
     ended = false;
     if (exo != null) {
+      if (!exo.isScrubbingModeEnabled()) {
+        exo.setSeekParameters(coarseSeekParameters());
+        exo.setScrubbingModeEnabled(true);
+      }
       exo.seekTo(target);
     } else if (vlc != null) {
+      applyVlcPlayback(vlc);
       pendingSeek = target;
       pendingSeekSet = true;
       if (vlc.isSeekable()) {
@@ -674,13 +1009,13 @@ final class VideoPage extends FrameLayout {
     main.removeCallbacks(dispatchScrub);
     scrubPending = false;
     scrubbing = false;
+    if (nativeSurfaceFrames != null) nativeSurfaceFrames.endPreview();
     ended = false;
     if (exo != null) {
       // Focus loss/noisy handling can change this while scrub suppression is active.
       playRequested = exo.getPlayWhenReady();
       // Dispatch the accurate seek before releasing the playback suppression.
       exo.setSeekParameters(SeekParameters.EXACT);
-      if (commit) beginSeekObservation(target);
       exo.seekTo(target);
       exo.setScrubbingModeEnabled(false);
     } else if (vlc != null) {
@@ -693,6 +1028,9 @@ final class VideoPage extends FrameLayout {
         vlc.setTime(target, false);
       }
       // VLC's clock is not a frame PTS. Do not invent comparable latency samples from it.
+    } else if (item != null) {
+      pendingSeek = target;
+      pendingSeekSet = true;
     }
     applyPlayback();
   }
@@ -700,6 +1038,15 @@ final class VideoPage extends FrameLayout {
   /** Caller owns the result. Null means no confirmed new frame is available yet. */
   Bitmap captureScrubFrame() {
     if (!scrubbing || scrubSubmittedCount == 0) return null;
+    if (nativeSurfacePlayback && vlc != null && nativeSurfaceFrames != null) {
+      if (buffering) return null;
+      NativeSurfaceFrames.Preview preview = nativeSurfaceFrames.takePreview();
+      // Native time is an approximate caption; a frame-bound commit does not expose media PTS.
+      nativeSurfaceFrames.requestPreview(Math.max(0, vlc.getTime()));
+      if (preview == null) return null;
+      lastScrubPreviewPositionMs = preview.approximatePositionMs;
+      return preview.bitmap;
+    }
     TextureView texture = currentTexture();
     if (texture == null || !texture.isAvailable()) return null;
     if (exo != null) {
@@ -752,6 +1099,7 @@ final class VideoPage extends FrameLayout {
 
   private void clearScrubState() {
     main.removeCallbacks(dispatchScrub);
+    if (nativeSurfaceFrames != null) nativeSurfaceFrames.endPreview();
     scrubPending = false;
     if (!scrubbing) return;
     scrubbing = false;
@@ -769,51 +1117,19 @@ final class VideoPage extends FrameLayout {
     return new SeekParameters(SCRUB_TOLERANCE_MS * 1000, SCRUB_TOLERANCE_MS * 1000);
   }
 
-  private void beginSeekObservation(long target) {
-    main.removeCallbacks(observeSeekFrame);
-    observedSeekTarget = -1;
-    if (!active || exo == null || enginePolicy == null) return;
-    observedSeekTarget = target;
-    observedSeekStart = SystemClock.uptimeMillis();
-    observedGeneration = generation;
-    observedTextureBaseline = textureTimestamp(currentTexture());
-    observedFrameBaseline = lastRenderedFrameSequence;
-    main.postDelayed(observeSeekFrame, 16);
-  }
-
-  private void observeSeekFrame() {
-    if (observedSeekTarget < 0
-        || observedGeneration != generation
-        || exo == null
-        || !active
-        || scrubbing) return;
-    long elapsed = SystemClock.uptimeMillis() - observedSeekStart;
-    if (elapsed > 3000) {
-      observedSeekTarget = -1;
-      return; // No confirmed frame: unknown, not a fabricated slow measurement.
-    }
-    long pts = lastRenderedPositionUs;
-    long timestamp = textureTimestamp(currentTexture());
-    if (lastRenderedFrameSequence > observedFrameBaseline
-        && pts != C.TIME_UNSET
-        && Math.abs(pts / 1000 - observedSeekTarget) <= 100
-        && System.nanoTime() >= lastFrameReleaseTimeNs
-        && timestamp > 0
-        && timestamp != observedTextureBaseline) {
-      enginePolicy.recordExoSeek(elapsed);
-      engineHistory.changed();
-      observedSeekTarget = -1;
+  private void vlcFailed(long token, long position, boolean nativeError) {
+    if (generation != token) return;
+    if (pendingSeekSet) position = pendingSeek;
+    else if (nativeSurfacePauseRestore) position = nativeSurfacePauseTarget;
+    if (nativeSoftware && !triedNativeHardware) {
+      rememberSoftwareFailureOnHardwareFrame =
+          SeekEnginePolicy.shouldRememberVlcFailure(foreground, active, nativeError);
+      startVlc(token, position, false);
       return;
     }
-    main.postDelayed(observeSeekFrame, 16);
-  }
-
-  private void vlcFailed(long token, long position) {
-    if (generation != token) return;
-    if (enginePolicy != null) {
-      enginePolicy.recordVlcFailure();
-      engineHistory.changed();
-    }
+    rememberSoftwareFailureOnHardwareFrame = false;
+    rememberVlcFailureOnExoFrame =
+        !triedExo && SeekEnginePolicy.shouldRememberVlcFailure(foreground, active, nativeError);
     if (!triedExo) {
       releaseEngineForReplacement();
       startExo(token, position);
@@ -822,8 +1138,6 @@ final class VideoPage extends FrameLayout {
 
   void seekTo(long position) {
     clearScrubState();
-    observedSeekTarget = -1;
-    main.removeCallbacks(observeSeekFrame);
     long at = Math.max(0, position);
     long length = duration();
     if (length > 0) at = Math.min(at, Math.max(0, length - 1));
@@ -834,11 +1148,15 @@ final class VideoPage extends FrameLayout {
       pendingSeek = at;
       pendingSeekSet = true;
       applyPendingSeek(vlc);
+    } else if (item != null) {
+      pendingSeek = at;
+      pendingSeekSet = true;
     }
   }
 
   long position() {
     if (pendingSeekSet) return pendingSeek;
+    if (nativeSurfacePauseRestore) return nativeSurfacePauseTarget;
     if (exo != null) return Math.max(0, exo.getCurrentPosition());
     if (vlc != null) return Math.max(0, vlc.getTime());
     return 0;
@@ -855,14 +1173,22 @@ final class VideoPage extends FrameLayout {
         && (exo != null ? exo.isPlaying() : vlc != null && vlc.isPlaying());
   }
 
+  boolean isScrubbing() {
+    return scrubbing;
+  }
+
   void release() {
     generation++;
     main.removeCallbacksAndMessages(null);
     releaseEngine();
     engineHistory.flush();
     enginePolicy = null;
+    rememberVlcFailureOnExoFrame = false;
+    rememberSoftwareFailureOnHardwareFrame = false;
+    triedNativeHardware = nativeSoftware = false;
     triedExo = triedVlc = false;
     active = playRequested = audible = false;
+    nativeDucked = false;
     firstFrameReady = failed = buffering = ended = false;
     pendingSeek = 0;
     pendingSeekSet = false;
@@ -876,18 +1202,25 @@ final class VideoPage extends FrameLayout {
   }
 
   private void releaseEngine() {
+    main.removeCallbacks(nativeHealthProbe);
+    nativeHealthScheduled = false;
+    nativeHealth.reset();
     clearScrubState();
     pendingSeek = 0;
     pendingSeekSet = false;
     engineFrameGeneration++;
     lastRenderedPositionUs = C.TIME_UNSET;
-    observedSeekTarget = -1;
-    main.removeCallbacks(observeSeekFrame);
     resetVlcRepeatObservation();
     if (frameProbe != null) main.removeCallbacks(frameProbe);
     frameProbe = null;
     warmingVlc = false;
     vlcRunningRequested = false;
+    appliedNativeRate = Float.NaN;
+    nativeSurfacePlayback = false;
+    nativeSurfaceReattachPosted = false;
+    nativeSurfacePauseRestore = false;
+    nativeSurfacePauseTarget = 0;
+    if (nativeSurfaceFrames != null) nativeSurfaceFrames.unbind();
     if (exo != null) {
       ExoPlayer source = exo;
       exo = null;
@@ -925,7 +1258,7 @@ final class VideoPage extends FrameLayout {
     scrubSessionTextureBaseline = scrubTextureBaseline;
     capturedTextureTimestamp = 0;
     lastScrubPreviewPositionMs = -1;
-    // The replacement starts at this latest target, still paused/muted until the finger lifts.
+    // The replacement starts at the latest target, preserving play intent and the scrub mute.
     scrubSubmittedTargets[0] = scrubTarget;
     scrubSubmittedCount = 1;
     lastScrubDispatch = SystemClock.uptimeMillis();
@@ -953,6 +1286,18 @@ final class VideoPage extends FrameLayout {
       ViewGroup group = (ViewGroup) view;
       for (int i = 0; i < group.getChildCount(); i++) {
         TextureView found = findTexture(group.getChildAt(i));
+        if (found != null) return found;
+      }
+    }
+    return null;
+  }
+
+  private static SurfaceView findSurface(View view) {
+    if (view instanceof SurfaceView) return (SurfaceView) view;
+    if (view instanceof ViewGroup) {
+      ViewGroup group = (ViewGroup) view;
+      for (int i = 0; i < group.getChildCount(); i++) {
+        SurfaceView found = findSurface(group.getChildAt(i));
         if (found != null) return found;
       }
     }

@@ -120,6 +120,35 @@ public final class SeekPreviewLoaderTest {
   }
 
   @Test
+  public void consecutiveDragsReuseTheSameSmallFrameAndInteractivePathWorks() throws Exception {
+    Context context = contextWithPermission();
+    VideoItem video = fixture(context, "Aurora", "mp4");
+    assumeNotNull(video);
+    try (SeekPreviewLoader loader = new SeekPreviewLoader(context)) {
+      Bitmap first = frame(loader, video, 1000);
+      assertNotNull(first);
+      loader.reset();
+      assertSame(
+          "A second drag can reuse its retained memory frame", first, frame(loader, video, 1000));
+
+      CountDownLatch ready = new CountDownLatch(1);
+      AtomicReference<Bitmap> interactive = new AtomicReference<>();
+      loader.requestInteractive(
+          video,
+          5000,
+          (image, position) -> {
+            assertSame(Looper.getMainLooper(), Looper.myLooper());
+            assertEquals(5000, position);
+            interactive.set(image);
+            ready.countDown();
+          });
+      assertTrue("Interactive platform fallback remains bounded", ready.await(8, TimeUnit.SECONDS));
+      assertNotNull(interactive.get());
+      assertTrue(differ(first, interactive.get()));
+    }
+  }
+
+  @Test
   public void aviCompatibilityFramesFollowPositionAndCanBeCanceled() throws Exception {
     Context context = contextWithPermission();
     VideoItem video = fixture(context, "Evening", "avi");

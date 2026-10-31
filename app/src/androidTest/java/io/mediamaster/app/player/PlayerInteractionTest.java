@@ -24,6 +24,7 @@ import android.widget.TextView;
 import androidx.media3.common.Player;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.exoplayer.ExoPlayer;
+import androidx.media3.exoplayer.SeekParameters;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
 import androidx.test.rule.ActivityTestRule;
@@ -215,7 +216,7 @@ public final class PlayerInteractionTest {
     onMain(
         () -> {
           ExoPlayer p = (ExoPlayer) read("exo");
-          p.pause();
+          pauseThroughControls();
           p.seekTo(1000);
           return null;
         });
@@ -237,9 +238,13 @@ public final class PlayerInteractionTest {
       SystemClock.sleep(16);
     }
     assertEquals(39, distinct);
-    // More than two progress ticker intervals passed; playback itself must still be uncommitted.
-    assertEquals(
-        1000, onMain(() -> ((ExoPlayer) read("exo")).getCurrentPosition()).longValue(), 100);
+    // The native player now follows coarse targets during the drag; it must remain muted.
+    onMain(
+        () -> {
+          assertEquals(0f, ((ExoPlayer) read("exo")).getVolume(), 0f);
+          assertTrue(((VideoPage) read("currentPage")).lastRenderedFrameSequence > 0);
+          return null;
+        });
     for (int index = 38; index >= 0; index--) {
       send(MotionEvent.ACTION_MOVE, start + (20 + index * .5f) * density, y);
       int progress = onMain(() -> ((SeekBar) read("seek")).getProgress());
@@ -255,11 +260,11 @@ public final class PlayerInteractionTest {
   }
 
   @Test
-  public void horizontalDragShowsActualFrameWithoutCommittingUntilRelease() throws Exception {
+  public void horizontalDragShowsActualFrameAndCommitsPreciselyOnRelease() throws Exception {
     onMain(
         () -> {
           ExoPlayer player = (ExoPlayer) read("exo");
-          player.pause();
+          pauseThroughControls();
           player.seekTo(1000);
           return null;
         });
@@ -277,10 +282,7 @@ public final class PlayerInteractionTest {
           long target = (Long) read("gestureTarget");
           assertEquals((int) (target * 10000 / 6000), ((SeekBar) read("seek")).getProgress());
           assertEquals(
-              "Video position remains unchanged while dragging",
-              1000,
-              ((ExoPlayer) read("exo")).getCurrentPosition(),
-              150);
+              "Scrubbing never plays audio", 0f, ((ExoPlayer) read("exo")).getVolume(), 0f);
           assertTrue(((TextView) read("previewTime")).getText().toString().contains("/"));
           return null;
         });
@@ -337,12 +339,11 @@ public final class PlayerInteractionTest {
   }
 
   @Test
-  public void cancelledHorizontalSeekHidesControlsWithoutSeekingAndTheNextTapStillWorks()
-      throws Exception {
+  public void cancelledHorizontalSeekRestoresOriginAndTheNextTapStillWorks() throws Exception {
     onMain(
         () -> {
           ExoPlayer player = (ExoPlayer) read("exo");
-          player.pause();
+          pauseThroughControls();
           player.seekTo(1000);
           return null;
         });
@@ -394,7 +395,7 @@ public final class PlayerInteractionTest {
     onMain(
         () -> {
           ExoPlayer player = (ExoPlayer) read("exo");
-          player.pause();
+          pauseThroughControls();
           assertNull(((View) read("topBar")).getBackground());
           assertNull(((View) read("bottomBar")).getBackground());
           assertEquals("1 / 1", ((TextView) read("subtitle")).getText().toString());
@@ -438,6 +439,7 @@ public final class PlayerInteractionTest {
     onMain(
         () -> {
           long now = SystemClock.uptimeMillis();
+          long target = (Long) read("gestureTarget");
           MotionEvent up =
               MotionEvent.obtain(
                   now - 50,
@@ -448,6 +450,10 @@ public final class PlayerInteractionTest {
                   0);
           bar.dispatchTouchEvent(up);
           up.recycle();
+          assertEquals(target, ((ExoPlayer) read("exo")).getCurrentPosition(), 100);
+          assertEquals(SeekParameters.EXACT, ((ExoPlayer) read("exo")).getSeekParameters());
+          assertFalse(
+              "A paused SeekBar drag remains paused", ((ExoPlayer) read("exo")).getPlayWhenReady());
           assertEquals(View.GONE, ((View) read("seekPreview")).getVisibility());
           assertEquals(
               "SeekBar dragging keeps the controls visible",
@@ -458,11 +464,58 @@ public final class PlayerInteractionTest {
   }
 
   @Test
+  public void cancelledSeekBarDragRestoresOriginAndClearsScrubState() throws Exception {
+    onMain(
+        () -> {
+          pauseThroughControls();
+          ((ExoPlayer) read("exo")).seekTo(1200);
+          return null;
+        });
+    await(
+        () -> onMain(() -> ((ExoPlayer) read("exo")).getPlaybackState() == Player.STATE_READY),
+        8000);
+    SeekBar bar = onMain(() -> (SeekBar) read("seek"));
+    onMain(
+        () -> {
+          long now = SystemClock.uptimeMillis();
+          for (int action : new int[] {MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE}) {
+            MotionEvent event =
+                MotionEvent.obtain(
+                    now, now, action, bar.getWidth() * .75f, bar.getHeight() * .5f, 0);
+            bar.dispatchTouchEvent(event);
+            event.recycle();
+          }
+          assertTrue((Boolean) read("scrubbing"));
+          MotionEvent cancel =
+              MotionEvent.obtain(
+                  now,
+                  now,
+                  MotionEvent.ACTION_CANCEL,
+                  bar.getWidth() * .75f,
+                  bar.getHeight() * .5f,
+                  0);
+          bar.dispatchTouchEvent(cancel);
+          cancel.recycle();
+          return null;
+        });
+    SystemClock.sleep(350);
+    onMain(
+        () -> {
+          assertFalse((Boolean) read("scrubbing"));
+          assertEquals(1200, ((ExoPlayer) read("exo")).getCurrentPosition(), 100);
+          assertEquals(SeekParameters.EXACT, ((ExoPlayer) read("exo")).getSeekParameters());
+          assertFalse(((ExoPlayer) read("exo")).getPlayWhenReady());
+          assertEquals(View.GONE, ((View) read("seekPreview")).getVisibility());
+          return null;
+        });
+  }
+
+  @Test
   public void loadingWaitsASecondAndRepeatedBufferSignalsDoNotRestartTheDeadline()
       throws Exception {
     onMain(
         () -> {
-          ((ExoPlayer) read("exo")).pause();
+          pauseThroughControls();
           loadingSignal(false);
           loadingSignal(true);
           return null;
@@ -508,7 +561,7 @@ public final class PlayerInteractionTest {
     onMain(
         () -> {
           ExoPlayer p = (ExoPlayer) read("exo");
-          p.pause();
+          pauseThroughControls();
           p.seekTo(1000);
           return null;
         });
@@ -542,6 +595,12 @@ public final class PlayerInteractionTest {
           loadingSignal(false);
           return null;
         });
+  }
+
+  private void pauseThroughControls() throws Exception {
+    Method method = PlayerActivity.class.getDeclaredMethod("setPlaying", boolean.class);
+    method.setAccessible(true);
+    method.invoke(activity, false);
   }
 
   private void loadingSignal(boolean buffering) throws Exception {

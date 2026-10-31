@@ -10,6 +10,7 @@ import android.content.pm.ActivityInfo;
 import android.content.res.ColorStateList;
 import android.content.res.Configuration;
 import android.database.Cursor;
+import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -78,6 +79,27 @@ public final class PlayerActivity extends Activity {
   private ImageView previewImage, hudIcon;
   private LinearLayout seekPreview, gestureHud;
   private SeekPreviewLoader previewLoader;
+  private VideoPage scrubbingPage;
+  private VideoPage syncedPage;
+  private long syncedPageGeneration = -1;
+  private boolean seekTouchCanceled;
+  private final Runnable refreshScrubPreview =
+      new Runnable() {
+        @Override
+        public void run() {
+          if (!started || !(scrubbing || gestureSeeking) || scrubbingPage != currentPage) return;
+          Bitmap frame = currentPage == null ? null : currentPage.captureScrubFrame();
+          if (frame != null && seekPreview.getVisibility() == View.VISIBLE) {
+            // The preview shares the active decoder. A slow file never starts a competing decoder.
+            previewImage.setImageBitmap(frame);
+            previewTime.setText(
+                formatTime(currentPage.lastScrubPreviewPositionMs)
+                    + " / "
+                    + formatTime(duration()));
+          }
+          handler.postDelayed(this, 80);
+        }
+      };
   private View touchLayer;
   private static final int GESTURE_NONE = 0,
       GESTURE_SEEK = 1,
@@ -107,6 +129,7 @@ public final class PlayerActivity extends Activity {
   private VelocityTracker pageVelocity;
   private ThreeWindowPager pager;
   private VideoPage previousPage, currentPage, nextPage;
+  private final Runnable preloadWindow = this::ensurePortraitWindow;
   private final Runnable automaticAdvance =
       () -> {
         if (this.handlingEnd && pendingCompletionGeneration == completionGeneration)
@@ -356,6 +379,7 @@ public final class PlayerActivity extends Activity {
             gestureOrigin = position();
             gestureTarget = gestureOrigin;
             thumbDirectionAnchor = gestureOrigin;
+            beginPlayerScrub();
             updateLoadingIndicator();
             handler.removeCallbacks(hideChrome);
             showSeekPreview(gestureTarget);
@@ -364,7 +388,14 @@ public final class PlayerActivity extends Activity {
           @Override
           public void onProgressChanged(SeekBar bar, int progress, boolean user) {
             if (user) {
+              if (seekTouchCanceled) return;
               gestureTarget = duration() * progress / 10000L;
+              if (!scrubbing) {
+                // Accessibility and keyboard changes do not open a touch tracking session.
+                seekTo(gestureTarget);
+                return;
+              }
+              if (scrubbingPage != null) scrubbingPage.scrubTo(gestureTarget);
               currentTime.setText(formatTime(gestureTarget));
               showSeekPreview(gestureTarget);
             }
@@ -372,12 +403,36 @@ public final class PlayerActivity extends Activity {
 
           @Override
           public void onStopTrackingTouch(SeekBar bar) {
+            if (!scrubbing) return;
             hideSeekPreview();
+            endPlayerScrub(gestureTarget, true);
             scrubbing = false;
-            seekTo(gestureTarget);
+            updateProgress();
             updateLoadingIndicator();
             showChrome();
           }
+        });
+    seek.setOnTouchListener(
+        (view, event) -> {
+          int action = event.getActionMasked();
+          if (action == MotionEvent.ACTION_DOWN) seekTouchCanceled = false;
+          if (seekTouchCanceled) {
+            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL)
+              seekTouchCanceled = false;
+            return true;
+          }
+          if (action == MotionEvent.ACTION_CANCEL || action == MotionEvent.ACTION_POINTER_DOWN) {
+            cancelInteractions();
+            if (action == MotionEvent.ACTION_POINTER_DOWN) {
+              MotionEvent cancel = MotionEvent.obtain(event);
+              cancel.setAction(MotionEvent.ACTION_CANCEL);
+              view.onTouchEvent(cancel);
+              cancel.recycle();
+              seekTouchCanceled = true;
+              return true;
+            }
+          }
+          return false;
         });
     LinearLayout controls = new LinearLayout(this);
     controls.setGravity(Gravity.CENTER);
@@ -535,6 +590,7 @@ public final class PlayerActivity extends Activity {
           if (Math.abs(dx) > dp(14) && Math.abs(dx) > Math.abs(dy) * 1.3f && duration() > 0) {
             gestureKind = GESTURE_SEEK;
             gestureSeeking = true;
+            beginPlayerScrub();
             cancelTapRecognition();
             showChrome();
             updateLoadingIndicator();
@@ -553,6 +609,7 @@ public final class PlayerActivity extends Activity {
               GestureSeek.deltaMs(
                   dx, Math.max(dp(240), view.getWidth() - dp(40)), duration(), sensitivity);
           gestureTarget = GestureSeek.targetMs(gestureOrigin, delta, duration());
+          if (scrubbingPage != null) scrubbingPage.scrubTo(gestureTarget);
           showSeekPreview(gestureTarget);
         } else if (gestureKind == GESTURE_BRIGHTNESS || gestureKind == GESTURE_VOLUME) {
           updateVerticalGesture(dy, Math.max(1, view.getHeight()));
@@ -567,8 +624,9 @@ public final class PlayerActivity extends Activity {
         int finished = gestureKind;
         if (finished == GESTURE_SEEK) {
           hideSeekPreview();
+          endPlayerScrub(gestureTarget, true);
           gestureSeeking = false;
-          seekTo(gestureTarget);
+          updateProgress();
           updateLoadingIndicator();
           // A screen swipe returns straight to the video once its seek is committed.
           // SeekBar dragging retains its separate, visible-controls completion behavior.
@@ -663,11 +721,14 @@ public final class PlayerActivity extends Activity {
   }
 
   private boolean canRevealPrevious() {
-    return queue.size() > 1 && order.hasPrevious() && pageReady(previousPage);
+    return queue.size() > 1
+        && order.hasPrevious()
+        && previousPage.index == order.peekPrevious()
+        && pageReady(previousPage);
   }
 
   private boolean canRevealNext() {
-    return queue.size() > 1 && pageReady(nextPage);
+    return queue.size() > 1 && nextPage.index == order.peekNext() && pageReady(nextPage);
   }
 
   private boolean pageReady(VideoPage page) {
@@ -759,9 +820,15 @@ public final class PlayerActivity extends Activity {
       nextPage.release();
       return;
     }
-    if (order.hasPrevious()) prepareNeighbor(previousPage, order.peekPrevious());
-    else previousPage.release();
+    if (currentPage == null
+        || (!currentPage.failed && (!currentPage.firstFrameReady || currentPage.buffering))
+        || scrubbingPage != null) return;
+    // Prime one neighbor at a time after the visible frame, keeping decoder setup away from seeks.
     prepareNeighbor(nextPage, order.peekNext());
+    if (pageReady(nextPage)) {
+      if (order.hasPrevious()) prepareNeighbor(previousPage, order.peekPrevious());
+      else previousPage.release();
+    }
   }
 
   private void prepareNeighbor(VideoPage page, int index) {
@@ -782,9 +849,16 @@ public final class PlayerActivity extends Activity {
     }
     if (seekPreview.getVisibility() != View.VISIBLE) previewImage.setImageDrawable(null);
     seekPreview.setVisibility(View.VISIBLE);
-    previewTime.setText(formatTime(at) + " / " + formatTime(duration()));
+    long previewPosition =
+        currentPage != null && currentPage.lastScrubPreviewPositionMs >= 0
+            ? currentPage.lastScrubPreviewPositionMs
+            : at;
+    previewTime.setText(formatTime(previewPosition) + " / " + formatTime(duration()));
+    // The same player supplies both live scrubbing and the preview. Only use the metadata
+    // extractor if there is no playback engine; never compete for codecs while it is seeking.
+    if (currentPage != null && (currentPage.exo != null || currentPage.vlc != null)) return;
     String identity = currentItem().id;
-    previewLoader.request(
+    previewLoader.requestInteractive(
         currentItem(),
         at,
         (bitmap, requested) -> {
@@ -798,9 +872,31 @@ public final class PlayerActivity extends Activity {
   }
 
   private void hideSeekPreview() {
+    handler.removeCallbacks(refreshScrubPreview);
     if (seekPreview != null) seekPreview.setVisibility(View.GONE);
     if (previewImage != null) previewImage.setImageDrawable(null);
     if (previewLoader != null) previewLoader.reset();
+  }
+
+  private void beginPlayerScrub() {
+    invalidateCompletion();
+    handler.removeCallbacks(preloadWindow);
+    if (previewLoader != null) previewLoader.reset();
+    scrubbingPage = currentPage;
+    if (scrubbingPage != null) scrubbingPage.beginScrub();
+    handler.removeCallbacks(refreshScrubPreview);
+    handler.post(refreshScrubPreview);
+  }
+
+  private void endPlayerScrub(long target, boolean commit) {
+    handler.removeCallbacks(refreshScrubPreview);
+    VideoPage page = scrubbingPage;
+    scrubbingPage = null;
+    invalidateCompletion();
+    if (page != null) page.endScrub(target, commit);
+    // A no-op seek may not emit another ready event; defer preload work until after finger-up.
+    handler.removeCallbacks(preloadWindow);
+    handler.postDelayed(preloadWindow, 180);
   }
 
   private float windowBrightness() {
@@ -882,6 +978,7 @@ public final class PlayerActivity extends Activity {
 
   private void cancelInteractions() {
     boolean cancelScreenSeek = gestureSeeking || gestureKind == GESTURE_SEEK;
+    if (scrubbingPage != null) endPlayerScrub(gestureOrigin, false);
     touchDown = false;
     handler.removeCallbacks(longPress);
     handler.removeCallbacks(hideHud);
@@ -983,12 +1080,22 @@ public final class PlayerActivity extends Activity {
         new VideoPage.Listener() {
           @Override
           public void onChanged(VideoPage page) {
-            if (page != currentPage || !started) return;
+            if (!started) return;
+            if (page != currentPage) {
+              // A paused neighbor may render its first frame before it reaches STATE_READY.
+              if (portraitMode && page.firstFrameReady && !page.buffering) ensurePortraitWindow();
+              return;
+            }
             boolean wasVlc = useVlc;
+            if (syncedPage == page
+                && syncedPageGeneration == page.generation
+                && (exo != null || vlc != null)
+                && (exo != page.exo || vlc != page.vlc)) shouldPlay = page.playRequested;
             syncCurrentPage();
             if (!wasVlc && vlc != null) applyCurrentPlayback(shouldPlay);
             showLoading(page.buffering, "");
             updateProgress();
+            if (!page.buffering && portraitMode) ensurePortraitWindow();
           }
 
           @Override
@@ -998,6 +1105,7 @@ public final class PlayerActivity extends Activity {
               showLoading(page.buffering, "");
               updateProgress();
             }
+            if (started && portraitMode) ensurePortraitWindow();
           }
 
           @Override
@@ -1019,6 +1127,7 @@ public final class PlayerActivity extends Activity {
           @Override
           public void onFailed(VideoPage page) {
             if (page == currentPage && started) playbackFailed();
+            if (started && portraitMode) ensurePortraitWindow();
           }
 
           @Override
@@ -1048,6 +1157,8 @@ public final class PlayerActivity extends Activity {
     exoView = currentPage.exoView;
     vlcView = currentPage.vlcView;
     useVlc = vlc != null;
+    syncedPage = currentPage;
+    syncedPageGeneration = currentPage.generation;
   }
 
   private void startCurrent(long start) {

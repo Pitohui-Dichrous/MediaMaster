@@ -59,7 +59,9 @@ final class VideoPage extends FrameLayout {
   ExoPlayer exo;
   MediaPlayer vlc;
   int index = -1, prepareCount;
-  long generation, pendingSeek;
+  volatile long generation;
+  long pendingSeek;
+  private boolean pendingSeekSet;
   boolean firstFrameReady, failed, buffering, active, playRequested;
   VideoItem item;
 
@@ -80,11 +82,34 @@ final class VideoPage extends FrameLayout {
   private long vlcTextureBaseline, warmupDeadline;
   private long vlcPreviousTime = -1, vlcSeekFenceTarget = -1, vlcSeekFenceDeadline;
   private boolean vlcNearEndArmed;
+  private static final long SCRUB_INTERVAL_MS = 80;
+  private static final long SCRUB_TOLERANCE_MS = 250;
+  private final Runnable dispatchScrub = this::dispatchScrub;
+  private final Runnable observeSeekFrame = this::observeSeekFrame;
+  private boolean scrubbing, scrubPending, triedExo, triedVlc;
+  private long scrubOrigin, scrubTarget, lastScrubDispatch, scrubTextureBaseline;
+  private long capturedTextureTimestamp, scrubFrameBaseline;
+  private long scrubSessionFrameBaseline, scrubSessionTextureBaseline;
+  private final long[] scrubSubmittedTargets = new long[8];
+  private int scrubSubmittedCount;
+  long lastScrubPreviewPositionMs = -1;
+  private long observedSeekTarget = -1,
+      observedSeekStart,
+      observedTextureBaseline,
+      observedFrameBaseline;
+  private long observedGeneration;
+  private volatile long engineFrameGeneration;
+  volatile long lastRenderedPositionUs = C.TIME_UNSET;
+  volatile long lastRenderedFrameSequence;
+  private volatile long lastFrameReleaseTimeNs;
+  private final PlaybackEngineHistory engineHistory;
+  private SeekEnginePolicy enginePolicy;
 
   VideoPage(Context context, Supplier<LibVLC> vlcSupplier, Listener listener) {
     super(context);
     this.vlcSupplier = vlcSupplier;
     this.listener = listener;
+    engineHistory = PlaybackEngineHistory.get(context);
     setBackgroundColor(Color.BLACK);
     setClipChildren(true);
     exoView =
@@ -120,15 +145,27 @@ final class VideoPage extends FrameLayout {
     this.single = single;
     this.speed = Math.max(.1f, speed);
     this.foreground = foreground;
+    enginePolicy = engineHistory.forItem(item);
     pendingSeek = Math.max(0, start);
+    pendingSeekSet = pendingSeek > 0;
     prepareCount++;
     buffering = true;
     final long token = generation;
-    if (forceVlc) startVlc(token, pendingSeek);
+    boolean trialBefore = enginePolicy.trialUsed;
+    boolean preferVlc = !forceVlc && enginePolicy.chooseVlc(foreground);
+    if (trialBefore != enginePolicy.trialUsed) engineHistory.changed();
+    if (forceVlc || preferVlc) startVlc(token, pendingSeek);
     else startExo(token, pendingSeek);
   }
 
   private void startExo(long token, long start) {
+    triedExo = true;
+    firstFrameReady = false;
+    buffering = true;
+    failed = false;
+    if (scrubbing) start = scrubTarget;
+    pendingSeek = Math.max(0, start);
+    pendingSeekSet = pendingSeek > 0;
     exoView.setVisibility(VISIBLE);
     vlcView.setVisibility(INVISIBLE);
     DefaultLoadControl.Builder buffer = new DefaultLoadControl.Builder();
@@ -151,11 +188,21 @@ final class VideoPage extends FrameLayout {
       ExoPlayer source =
           new ExoPlayer.Builder(getContext(), renderers).setLoadControl(buffer.build()).build();
       exo = source;
+      final long frameToken = ++engineFrameGeneration;
+      lastRenderedPositionUs = C.TIME_UNSET;
+      source.setVideoFrameMetadataListener(
+          (presentationTimeUs, releaseTimeNs, format, mediaFormat) -> {
+            if (engineFrameGeneration != frameToken) return;
+            lastRenderedPositionUs = presentationTimeUs;
+            lastFrameReleaseTimeNs = releaseTimeNs;
+            lastRenderedFrameSequence++;
+          });
       source.setAudioAttributes(MOVIE_AUDIO, false);
       source.setVolume(0);
       source.setPlayWhenReady(false);
       source.setHandleAudioBecomingNoisy(true);
-      source.setSeekParameters(SeekParameters.EXACT);
+      source.setSeekParameters(scrubbing ? coarseSeekParameters() : SeekParameters.EXACT);
+      source.setScrubbingModeEnabled(scrubbing);
       source.setRepeatMode(single ? Player.REPEAT_MODE_ONE : Player.REPEAT_MODE_OFF);
       source.setPlaybackSpeed(speed);
       exoView.setPlayer(source);
@@ -170,7 +217,7 @@ final class VideoPage extends FrameLayout {
               if (!current()) return;
               buffering = state == Player.STATE_BUFFERING;
               listener.onChanged(VideoPage.this);
-              if (state == Player.STATE_ENDED && active && playRequested && !ended) {
+              if (state == Player.STATE_ENDED && active && playRequested && !ended && !scrubbing) {
                 ended = true;
                 listener.onEnded(VideoPage.this);
               }
@@ -185,6 +232,7 @@ final class VideoPage extends FrameLayout {
             public void onRenderedFirstFrame() {
               if (!current()) return;
               pendingSeek = 0;
+              pendingSeekSet = false;
               markFirstFrame();
             }
 
@@ -197,9 +245,22 @@ final class VideoPage extends FrameLayout {
             public void onPlayerError(PlaybackException error) {
               if (!current()) return;
               long at = Math.max(0, source.getCurrentPosition());
+              if (enginePolicy != null
+                  && active
+                  && (error.errorCode == PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED
+                      || error.errorCode
+                          == PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES
+                      || error.errorCode
+                          == PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED)) {
+                enginePolicy.exoFailed = true;
+                engineHistory.changed();
+              }
               main.post(
                   () -> {
-                    if (current()) startVlc(token, at);
+                    if (current()) {
+                      if (!triedVlc) startVlc(token, at);
+                      else fail(token);
+                    }
                   });
             }
           });
@@ -208,17 +269,23 @@ final class VideoPage extends FrameLayout {
       listener.onChanged(this);
       applyPlayback();
     } catch (RuntimeException error) {
-      if (generation == token) startVlc(token, start);
+      if (generation == token) {
+        if (!triedVlc) startVlc(token, start);
+        else fail(token);
+      }
     }
   }
 
   private void startVlc(long token, long start) {
     if (generation != token || item == null) return;
-    releaseEngine();
+    releaseEngineForReplacement();
+    if (scrubbing) start = scrubTarget;
+    triedVlc = true;
     firstFrameReady = false;
     buffering = true;
     failed = false;
     pendingSeek = Math.max(0, start);
+    pendingSeekSet = pendingSeek > 0;
     exoView.setVisibility(INVISIBLE);
     vlcView.setVisibility(VISIBLE);
     try {
@@ -254,7 +321,7 @@ final class VideoPage extends FrameLayout {
                         break;
                       case MediaPlayer.Event.EndReached:
                         vlcRunningRequested = false;
-                        if (active && playRequested && !ended) {
+                        if (active && playRequested && !ended && !scrubbing) {
                           notifyVlcEnd(source);
                         }
                         break;
@@ -262,7 +329,7 @@ final class VideoPage extends FrameLayout {
                         observeVlcRepeatBoundary(source);
                         break;
                       case MediaPlayer.Event.EncounteredError:
-                        fail(token);
+                        vlcFailed(token, Math.max(0, source.getTime()));
                         break;
                       default:
                         break;
@@ -276,9 +343,13 @@ final class VideoPage extends FrameLayout {
         media = new Media(library, descriptor.getFileDescriptor());
       } else media = new Media(library, uri);
       try {
+        // Set this on Media before enabling HW decoding; otherwise LibVLC adds 1500ms here.
+        media.addOption(":file-caching=250");
         media.setHWDecoderEnabled(true, false);
-        // LibVLC 3 has no live input-repeat setter. Keep its decoder looping and change only our
-        // completion policy, so a portrait/full-screen toggle never reopens the current input.
+        // LibVLC 3 has no live input-repeat setter. Keep its decoder looping and change
+        // only our
+        // completion policy, so a portrait/full-screen toggle never reopens the current
+        // input.
         media.addOption(":input-repeat=65535");
         source.setMedia(media);
       } finally {
@@ -286,14 +357,15 @@ final class VideoPage extends FrameLayout {
       }
       source.setRate(speed);
       warmingVlc = true;
-      // Muted temporary playback primes a real TextureView frame, including an offscreen page.
+      // Muted temporary playback primes a real TextureView frame, including an offscreen
+      // page.
       source.play();
       vlcRunningRequested = true;
       listener.onChanged(this);
       applyPlayback();
       beginVlcFrameProbe(token, source);
     } catch (Exception | UnsatisfiedLinkError error) {
-      fail(token);
+      vlcFailed(token, start);
     }
   }
 
@@ -311,10 +383,11 @@ final class VideoPage extends FrameLayout {
       TextureView texture = findTexture(vlcView);
       if (texture != null && texture.isAvailable()) {
         if (probeBitmap == null) probeBitmap = Bitmap.createBitmap(8, 8, Bitmap.Config.ARGB_8888);
-        // getBitmap updates the hardware texture even while its attached page is clipped offscreen.
+        // getBitmap updates the hardware texture even while its attached page is clipped
+        // offscreen.
         Bitmap frame = texture.getBitmap(probeBitmap);
         long timestamp = textureTimestamp(texture);
-        if (frame != null && timestamp > 0 && timestamp != vlcTextureBaseline && pendingSeek == 0) {
+        if (frame != null && timestamp > 0 && timestamp != vlcTextureBaseline && !pendingSeekSet) {
           warmingVlc = false;
           buffering = false;
           applyVlcPlayback(source);
@@ -326,7 +399,7 @@ final class VideoPage extends FrameLayout {
       // A texture can briefly be unavailable while an orientation change updates its bounds.
     }
     if (SystemClock.uptimeMillis() >= warmupDeadline) {
-      fail(token);
+      vlcFailed(token, pendingSeek);
       return;
     }
     if (frameProbe != null) main.postDelayed(frameProbe, 50);
@@ -335,6 +408,11 @@ final class VideoPage extends FrameLayout {
   private void markFirstFrame() {
     if (firstFrameReady) return;
     firstFrameReady = true;
+    if (vlc != null && enginePolicy != null && (!enginePolicy.vlcReady || enginePolicy.vlcFailed)) {
+      enginePolicy.vlcReady = true;
+      enginePolicy.vlcFailed = false;
+      engineHistory.changed();
+    }
     failed = false;
     errorLabel.setVisibility(GONE);
     listener.onChanged(this);
@@ -342,13 +420,14 @@ final class VideoPage extends FrameLayout {
   }
 
   private void applyPendingSeek(MediaPlayer source) {
-    if (pendingSeek <= 0 || !source.isSeekable()) return;
+    if (!pendingSeekSet || !source.isSeekable()) return;
     long target = pendingSeek;
     pendingSeek = 0;
+    pendingSeekSet = false;
     vlcTextureBaseline = textureTimestamp(findTexture(vlcView));
     // A native input-repeat must return to zero, not reapply a media-level start-time offset.
     fenceVlcSeek(target);
-    source.setTime(target);
+    source.setTime(target, scrubbing);
   }
 
   private void resetVlcRepeatObservation() {
@@ -372,12 +451,19 @@ final class VideoPage extends FrameLayout {
    * repeat policy.
    */
   private void observeVlcRepeatBoundary(MediaPlayer source) {
-    if (!active || !playRequested || warmingVlc || !firstFrameReady || pendingSeek > 0 || ended) {
+    if (!active
+        || !playRequested
+        || warmingVlc
+        || !firstFrameReady
+        || pendingSeekSet
+        || ended
+        || scrubbing) {
       vlcPreviousTime = -1;
       vlcNearEndArmed = false;
       return;
     }
-    // Read the current native clock, rather than an older queued event's timestamp. A manual seek
+    // Read the current native clock, rather than an older queued event's timestamp. A manual
+    // seek
     // can happen while TimeChanged events are waiting on the main looper.
     long at = source.getTime();
     long length = source.getLength();
@@ -424,6 +510,7 @@ final class VideoPage extends FrameLayout {
   }
 
   void setPlayback(boolean active, boolean play, boolean audible) {
+    if (!active && scrubbing) clearScrubState();
     if (active && play) rewindIfEnded();
     this.active = active;
     playRequested = play;
@@ -443,6 +530,7 @@ final class VideoPage extends FrameLayout {
     audible = false;
     applyPlayback();
     pendingSeek = 0;
+    pendingSeekSet = false;
     firstFrameReady = false;
     if (exo != null) {
       exo.seekTo(0);
@@ -450,7 +538,8 @@ final class VideoPage extends FrameLayout {
       MediaPlayer source = vlc;
       vlcTextureBaseline = textureTimestamp(findTexture(vlcView));
       fenceVlcSeek(0);
-      source.setTime(0);
+      pendingSeekSet = true;
+      applyPendingSeek(source);
       warmingVlc = true;
       applyVlcPlayback(source);
       beginVlcFrameProbe(generation, source);
@@ -462,14 +551,14 @@ final class VideoPage extends FrameLayout {
       exo.setVolume(0);
       exo.setAudioAttributes(MOVIE_AUDIO, active && audible);
       exo.setPlayWhenReady(active && playRequested);
-      exo.setVolume(active && playRequested && audible ? 1 : 0);
+      exo.setVolume(active && playRequested && audible && !scrubbing ? 1 : 0);
     }
     if (vlc != null) applyVlcPlayback(vlc);
   }
 
   private void applyVlcPlayback(MediaPlayer source) {
     source.setVolume(0);
-    boolean playing = active && playRequested;
+    boolean playing = active && playRequested && !scrubbing;
     boolean run = playing || warmingVlc;
     if (run != vlcRunningRequested) {
       vlcRunningRequested = run;
@@ -493,15 +582,248 @@ final class VideoPage extends FrameLayout {
     this.single = single;
     if (exo != null) exo.setRepeatMode(single ? Player.REPEAT_MODE_ONE : Player.REPEAT_MODE_OFF);
     else if (vlc != null) {
-      // Policy-only change: preserve the MediaPlayer, texture, native input, time, pause and speed.
-      // Begin observing from the current clock so a previously queued wrap does not count again.
+      // Policy-only change: preserve the MediaPlayer, texture, native input, time, pause and
+      // speed.
+      // Begin observing from the current clock so a previously queued wrap does not count
+      // again.
       vlcPreviousTime = -1;
       vlcNearEndArmed = false;
       observeVlcRepeatBoundary(vlc);
     }
   }
 
+  /** Uses the visible decoder for interactive frames; no second thumbnail decoder is needed. */
+  void beginScrub() {
+    if (scrubbing || failed || (exo == null && vlc == null)) return;
+    observedSeekTarget = -1;
+    main.removeCallbacks(observeSeekFrame);
+    scrubOrigin = position();
+    scrubTarget = scrubOrigin;
+    scrubFrameBaseline = lastRenderedFrameSequence;
+    scrubTextureBaseline = textureTimestamp(currentTexture());
+    scrubSessionFrameBaseline = scrubFrameBaseline;
+    scrubSessionTextureBaseline = scrubTextureBaseline;
+    scrubSubmittedCount = 0;
+    lastScrubPreviewPositionMs = -1;
+    capturedTextureTimestamp = 0;
+    lastScrubDispatch = 0;
+    scrubPending = false;
+    scrubbing = true;
+    if (exo != null) {
+      // Scrubbing suppresses playback without losing the user's play/pause intent.
+      playRequested = exo.getPlayWhenReady();
+      exo.setVolume(0);
+      exo.setSeekParameters(coarseSeekParameters());
+      exo.setScrubbingModeEnabled(true);
+    }
+    if (vlc != null) applyVlcPlayback(vlc);
+  }
+
+  void scrubTo(long position) {
+    if (!scrubbing) return;
+    long target = clampPosition(position);
+    if (target == scrubTarget && !scrubPending) return;
+    scrubTarget = target;
+    scrubPending = true;
+    main.removeCallbacks(dispatchScrub);
+    long delay = Math.max(0, lastScrubDispatch + SCRUB_INTERVAL_MS - SystemClock.uptimeMillis());
+    if (delay == 0) dispatchScrub();
+    else main.postDelayed(dispatchScrub, delay);
+  }
+
+  private void dispatchScrub() {
+    if (!scrubbing || !scrubPending || failed) return;
+    long now = SystemClock.uptimeMillis();
+    // While a decoder is still catching up, replace the pending target rather than repeatedly
+    // flushing it. A bounded deadline still lets a very slow/failed request be superseded.
+    if (exo != null
+        && scrubSubmittedCount > 0
+        && lastRenderedFrameSequence <= scrubFrameBaseline
+        && now - lastScrubDispatch < 180) {
+      main.postDelayed(dispatchScrub, 180 - (now - lastScrubDispatch));
+      return;
+    }
+    scrubPending = false;
+    lastScrubDispatch = now;
+    scrubFrameBaseline = lastRenderedFrameSequence;
+    scrubTextureBaseline = textureTimestamp(currentTexture());
+    long target = scrubTarget;
+    scrubSubmittedTargets[scrubSubmittedCount % scrubSubmittedTargets.length] = target;
+    scrubSubmittedCount++;
+    ended = false;
+    if (exo != null) {
+      exo.seekTo(target);
+    } else if (vlc != null) {
+      pendingSeek = target;
+      pendingSeekSet = true;
+      if (vlc.isSeekable()) {
+        pendingSeek = 0;
+        pendingSeekSet = false;
+        fenceVlcSeek(target);
+        vlc.setTime(target, true);
+      }
+    }
+  }
+
+  void endScrub(long position, boolean commit) {
+    if (!scrubbing) {
+      if (commit) seekTo(position);
+      return;
+    }
+    long target = clampPosition(commit ? position : scrubOrigin);
+    main.removeCallbacks(dispatchScrub);
+    scrubPending = false;
+    scrubbing = false;
+    ended = false;
+    if (exo != null) {
+      // Focus loss/noisy handling can change this while scrub suppression is active.
+      playRequested = exo.getPlayWhenReady();
+      // Dispatch the accurate seek before releasing the playback suppression.
+      exo.setSeekParameters(SeekParameters.EXACT);
+      if (commit) beginSeekObservation(target);
+      exo.seekTo(target);
+      exo.setScrubbingModeEnabled(false);
+    } else if (vlc != null) {
+      pendingSeek = target;
+      pendingSeekSet = true;
+      fenceVlcSeek(target);
+      if (vlc.isSeekable()) {
+        pendingSeek = 0;
+        pendingSeekSet = false;
+        vlc.setTime(target, false);
+      }
+      // VLC's clock is not a frame PTS. Do not invent comparable latency samples from it.
+    }
+    applyPlayback();
+  }
+
+  /** Caller owns the result. Null means no confirmed new frame is available yet. */
+  Bitmap captureScrubFrame() {
+    if (!scrubbing || scrubSubmittedCount == 0) return null;
+    TextureView texture = currentTexture();
+    if (texture == null || !texture.isAvailable()) return null;
+    if (exo != null) {
+      long pts = lastRenderedPositionUs;
+      if (pts == C.TIME_UNSET
+          || lastRenderedFrameSequence <= scrubSessionFrameBaseline
+          || !matchesSubmittedTarget(pts / 1000)
+          || System.nanoTime() < lastFrameReleaseTimeNs) return null;
+    } else if (vlc != null) {
+      // Native fast seek may stop at a distant keyframe. A fresh rendered texture is still useful;
+      // the VLC clock is only an approximate caption, not proof of an exact decoded frame PTS.
+      if (buffering) return null;
+    } else return null;
+    long timestamp = textureTimestamp(texture);
+    if (timestamp <= 0
+        || timestamp == scrubSessionTextureBaseline
+        || timestamp == capturedTextureTimestamp) return null;
+    int width = texture.getWidth(), height = texture.getHeight();
+    if (width <= 0 || height <= 0) return null;
+    float scale = Math.min(256f / width, 144f / height);
+    try {
+      Bitmap bitmap =
+          texture.getBitmap(
+              Math.max(1, Math.round(width * scale)), Math.max(1, Math.round(height * scale)));
+      if (bitmap != null) {
+        capturedTextureTimestamp = textureTimestamp(texture);
+        lastScrubPreviewPositionMs =
+            exo != null ? lastRenderedPositionUs / 1000 : Math.max(0, vlc.getTime());
+      }
+      return bitmap;
+    } catch (RuntimeException | OutOfMemoryError unavailable) {
+      return null;
+    }
+  }
+
+  private boolean matchesSubmittedTarget(long ptsMs) {
+    for (int i = 0; i < Math.min(scrubSubmittedCount, scrubSubmittedTargets.length); i++)
+      if (Math.abs(ptsMs - scrubSubmittedTargets[i]) <= SCRUB_TOLERANCE_MS + 100) return true;
+    return false;
+  }
+
+  private TextureView currentTexture() {
+    return findTexture(exo != null ? exoView : vlcView);
+  }
+
+  private long clampPosition(long position) {
+    long target = Math.max(0, position), length = duration();
+    return length > 0 ? Math.min(target, Math.max(0, length - 1)) : target;
+  }
+
+  private void clearScrubState() {
+    main.removeCallbacks(dispatchScrub);
+    scrubPending = false;
+    if (!scrubbing) return;
+    scrubbing = false;
+    if (exo != null) {
+      try {
+        exo.setSeekParameters(SeekParameters.EXACT);
+        exo.setScrubbingModeEnabled(false);
+      } catch (RuntimeException ignored) {
+        // Engine teardown can also follow a decoder failure.
+      }
+    }
+  }
+
+  private static SeekParameters coarseSeekParameters() {
+    return new SeekParameters(SCRUB_TOLERANCE_MS * 1000, SCRUB_TOLERANCE_MS * 1000);
+  }
+
+  private void beginSeekObservation(long target) {
+    main.removeCallbacks(observeSeekFrame);
+    observedSeekTarget = -1;
+    if (!active || exo == null || enginePolicy == null) return;
+    observedSeekTarget = target;
+    observedSeekStart = SystemClock.uptimeMillis();
+    observedGeneration = generation;
+    observedTextureBaseline = textureTimestamp(currentTexture());
+    observedFrameBaseline = lastRenderedFrameSequence;
+    main.postDelayed(observeSeekFrame, 16);
+  }
+
+  private void observeSeekFrame() {
+    if (observedSeekTarget < 0
+        || observedGeneration != generation
+        || exo == null
+        || !active
+        || scrubbing) return;
+    long elapsed = SystemClock.uptimeMillis() - observedSeekStart;
+    if (elapsed > 3000) {
+      observedSeekTarget = -1;
+      return; // No confirmed frame: unknown, not a fabricated slow measurement.
+    }
+    long pts = lastRenderedPositionUs;
+    long timestamp = textureTimestamp(currentTexture());
+    if (lastRenderedFrameSequence > observedFrameBaseline
+        && pts != C.TIME_UNSET
+        && Math.abs(pts / 1000 - observedSeekTarget) <= 100
+        && System.nanoTime() >= lastFrameReleaseTimeNs
+        && timestamp > 0
+        && timestamp != observedTextureBaseline) {
+      enginePolicy.recordExoSeek(elapsed);
+      engineHistory.changed();
+      observedSeekTarget = -1;
+      return;
+    }
+    main.postDelayed(observeSeekFrame, 16);
+  }
+
+  private void vlcFailed(long token, long position) {
+    if (generation != token) return;
+    if (enginePolicy != null) {
+      enginePolicy.recordVlcFailure();
+      engineHistory.changed();
+    }
+    if (!triedExo) {
+      releaseEngineForReplacement();
+      startExo(token, position);
+    } else fail(token);
+  }
+
   void seekTo(long position) {
+    clearScrubState();
+    observedSeekTarget = -1;
+    main.removeCallbacks(observeSeekFrame);
     long at = Math.max(0, position);
     long length = duration();
     if (length > 0) at = Math.min(at, Math.max(0, length - 1));
@@ -510,13 +832,13 @@ final class VideoPage extends FrameLayout {
     else if (vlc != null) {
       fenceVlcSeek(at);
       pendingSeek = at;
-      if (at == 0) vlc.setTime(0);
-      else applyPendingSeek(vlc);
+      pendingSeekSet = true;
+      applyPendingSeek(vlc);
     }
   }
 
   long position() {
-    if (pendingSeek > 0) return pendingSeek;
+    if (pendingSeekSet) return pendingSeek;
     if (exo != null) return Math.max(0, exo.getCurrentPosition());
     if (vlc != null) return Math.max(0, vlc.getTime());
     return 0;
@@ -537,9 +859,13 @@ final class VideoPage extends FrameLayout {
     generation++;
     main.removeCallbacksAndMessages(null);
     releaseEngine();
+    engineHistory.flush();
+    enginePolicy = null;
+    triedExo = triedVlc = false;
     active = playRequested = audible = false;
     firstFrameReady = failed = buffering = ended = false;
     pendingSeek = 0;
+    pendingSeekSet = false;
     item = null;
     index = -1;
     errorLabel.setVisibility(GONE);
@@ -550,6 +876,13 @@ final class VideoPage extends FrameLayout {
   }
 
   private void releaseEngine() {
+    clearScrubState();
+    pendingSeek = 0;
+    pendingSeekSet = false;
+    engineFrameGeneration++;
+    lastRenderedPositionUs = C.TIME_UNSET;
+    observedSeekTarget = -1;
+    main.removeCallbacks(observeSeekFrame);
     resetVlcRepeatObservation();
     if (frameProbe != null) main.removeCallbacks(frameProbe);
     frameProbe = null;
@@ -577,6 +910,25 @@ final class VideoPage extends FrameLayout {
       }
       descriptor = null;
     }
+  }
+
+  /** The gesture belongs to the page, so an error fallback must keep its mute and cancel origin. */
+  private void releaseEngineForReplacement() {
+    boolean retainScrub = scrubbing;
+    if (retainScrub && exo != null) playRequested = exo.getPlayWhenReady();
+    releaseEngine();
+    if (!retainScrub) return;
+    scrubbing = true;
+    scrubFrameBaseline = lastRenderedFrameSequence;
+    scrubSessionFrameBaseline = scrubFrameBaseline;
+    scrubTextureBaseline = textureTimestamp(currentTexture());
+    scrubSessionTextureBaseline = scrubTextureBaseline;
+    capturedTextureTimestamp = 0;
+    lastScrubPreviewPositionMs = -1;
+    // The replacement starts at this latest target, still paused/muted until the finger lifts.
+    scrubSubmittedTargets[0] = scrubTarget;
+    scrubSubmittedCount = 1;
+    lastScrubDispatch = SystemClock.uptimeMillis();
   }
 
   private void fail(long token) {

@@ -12,8 +12,8 @@ import android.util.LruCache;
 import io.mediamaster.app.media.VideoItem;
 import io.mediamaster.app.media.VlcFrameExtractor;
 import java.io.File;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -32,15 +32,16 @@ public final class SeekPreviewLoader implements AutoCloseable {
   private static final int WIDTH = 256;
   private static final int HEIGHT = 144;
   private static final long FRAME_BUCKET_MS = 200;
-  private static final long MIN_INTERVAL_MS = 80;
+  private static final long IDLE_RELEASE_MS = 2000;
   private static final long MOTION_WARMUP_MS = 120;
   private static final long MOTION_RECENCY_MS = 48;
   private static final long MAX_MOVING_FRAME_AGE_MS = 600;
   private final Context context;
   private final Handler main = new Handler(Looper.getMainLooper());
   private final Object lock = new Object();
-  private final ScheduledExecutorService worker =
-      Executors.newSingleThreadScheduledExecutor(
+  private final ScheduledThreadPoolExecutor worker =
+      new ScheduledThreadPoolExecutor(
+          1,
           runnable -> {
             Thread thread = new Thread(runnable, "seek-preview");
             thread.setPriority(Thread.MIN_PRIORITY);
@@ -58,6 +59,10 @@ public final class SeekPreviewLoader implements AutoCloseable {
   private long generation;
   private long sequence;
   private long lastStarted;
+  private long lastCompleted;
+  private final PreviewCadence cadence = new PreviewCadence();
+  private String requestedSourceKey;
+  private ScheduledFuture<?> idleRelease;
   private boolean scheduled;
   private boolean closed;
   private Request pending;
@@ -73,29 +78,57 @@ public final class SeekPreviewLoader implements AutoCloseable {
 
   public SeekPreviewLoader(Context context) {
     this.context = context.getApplicationContext();
+    worker.setRemoveOnCancelPolicy(true);
   }
 
   public void request(VideoItem item, long positionMs, Callback callback) {
+    request(item, positionMs, callback, true);
+  }
+
+  /**
+   * Interactive fallback for when the main player's texture is unavailable. Never starts the
+   * separate VLC software decoder while the playback decoder is scrubbing.
+   */
+  public void requestInteractive(VideoItem item, long positionMs, Callback callback) {
+    request(item, positionMs, callback, false);
+  }
+
+  private void request(
+      VideoItem item, long positionMs, Callback callback, boolean allowCompatibilityDecoder) {
     if (item == null || callback == null) return;
     long position = Math.max(0, positionMs);
     if (item.durationMs > 0) position = Math.min(position, Math.max(0, item.durationMs - 1));
     synchronized (lock) {
       if (closed) return;
+      cancelIdleReleaseLocked();
       long now = SystemClock.elapsedRealtime();
       String source = sourceKey(item);
-      if (latest == null || !latest.sourceKey.equals(source)) {
+      if (!source.equals(requestedSourceKey)) {
+        requestedSourceKey = source;
+        cadence.reset();
+        lastStarted = 0;
+        lastCompleted = 0;
+      }
+      if (latest == null
+          || !latest.sourceKey.equals(source)
+          || (latest.allowCompatibilityDecoder && !allowCompatibilityDecoder)) {
         // Switching away and back must not resurrect a frame from the earlier video session.
         generation++;
         motionStarted = now;
         deliveredSequence = 0;
       }
-      latest = new Request(item, position, callback, generation, ++sequence, now);
+      latest =
+          new Request(
+              item, position, callback, generation, ++sequence, now, allowCompatibilityDecoder);
       pending = latest;
       if (!scheduled) scheduleLocked();
     }
   }
 
-  /** Cancels pending callbacks and frees the current decoder/cache on its owning worker. */
+  /**
+   * Cancels pending callbacks immediately. Briefly retains the same-source decoder for another
+   * drag; idle cleanup runs on the worker, never on the UI thread or underneath a native decode.
+   */
   public void reset() {
     synchronized (lock) {
       if (closed) return;
@@ -106,11 +139,20 @@ public final class SeekPreviewLoader implements AutoCloseable {
       motionStarted = 0;
       deliveredSequence = 0;
       main.removeCallbacksAndMessages(null);
-      worker.execute(
-          () -> {
-            releaseRetriever();
-            memory.evictAll();
-          });
+      cancelIdleReleaseLocked();
+      long idleGeneration = generation;
+      idleRelease =
+          worker.schedule(
+              () -> {
+                synchronized (lock) {
+                  if (closed || generation != idleGeneration || latest != null) return;
+                  idleRelease = null;
+                }
+                releaseRetriever();
+                memory.evictAll();
+              },
+              IDLE_RELEASE_MS,
+              TimeUnit.MILLISECONDS);
     }
   }
 
@@ -118,7 +160,7 @@ public final class SeekPreviewLoader implements AutoCloseable {
     scheduled = true;
     worker.schedule(
         this::pump,
-        Math.max(0, MIN_INTERVAL_MS - (SystemClock.elapsedRealtime() - lastStarted)),
+        cadence.delayMs(SystemClock.elapsedRealtime(), lastStarted, lastCompleted),
         TimeUnit.MILLISECONDS);
   }
 
@@ -133,7 +175,15 @@ public final class SeekPreviewLoader implements AutoCloseable {
       if (request == null || canceled(request)) return;
       Bitmap bitmap = memory.get(request.cacheKey);
       if (bitmap == null) {
+        long decodeStarted = SystemClock.elapsedRealtime();
         bitmap = decode(request);
+        long finished = SystemClock.elapsedRealtime();
+        synchronized (lock) {
+          if (!canceledLocked(request)) {
+            cadence.onDecode(finished - decodeStarted);
+            lastCompleted = finished;
+          }
+        }
         if (bitmap != null) {
           synchronized (lock) {
             if (closed || request.generation != generation) {
@@ -181,6 +231,8 @@ public final class SeekPreviewLoader implements AutoCloseable {
   private Bitmap decode(Request request) {
     if (!request.sourceKey.equals(sourceKey)) {
       releaseRetriever();
+      // Retain at most one video's previews. A file change must not keep stale native state.
+      memory.evictAll();
       sourceKey = request.sourceKey;
       androidUnavailable = false;
       // Previews are nearby pictures, not the final playback position. Avoid decoding an entire
@@ -234,7 +286,7 @@ public final class SeekPreviewLoader implements AutoCloseable {
         return null;
       }
     }
-    if (canceled(request)) return null;
+    if (canceled(request) || !request.allowCompatibilityDecoder) return null;
     return VlcFrameExtractor.extractAt(
         context, request.item, request.frameMs, () -> canceled(request));
   }
@@ -276,6 +328,13 @@ public final class SeekPreviewLoader implements AutoCloseable {
     sourceKey = null;
   }
 
+  private void cancelIdleReleaseLocked() {
+    if (idleRelease != null) {
+      idleRelease.cancel(false);
+      idleRelease = null;
+    }
+  }
+
   @Override
   public void close() {
     synchronized (lock) {
@@ -285,6 +344,7 @@ public final class SeekPreviewLoader implements AutoCloseable {
       sequence++;
       pending = null;
       latest = null;
+      cancelIdleReleaseLocked();
       main.removeCallbacksAndMessages(null);
       // Do not release a retriever from underneath its native decode. Cleanup runs immediately
       // after the canceled decode returns; neither close nor a screen rotation blocks the UI.
@@ -307,6 +367,7 @@ public final class SeekPreviewLoader implements AutoCloseable {
     final long requestedAt;
     final String sourceKey;
     final String cacheKey;
+    final boolean allowCompatibilityDecoder;
 
     Request(
         VideoItem item,
@@ -314,7 +375,8 @@ public final class SeekPreviewLoader implements AutoCloseable {
         Callback callback,
         long generation,
         long sequence,
-        long requestedAt) {
+        long requestedAt,
+        boolean allowCompatibilityDecoder) {
       this.item = item;
       this.positionMs = positionMs;
       this.frameMs = positionMs / FRAME_BUCKET_MS * FRAME_BUCKET_MS;
@@ -322,6 +384,7 @@ public final class SeekPreviewLoader implements AutoCloseable {
       this.generation = generation;
       this.sequence = sequence;
       this.requestedAt = requestedAt;
+      this.allowCompatibilityDecoder = allowCompatibilityDecoder;
       sourceKey = sourceKey(item);
       cacheKey = sourceKey + '|' + frameMs;
     }

@@ -16,7 +16,6 @@ import androidx.media3.common.util.UnstableApi;
 import androidx.media3.exoplayer.DecoderCounters;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.SeekParameters;
-import androidx.media3.exoplayer.video.VideoFrameMetadataListener;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
 import androidx.test.rule.ActivityTestRule;
@@ -26,9 +25,6 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.concurrent.Callable;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.Rule;
 import org.junit.Test;
@@ -59,6 +55,19 @@ public final class LongGopSeekTest {
       if (item.name.equals("05_LongGop.mp4")) fixture = item;
     assumeNotNull(fixture);
     assertTrue("The test fixture covers all requested positions", fixture.durationMs >= 25000);
+    // The performance policy should not learn a device preference from emulator test timing.
+    fixture =
+        new VideoItem(
+            "long-gop-regression-" + SystemClock.elapsedRealtimeNanos(),
+            fixture.name,
+            fixture.uri,
+            fixture.path,
+            fixture.size,
+            fixture.durationMs,
+            fixture.modifiedMs,
+            fixture.addedMs,
+            fixture.width,
+            fixture.height);
     ArrayList<VideoItem> queue = new ArrayList<>();
     queue.add(fixture);
     String token = QueueStore.put(context, queue);
@@ -71,7 +80,9 @@ public final class LongGopSeekTest {
           onMain(
               () -> {
                 ExoPlayer player = readPlayer(activity);
-                player.pause();
+                Method pause = PlayerActivity.class.getDeclaredMethod("setPlaying", boolean.class);
+                pause.setAccessible(true);
+                pause.invoke(activity, false);
                 player.addListener(
                     new Player.Listener() {
                       @Override
@@ -92,18 +103,10 @@ public final class LongGopSeekTest {
       // A paused, settled surface excludes a queued frame from normal playback when arming PTS.
       Thread.sleep(100);
       for (long targetMs : new long[] {3400, 18700, 6300}) {
-        CountDownLatch rendered = new CountDownLatch(1);
-        AtomicLong firstPtsUs = new AtomicLong(Long.MIN_VALUE);
-        AtomicLong startedAt = new AtomicLong();
-        AtomicLong elapsedMs = new AtomicLong();
-        VideoFrameMetadataListener listener =
-            (presentationTimeUs, releaseTimeNs, format, mediaFormat) -> {
-              if (firstPtsUs.compareAndSet(Long.MIN_VALUE, presentationTimeUs)) {
-                elapsedMs.set(SystemClock.elapsedRealtime() - startedAt.get());
-                rendered.countDown();
-              }
-            };
+        VideoPage page = onMain(() -> readPage(activity));
+        long beforeSequence = page.lastRenderedFrameSequence;
         int before = onMain(() -> renderedFrames(source));
+        long startedAt = SystemClock.elapsedRealtime();
         onMain(
             () -> {
               assertSame(
@@ -113,22 +116,25 @@ public final class LongGopSeekTest {
                   SeekParameters.EXACT,
                   source.getSeekParameters());
               assertFalse("The test measures a single paused seek", source.getPlayWhenReady());
-              source.setVideoFrameMetadataListener(listener);
-              startedAt.set(SystemClock.elapsedRealtime());
               Method seek = PlayerActivity.class.getDeclaredMethod("seekTo", long.class);
               seek.setAccessible(true);
               seek.invoke(activity, targetMs);
               return null;
             });
-        assertTrue(
-            "A paused seek produces a frame at " + targetMs + " ms",
-            rendered.await(20, TimeUnit.SECONDS));
-        long errorUs = Math.abs(firstPtsUs.get() - targetMs * 1000);
+        // Observe the production metadata listener rather than replacing its single-owner slot.
+        await(
+            () ->
+                page.lastRenderedFrameSequence > beforeSequence
+                    && Math.abs(page.lastRenderedPositionUs - targetMs * 1000) <= 100_000,
+            20000);
+        long renderedPtsUs = page.lastRenderedPositionUs;
+        long elapsedMs = SystemClock.elapsedRealtime() - startedAt;
+        long errorUs = Math.abs(renderedPtsUs - targetMs * 1000);
         assertTrue(
             "First rendered frame follows precise target, not a distant keyframe: target="
                 + targetMs
                 + " ms, actual="
-                + firstPtsUs.get()
+                + renderedPtsUs
                 + " us",
             errorUs <= 100_000);
         await(() -> onMain(() -> renderedFrames(source) > before), 3000);
@@ -138,7 +144,6 @@ public final class LongGopSeekTest {
               assertSame(source, readPlayer(activity));
               assertEquals(SeekParameters.EXACT, source.getSeekParameters());
               assertEquals(targetMs, source.getCurrentPosition(), 100);
-              source.clearVideoFrameMetadataListener(listener);
               return null;
             });
         Log.i(
@@ -148,11 +153,11 @@ public final class LongGopSeekTest {
                 + " targetMs="
                 + targetMs
                 + " firstRenderedPtsUs="
-                + firstPtsUs.get()
+                + renderedPtsUs
                 + " errorUs="
                 + errorUs
                 + " elapsedMs="
-                + elapsedMs.get()
+                + elapsedMs
                 + " renderedBuffers="
                 + before
                 + "->"
@@ -172,6 +177,12 @@ public final class LongGopSeekTest {
     return player;
   }
 
+  private static VideoPage readPage(PlayerActivity activity) throws Exception {
+    Field field = PlayerActivity.class.getDeclaredField("currentPage");
+    field.setAccessible(true);
+    return (VideoPage) field.get(activity);
+  }
+
   private static int renderedFrames(ExoPlayer player) {
     DecoderCounters counters = player.getVideoDecoderCounters();
     if (counters == null) return 0;
@@ -181,16 +192,19 @@ public final class LongGopSeekTest {
 
   private <T> T onMain(Callable<T> action) throws Exception {
     AtomicReference<T> value = new AtomicReference<>();
-    AtomicReference<Exception> error = new AtomicReference<>();
+    AtomicReference<Throwable> error = new AtomicReference<>();
     instrumentation.runOnMainSync(
         () -> {
           try {
             value.set(action.call());
-          } catch (Exception failed) {
+          } catch (Throwable failed) {
             error.set(failed);
           }
         });
-    if (error.get() != null) throw error.get();
+    Throwable failure = error.get();
+    if (failure instanceof AssertionError) throw (AssertionError) failure;
+    if (failure instanceof Exception) throw (Exception) failure;
+    if (failure != null) throw new RuntimeException(failure);
     return value.get();
   }
 

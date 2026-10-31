@@ -177,6 +177,97 @@ public final class PortraitPreloadTest {
   }
 
   @Test
+  public void fullScreenNextAndPreviousStartTheNewDecoderAndAdvancePlayback() throws Exception {
+    ExoPlayer initialDecoder = onMain(() -> current().exo);
+    onMain(
+        () -> {
+          invoke("setPortraitMode", new Class<?>[] {boolean.class}, false);
+          assertFalse((Boolean) read("portraitMode"));
+          assertFalse(
+              "The initial video is intentionally paused", current().exo.getPlayWhenReady());
+          assertTrue(findAction((View) read("bottomBar"), "下一条").performClick());
+          return null;
+        });
+    awaitFullScreenPlayback(0, initialDecoder);
+    ExoPlayer nextDecoder = onMain(() -> current().exo);
+    onMain(
+        () -> {
+          assertTrue(findAction((View) read("bottomBar"), "上一条").performClick());
+          return null;
+        });
+    awaitFullScreenPlayback(2, nextDecoder);
+    assertOnlyCurrentAudible();
+  }
+
+  @Test
+  public void failedCurrentPageStillPrimesUnpreparedNeighbors() throws Exception {
+    VideoPage failedPage = onMain(() -> current());
+    int nextPrepares = onMain(() -> next().prepareCount);
+    int previousPrepares = onMain(() -> previous().prepareCount);
+    onMain(
+        () -> {
+          previous().release();
+          next().release();
+          // Inject the terminal callback deterministically; all neighboring files remain real.
+          Method fail = VideoPage.class.getDeclaredMethod("fail", long.class);
+          fail.setAccessible(true);
+          fail.invoke(failedPage, failedPage.generation);
+          assertTrue(failedPage.failed);
+          assertFalse(failedPage.firstFrameReady);
+          return null;
+        });
+    awaitNeighbors();
+    onMain(
+        () -> {
+          assertSame(failedPage, current());
+          assertEquals(nextPrepares + 1, next().prepareCount);
+          assertEquals(previousPrepares + 1, previous().prepareCount);
+          assertTrue((Boolean) invoke("canRevealNext", new Class<?>[0]));
+          assertTrue((Boolean) invoke("canRevealPrevious", new Class<?>[0]));
+          return null;
+        });
+    assertOnlyCurrentAudible();
+  }
+
+  private void awaitFullScreenPlayback(int index, ExoPlayer replacedDecoder) throws Exception {
+    await(
+        () ->
+            onMain(
+                () ->
+                    order().current() == index
+                        && current().exo != null
+                        && current().exo != replacedDecoder
+                        && current().exo.isPlaying()
+                        && current().firstFrameReady
+                        && current().position() > 120),
+        15000);
+    onMain(
+        () -> {
+          assertFalse((Boolean) read("portraitMode"));
+          assertTrue(current().playRequested);
+          assertTrue(current().exo.getPlayWhenReady());
+          assertEquals(1f, current().exo.getVolume(), 0f);
+          assertTrue("The replacement renders actual video", renderedFrames(current()) > 0);
+          assertNull(previous().exo);
+          assertNull(next().exo);
+          return null;
+        });
+  }
+
+  private static View findAction(View view, String label) {
+    if (label.contentEquals(
+        view.getContentDescription() == null ? "" : view.getContentDescription())) return view;
+    if (view instanceof ViewGroup) {
+      ViewGroup group = (ViewGroup) view;
+      for (int i = 0; i < group.getChildCount(); i++) {
+        View match = findAction(group.getChildAt(i), label);
+        if (match != null) return match;
+      }
+    }
+    return null;
+  }
+
+  @Test
   public void heldNativeScrollRevealsRealNeighborAndCommitsTheSamePreparedDecoder()
       throws Exception {
     VideoPage outgoing = onMain(() -> current()), incoming = onMain(() -> next());

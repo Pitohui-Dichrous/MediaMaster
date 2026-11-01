@@ -583,11 +583,12 @@ public final class PlayerActivity extends Activity {
 
         @Override
         public boolean onSingleTapConfirmed(MotionEvent e) {
-          if (started && resumed && !gestureSeeking && gestureKind == GESTURE_NONE) {
-            if (portraitMode) {
-              setPlaying(!playRequested());
-              showChrome();
-            } else if (chromeVisible) setChrome(false);
+          if (!portraitMode
+              && started
+              && resumed
+              && !gestureSeeking
+              && gestureKind == GESTURE_NONE) {
+            if (chromeVisible) setChrome(false);
             else showChrome();
           }
           return true;
@@ -601,34 +602,48 @@ public final class PlayerActivity extends Activity {
           }
           return true;
         }
-
-        @Override
-        public boolean onDoubleTapEvent(MotionEvent e) {
-          // Commit on the second release, so a drag/long press cannot accidentally add a vote.
-          if (e.getActionMasked() == MotionEvent.ACTION_UP
-              && portraitMode
-              && started
-              && resumed
-              && !tapCanceled
-              && !gestureSeeking
-              && gestureKind == GESTURE_NONE
-              && !pageTransitioning) {
-            if (!voteSession.setVote(currentItem(), 1)) {
-              toast("记录未就绪，请稍后重试");
-              return true;
-            }
-            refreshFeedbackUi();
-            likeEffect.showAt(e.getX(), e.getY());
-            feedbackHaptic();
-          }
-          return true;
-        }
       };
   private GestureDetector taps;
+  private PortraitTapSequence portraitTaps;
+  private final Runnable confirmPortraitSingle =
+      () -> {
+        if (portraitTaps != null && portraitTaps.confirmSingle(SystemClock.uptimeMillis()))
+          togglePortraitTapPlayback();
+      };
+
+  private void togglePortraitTapPlayback() {
+    if (portraitMode
+        && started
+        && resumed
+        && !touchDown
+        && !gestureSeeking
+        && gestureKind == GESTURE_NONE
+        && !pageTransitioning) {
+      setPlaying(!playRequested());
+      showChrome();
+    }
+  }
+
+  private void finishPortraitTap(MotionEvent event) {
+    if (portraitTaps == null || !started || !resumed || gestureSeeking || pageTransitioning) return;
+    PortraitTapSequence.Release release =
+        portraitTaps.up(event.getEventTime(), event.getX(), event.getY());
+    if (release == PortraitTapSequence.Release.PENDING_SINGLE) {
+      handler.postAtTime(confirmPortraitSingle, portraitTaps.singleDeadline());
+    } else if (release == PortraitTapSequence.Release.LIKE) {
+      if (!voteSession.setVote(currentItem(), 1)) {
+        toast("记录未就绪，请稍后重试");
+        return;
+      }
+      refreshFeedbackUi();
+      likeEffect.showAt(event.getX(), event.getY());
+      feedbackHaptic();
+    }
+  }
 
   private boolean onVideoTouch(View view, MotionEvent event) {
     if (pageTransitioning) return true;
-    if (taps == null) taps = new GestureDetector(this, tapListener);
+    if (!portraitMode && taps == null) taps = new GestureDetector(this, tapListener);
     if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
       recyclePageVelocity();
       if (portraitMode) pageVelocity = VelocityTracker.obtain();
@@ -636,6 +651,17 @@ public final class PlayerActivity extends Activity {
     if (pageVelocity != null) pageVelocity.addMovement(event);
     switch (event.getActionMasked()) {
       case MotionEvent.ACTION_DOWN:
+        if (portraitMode) {
+          if (portraitTaps == null)
+            portraitTaps =
+                new PortraitTapSequence(
+                    ViewConfiguration.getDoubleTapTimeout(),
+                    ViewConfiguration.getLongPressTimeout(),
+                    ViewConfiguration.get(this).getScaledDoubleTapSlop());
+          handler.removeCallbacks(confirmPortraitSingle);
+          if (portraitTaps.down(event.getEventTime(), event.getX(), event.getY()))
+            togglePortraitTapPlayback();
+        }
         touchDown = true;
         tapCanceled = false;
         touchX = event.getX();
@@ -649,7 +675,7 @@ public final class PlayerActivity extends Activity {
         handler.removeCallbacks(hideChrome);
         handler.removeCallbacks(hideHud);
         gestureHud.setVisibility(View.GONE);
-        taps.onTouchEvent(event);
+        if (!portraitMode) taps.onTouchEvent(event);
         handler.removeCallbacks(longPress);
         if (touchX > dp(20) && touchX < view.getWidth() - dp(20))
           handler.postDelayed(longPress, ViewConfiguration.getLongPressTimeout());
@@ -690,7 +716,8 @@ public final class PlayerActivity extends Activity {
           updateVerticalGesture(dy, Math.max(1, view.getHeight()));
         } else if (gestureKind == GESTURE_PAGE) {
           pager.dragTo(dy, canRevealPrevious(), canRevealNext());
-        } else if (gestureKind == GESTURE_NONE && !tapCanceled) taps.onTouchEvent(event);
+        } else if (gestureKind == GESTURE_NONE && !tapCanceled && !portraitMode)
+          taps.onTouchEvent(event);
         return true;
       case MotionEvent.ACTION_UP:
         if (!touchDown) return true;
@@ -722,7 +749,10 @@ public final class PlayerActivity extends Activity {
         } else if (finished == GESTURE_BRIGHTNESS || finished == GESTURE_VOLUME) {
           handler.postDelayed(hideHud, 400);
         } else {
-          if (!tapCanceled) taps.onTouchEvent(event);
+          if (!tapCanceled) {
+            if (portraitMode) finishPortraitTap(event);
+            else taps.onTouchEvent(event);
+          }
           scheduleHide();
         }
         gestureKind = GESTURE_NONE;
@@ -740,6 +770,8 @@ public final class PlayerActivity extends Activity {
 
   private void cancelTapRecognition() {
     tapCanceled = true;
+    handler.removeCallbacks(confirmPortraitSingle);
+    if (portraitTaps != null) portraitTaps.cancel();
     if (taps == null) return;
     long now = SystemClock.uptimeMillis();
     MotionEvent cancel = MotionEvent.obtain(now, now, MotionEvent.ACTION_CANCEL, touchX, touchY, 0);

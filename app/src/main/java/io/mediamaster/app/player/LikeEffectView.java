@@ -6,6 +6,7 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.animation.Interpolator;
 import android.view.animation.PathInterpolator;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
@@ -15,13 +16,14 @@ import java.util.function.BooleanSupplier;
 /** A single, touch-through sticker for a confirmed portrait double tap. */
 public final class LikeEffectView extends FrameLayout {
   private static final PathInterpolator EASE_OUT = new PathInterpolator(.23f, 1f, .32f, 1f);
+  private static final PathInterpolator EASE_IN_OUT = new PathInterpolator(.77f, 0f, .175f, 1f);
   private final ImageView sticker;
   private final BooleanSupplier motionEnabled;
-  private final Runnable dismiss = this::fadeOut;
+  private final Runnable dismiss = this::releaseStamp;
   private int stickerWidth;
   private int stickerHeight;
   private int generation;
-  private float restingY;
+  private float restingX, restingY, lean;
 
   public LikeEffectView(Context context) {
     this(context, ValueAnimator::areAnimatorsEnabled);
@@ -66,70 +68,103 @@ public final class LikeEffectView extends FrameLayout {
     int thisGeneration = ++generation;
     removeCallbacks(dismiss);
     sticker.animate().withEndAction(null).cancel();
-    float edge = dp(12);
-    float left = clamp(x - stickerWidth / 2f, edge, getWidth() - stickerWidth - edge);
+    // Allow for the rotated corners and the final upward lift, including taps near an edge.
+    float edge = dp(32);
+    restingX = clamp(x - stickerWidth / 2f, edge, getWidth() - stickerWidth - edge);
     restingY = clamp(y - stickerHeight / 2f, edge, getHeight() - stickerHeight - edge);
-    sticker.setTranslationX(left);
-    sticker.setTranslationY(restingY);
+    lean = x < getWidth() / 2f ? -1f : 1f;
     sticker.setVisibility(View.VISIBLE);
     // Float alpha animates the View; ImageView's integer overload would hide the drawable itself.
     if (!motionEnabled.getAsBoolean()) {
       sticker.setAlpha(1f);
       sticker.setScaleX(1);
       sticker.setScaleY(1);
+      sticker.setRotation(0);
+      sticker.setTranslationX(restingX);
+      sticker.setTranslationY(restingY);
       // Keep readable confirmation when the system disables motion, without movement or bounce.
       postDelayed(dismiss, 300);
       return;
     }
     if (!continuing) {
       sticker.setAlpha(0f);
-      sticker.setScaleX(.92f);
-      sticker.setScaleY(.92f);
+      sticker.setScaleX(.94f);
+      sticker.setScaleY(.94f);
+      sticker.setRotation(-8f * lean);
+      sticker.setTranslationX(restingX);
+      sticker.setTranslationY(restingY - dp(8));
     }
+    // Press into the tap, rebound with diminishing deformation, then breathe before lifting away.
+    pose(thisGeneration, 125, 1.14f, .86f, 5, 3, 1, EASE_OUT, () -> rebound(thisGeneration));
+  }
+
+  private void rebound(int stamp) {
+    pose(
+        stamp,
+        160,
+        .94f,
+        1.10f,
+        -4,
+        -4,
+        1,
+        EASE_IN_OUT,
+        () ->
+            pose(
+                stamp,
+                125,
+                1.04f,
+                .97f,
+                2,
+                0,
+                1,
+                EASE_IN_OUT,
+                () ->
+                    pose(stamp, 125, 1, 1, 0, 0, 1, EASE_IN_OUT, () -> postDelayed(dismiss, 100))));
+  }
+
+  private void pose(
+      int stamp,
+      long duration,
+      float sx,
+      float sy,
+      float angle,
+      float lift,
+      float alpha,
+      Interpolator curve,
+      Runnable next) {
     sticker
         .animate()
-        .alpha(1)
-        .scaleX(1.08f)
-        .scaleY(1.08f)
-        .setDuration(160)
-        .setInterpolator(EASE_OUT)
+        .alpha(alpha)
+        .scaleX(sx)
+        .scaleY(sy)
+        .rotation(angle * lean)
+        .translationX(restingX)
+        .translationY(restingY + dp(lift))
+        .setDuration(duration)
+        .setInterpolator(curve)
         .withEndAction(
             () -> {
-              if (generation != thisGeneration) return;
-              sticker
-                  .animate()
-                  .scaleX(1)
-                  .scaleY(1)
-                  .setDuration(100)
-                  .setInterpolator(EASE_OUT)
-                  .withEndAction(
-                      () -> {
-                        if (generation == thisGeneration) postDelayed(dismiss, 180);
-                      })
-                  .start();
+              if (generation == stamp) next.run();
             })
         .start();
   }
 
-  private void fadeOut() {
+  private void releaseStamp() {
     if (!motionEnabled.getAsBoolean()) {
       clear();
       return;
     }
-    int thisGeneration = generation;
-    sticker
-        .animate()
-        .alpha(0)
-        .scaleX(.95f)
-        .scaleY(.95f)
-        .translationY(restingY - dp(12))
-        .setDuration(180)
-        .setInterpolator(EASE_OUT)
-        .withEndAction(
-            () -> {
-              if (generation == thisGeneration) clear();
-            })
-        .start();
+    int stamp = generation;
+    pose(
+        stamp,
+        100,
+        1.08f,
+        .93f,
+        -3,
+        3,
+        1,
+        EASE_IN_OUT,
+        () -> pose(stamp, 160, .92f, 1.06f, 6, -14, 0, EASE_OUT, this::clear));
   }
 
   /**
@@ -143,6 +178,9 @@ public final class LikeEffectView extends FrameLayout {
     sticker.setAlpha(0f);
     sticker.setScaleX(1);
     sticker.setScaleY(1);
+    sticker.setRotation(0);
+    sticker.setTranslationX(restingX);
+    sticker.setTranslationY(restingY);
   }
 
   @Override

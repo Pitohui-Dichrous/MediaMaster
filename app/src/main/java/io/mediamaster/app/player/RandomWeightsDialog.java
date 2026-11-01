@@ -13,7 +13,7 @@ public final class RandomWeightsDialog {
     AlertDialog dialog =
         new AlertDialog.Builder(activity, Ui.dialogTheme(activity))
             .setTitle("重置权重")
-            .setMessage("清除近期观看和赞踩产生的权重，恢复相同随机权重。不会删除视频或更改设置。")
+            .setMessage("清除由于观看和点赞/点踩产生的随机播放排序权重")
             .setNegativeButton("取消", null)
             .setPositiveButton("重置", null)
             .create();

@@ -13,6 +13,7 @@ import android.content.res.Configuration;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.Rect;
+import android.graphics.RectF;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
 import android.net.Uri;
@@ -259,6 +260,52 @@ public final class FeedbackInteractionTest {
   }
 
   @Test
+  public void portraitTapBurstsNeverLeaveASingleTapTailOrStackVotes() throws Exception {
+    double baseline = seedModerateExposure();
+    launch(true);
+    setPlaying(false);
+    double liked = Double.NaN;
+    // Fast pairs and odd-length bursts must have the same meaning as sustained even bursts.
+    for (int[] burst : new int[][] {{2, 20}, {3, 70}, {5, 20}, {6, 180}}) {
+      tapBurst(burst[0], burst[1]);
+      awaitTapConfirmation();
+      assertVote(1);
+      assertFalse(
+          "No trailing tap may resume playback after a " + burst[0] + "-tap burst",
+          playRequested());
+      double weight = store.weight(videos.get(0));
+      if (Double.isNaN(liked)) {
+        liked = weight;
+        assertTrue(liked > baseline);
+      } else {
+        assertEquals("A continuous burst cannot contribute another vote", liked, weight, 1e-12);
+      }
+    }
+    // The burst boundary must not swallow an independent single tap after its timeout.
+    tap();
+    awaitTapConfirmation();
+    assertTrue("A later independent single tap still resumes", playRequested());
+    tapBurst(3, 70);
+    awaitTapConfirmation();
+    assertTrue("A burst cannot pause currently playing video either", playRequested());
+    tap();
+    awaitTapConfirmation();
+    assertFalse("A later independent single tap still pauses", playRequested());
+    assertVote(1);
+  }
+
+  private void tapBurst(int count, long gapMillis) throws Exception {
+    float[] point = center();
+    for (int index = 0; index < count; index++) {
+      long down = SystemClock.uptimeMillis();
+      touch(MotionEvent.ACTION_DOWN, down, point[0], point[1]);
+      SystemClock.sleep(15);
+      touch(MotionEvent.ACTION_UP, down, point[0], point[1]);
+      if (index + 1 < count) SystemClock.sleep(gapMillis);
+    }
+  }
+
+  @Test
   public void newWindowCanContributeAgainAndCancelOnlyItsOwnContribution() throws Exception {
     double baseline = seedModerateExposure();
     launch(true);
@@ -458,6 +505,7 @@ public final class FeedbackInteractionTest {
     store.awaitIdle();
     catalog = mainRule.launchActivity(new Intent(context, MainActivity.class));
     openResetConfirmation();
+    assertNotNull(exactText("清除由于观看和点赞/点踩产生的随机播放排序权重"));
     clickText("取消");
     store.awaitIdle();
     assertEquals(1, resetSeed.vote(videos.get(0)));
@@ -933,6 +981,124 @@ public final class FeedbackInteractionTest {
   }
 
   @Test
+  public void stampFeedbackDeformsAndRotatesWithoutClippingAtAnyCorner() throws Exception {
+    org.junit.Assume.assumeTrue(ValueAnimator.areAnimatorsEnabled());
+    launch(true);
+    setPlaying(false);
+    LikeEffectView overlay = onMain(() -> (LikeEffectView) read(player, "likeEffect"));
+    boolean[] observed = new boolean[2];
+    for (int corner = 0; corner < 4; corner++) {
+      final int edge = corner;
+      onMain(
+          () -> {
+            overlay.showAt(
+                (edge & 1) == 0 ? 0 : overlay.getWidth(),
+                (edge & 2) == 0 ? 0 : overlay.getHeight());
+            return null;
+          });
+      await(
+          () ->
+              onMain(
+                  () -> {
+                    View sticker = overlay.getChildAt(0);
+                    if (sticker.getVisibility() != View.VISIBLE) return true;
+                    assertTrue(sticker.getWidth() > 0 && sticker.getHeight() > 0);
+                    RectF bounds = new RectF(0, 0, sticker.getWidth(), sticker.getHeight());
+                    sticker.getMatrix().mapRect(bounds);
+                    bounds.offset(sticker.getLeft(), sticker.getTop());
+                    assertTrue(
+                        "Rotated sticker stays inside the screen: " + bounds,
+                        bounds.left >= -.5f
+                            && bounds.top >= -.5f
+                            && bounds.right <= overlay.getWidth() + .5f
+                            && bounds.bottom <= overlay.getHeight() + .5f);
+                    if (sticker.getAlpha() > .5f) {
+                      observed[0] |= Math.abs(sticker.getScaleX() - sticker.getScaleY()) > .02f;
+                      observed[1] |= Math.abs(sticker.getRotation()) > .5f;
+                    }
+                    return false;
+                  }));
+    }
+    assertTrue("Visible feedback includes squash and rebound", observed[0]);
+    assertTrue("Visible feedback includes a light rotation", observed[1]);
+  }
+
+  @Test
+  public void stampRetapContinuesCurrentPoseAndClearCancelsEveryPendingPhase() throws Exception {
+    org.junit.Assume.assumeTrue(ValueAnimator.areAnimatorsEnabled());
+    launch(true);
+    setPlaying(false);
+    LikeEffectView overlay = onMain(() -> (LikeEffectView) read(player, "likeEffect"));
+    onMain(
+        () -> {
+          overlay.showAt(overlay.getWidth() * .3f, overlay.getHeight() * .3f);
+          return null;
+        });
+    await(() -> onMain(() -> overlay.getChildAt(0).getAlpha() >= .98f));
+    // Retarget during the exit: its old completion must not hide the new feedback.
+    await(
+        () ->
+            onMain(
+                () -> {
+                  View sticker = overlay.getChildAt(0);
+                  return sticker.getVisibility() == View.VISIBLE
+                      && sticker.getAlpha() > .2f
+                      && sticker.getAlpha() < .8f;
+                }));
+    onMain(
+        () -> {
+          View sticker = overlay.getChildAt(0);
+          float[] before = {
+            sticker.getScaleX(),
+            sticker.getScaleY(),
+            sticker.getRotation(),
+            sticker.getTranslationX(),
+            sticker.getTranslationY(),
+            sticker.getAlpha()
+          };
+          overlay.showAt(overlay.getWidth() * .7f, overlay.getHeight() * .6f);
+          assertArrayEquals(
+              "Retapping preserves the current pose until the next frame",
+              before,
+              new float[] {
+                sticker.getScaleX(),
+                sticker.getScaleY(),
+                sticker.getRotation(),
+                sticker.getTranslationX(),
+                sticker.getTranslationY(),
+                sticker.getAlpha()
+              },
+              .0001f);
+          return null;
+        });
+    SystemClock.sleep(250);
+    onMain(
+        () -> {
+          View sticker = overlay.getChildAt(0);
+          assertEquals(View.VISIBLE, sticker.getVisibility());
+          assertTrue(sticker.getAlpha() > .5f);
+          overlay.clear();
+          assertEquals(View.INVISIBLE, sticker.getVisibility());
+          assertEquals(0, sticker.getRotation(), 0);
+          assertEquals(1, sticker.getScaleX(), 0);
+          assertEquals(1, sticker.getScaleY(), 0);
+          return null;
+        });
+    SystemClock.sleep(1100);
+    onMain(
+        () -> {
+          View sticker = overlay.getChildAt(0);
+          assertEquals(
+              "Cancelled phases cannot resurrect feedback",
+              View.INVISIBLE,
+              sticker.getVisibility());
+          assertEquals(0, sticker.getAlpha(), 0);
+          assertEquals(0, sticker.getRotation(), 0);
+          return null;
+        });
+  }
+
+  @Test
   public void reducedMotionUsesStaticFeedbackThenClearsWithoutDeviceSettingChanges()
       throws Exception {
     launch(true);
@@ -956,6 +1122,7 @@ public final class FeedbackInteractionTest {
                 assertEquals(1, sticker.getAlpha(), 0);
                 assertEquals(1, sticker.getScaleX(), 0);
                 assertEquals(1, sticker.getScaleY(), 0);
+                assertEquals(0, sticker.getRotation(), 0);
                 return new float[] {sticker.getTranslationX(), sticker.getTranslationY()};
               });
       SystemClock.sleep(100);
@@ -966,6 +1133,7 @@ public final class FeedbackInteractionTest {
             assertEquals(position[1], sticker.getTranslationY(), 0);
             assertEquals(1, sticker.getScaleX(), 0);
             assertEquals(1, sticker.getScaleY(), 0);
+            assertEquals(0, sticker.getRotation(), 0);
             return null;
           });
       await(() -> onMain(() -> overlay.getChildAt(0).getVisibility() != View.VISIBLE));

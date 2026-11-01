@@ -1,36 +1,41 @@
-MediaMaster Android 工程
+映序 / MediaMaster Android 工程
 
-应用：io.mediamaster.app，正式版本 1.3.0（versionCode 7），最低安卓 8.0（API26），目标 API35，为安卓14个人手机使用设计。
-技术：Java17，原生 Android Views，Media3 1.8.0，LibVLC 3.6.5。
-本版由用户已实机认可的1.3.0-preview.2转为正式版，播放功能保持一致。
+当前测试版本：2.2.0-test.5，versionCode 22。
+最低 Android 8.0（API 26），compileSdk 36，targetSdk 35。
+技术：Java 17、原生 Android Views、Media3 1.11.1、LibVLC 3.7.7。
+构建：Gradle Wrapper 8.11.1、Android Gradle Plugin 8.9.2。
 
-本工作区已准备工具：
-powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1 assembleRelease testDebugUnitTest lintDebug
+构建环境
 
-新机器可使用 Android Studio 打开本目录，安装 JDK17、Android SDK35、Build Tools35.0.0；工程内附标准 Gradle Wrapper（Gradle8.11.1，AGP8.9.2）。local.properties 属本机设置，不放入源代码包。
+安装 JDK 17 与 Android SDK 36，配置 JAVA_HOME 和 ANDROID_HOME，或使用 Android Studio 打开项目。
+工程内的 Gradle Wrapper 固定 Gradle 版本。local.properties、构建缓存和签名密钥不进入仓库。
 
-发布签名位于 .tools/signing/，请备份。密码不写入公开源代码。
-没有本机签名配置的机器默认使用调试密钥以便重建；这样的 APK 不能覆盖当前正式安装版。更新现有安装必须使用同一签名。
+当前应用使用包名 io.mediamaster.app.preview。构建时保留 -PpreviewInstall=true：
 
-常用目录：
-app/src/main/java/io/mediamaster/app/MainActivity.java：视频列表与文件管理界面。
-app/src/main/java/io/mediamaster/app/media：媒体库、文件夹扫描、权限操作、缩略图。
-app/src/main/java/io/mediamaster/app/player：双引擎播放、非线性手势、播放顺序、方向适配。
-app/src/test：手势曲线、随机播放逻辑验证。
-docs：构建、许可与验证说明。
-dist：交付 APK、源代码压缩包、使用说明。
+./gradlew assembleRelease -PpreviewInstall=true
+./gradlew testDebugUnitTest lintDebug -PpreviewInstall=true
 
-仅冷启动新任务、手动刷新以及用户主动完成权限/目录/文件操作时扫描；同任务后台恢复、播放器返回和配置重建不扫描。没有定时轮询、MediaStore ContentObserver、FileObserver 或下载完成监听，也没有常驻后台服务。进度预览在独立工作线程按需提取，使用内存缓存，不写预览图片文件。
+Windows 可使用 gradlew.bat；已准备本机工具的工作区也可使用：
 
-目录缩略图12MiB、播放预览4MiB，均为纯内存LRU；旧版video-thumbnails-v1缓存后台迁移删除，不改动原视频。
-播放定位保持SeekParameters.EXACT；API34+启用MediaCodec decode-only标记以减少目标帧之前的送显开销，预览用附近关键帧降低解码竞争。
+powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1 assembleRelease testDebugUnitTest lintDebug -PpreviewInstall=true
 
-竖屏与全屏共用同一PlayerActivity及当前VideoPage，切换模式不重建当前播放实例；退出竖屏时释放两个邻页引擎。
-ThreeWindowPager是原生ScrollView+OverScroller视口，内含三个始终附着的页面根。每页高H，内容总高3H，角色位于0/H/2H。拖动直接改变native scrollY；完成切页后同步轮转角色并居中，不移除/重新挂载页面，也不以单页退场动画代替翻页。
-每个VideoPage使用TextureView及独立ExoPlayer或VLC实例。邻页异步准备真实首帧并暂停；Exo页还需达到STATE_READY才可露出。提交切集仅提升已准备页面并开启播放，不再次prepare；只回收远端页。未就绪方向保持当前画面，失败页提供可继续滑走的提示。
-以全屏前台方式创建的实例沿用64MiB缓冲预算；邻页实例使用8MiB、0.5至4秒的缓冲配置，提升后复用原实例。预载与缩略预览均不写视频副本或缩略图片文件。
-随机邻页通过peekNext/peekPrevious选择，预览不消耗随机牌堆或观看历史，提交时才推进顺序。翻页离开中心前关闭声音、暂停播放，最终居中后仅开放当前页；自然结束的旧页退为上一页时用同一实例定位到零并预热，以便返回。
-手势分类锁轴，竖滑仅在独立portraitMode中翻页。正式版通过GitHub标签v1.3.0及对应Release交付，本机交付目录为dist/1.3.0/。
-Release附件为MediaMaster-1.3.0.apk、MediaMaster-1.3.0-source.zip、INSTALL.txt、VERIFICATION.txt、SHA256SUMS.txt。源码包排除签名私钥、本机工具、缓存与用户视频；APK使用既有正式签名，支持覆盖更新并保留应用设置及目录记录。
-正式发布说明与核验记录位于docs/1.3.0/发布说明.md、docs/1.3.0/验证记录.txt。设计说明保留于docs/1.3.0-preview.2/设计说明.txt。
-preview.2历史记录包含24项单元测试及Android14模拟器56项设备测试，该预览版随后获得用户实机认可。历史验证不计为正式包本轮重测，正式包结果以1.3.0验证记录为准。docs中的旧预览版记录保持原样。
+脚本优先使用工作区已有的 Java 17、Android SDK 36 和 Gradle 缓存；构建配置不依赖 REA 分析环境。
+通用 APK 位于 app/build/outputs/apk/release/app-universal-release.apk，同时生成各 ABI 的 APK。
+
+包名与签名
+
+previewInstall=true 使用当前包名和本机构建环境的调试签名配置；覆盖更新仍必须使用与已安装版本相同的签名密钥。新机器自行生成的调试密钥不能替代原密钥。
+不传该参数会构建 io.mediamaster.app：有本地发布签名配置时使用该配置，否则使用调试签名。这是不同的安装身份，不用于覆盖当前应用。
+当前包名可与原 1.3.0 并存，不会自动迁移其设置。签名密钥不在仓库中，后续更新必须保留既有包名和密钥；安装关系见 README.md。
+
+代码与验证
+
+app/src/main/java/io/mediamaster/app：界面、媒体索引同步与文件操作。
+app/src/main/java/io/mediamaster/app/player：解码选择、定位、播放顺序与竖屏预载。
+app/src/test：不依赖设备的策略及逻辑验证。
+app/src/androidTest：设备回归；部分用例需要显式提供生成的测试媒体，不能只凭构建成功视为通过。
+docs/DECODER_SETTINGS.md：三种解码选项和默认自动选择规则。
+docs/LONG_GOP_SEEK.md：长 GOP 定位实现及验证边界。
+
+默认解码按媒体特征、设备能力与资源情况选择路径；适用的 1080p/60fps 长 GOP 视频优先尝试 Media3 硬解，失败后回到本次决策确定的原生备选。显式软解、硬解偏好继续生效。
+历史版本验证文档保持原样；当前测试包的验证结果以对应构建记录为准。

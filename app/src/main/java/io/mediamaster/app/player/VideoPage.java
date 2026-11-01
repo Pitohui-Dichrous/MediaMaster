@@ -30,12 +30,17 @@ import androidx.media3.exoplayer.DefaultRenderersFactory;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.ScrubbingModeParameters;
 import androidx.media3.exoplayer.SeekParameters;
+import androidx.media3.exoplayer.mediacodec.MediaCodecAdapter;
+import androidx.media3.exoplayer.mediacodec.MediaCodecInfo;
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector;
 import androidx.media3.ui.PlayerView;
 import io.mediamaster.app.R;
 import io.mediamaster.app.media.VideoItem;
 import java.io.File;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 import java.util.function.Supplier;
 import org.videolan.libvlc.LibVLC;
 import org.videolan.libvlc.Media;
@@ -108,13 +113,14 @@ final class VideoPage extends FrameLayout {
   private long nativeSeekClockStepMs = 33;
   private float nativeSeekClockRate = 1;
   private boolean nativeSeekAwaitingPause;
-  private boolean scrubbing, scrubPending, triedExo, triedVlc;
+  private boolean scrubbing, scrubPending, triedExo, triedExoHardware, triedVlc;
   private boolean rememberVlcFailureOnExoFrame;
   private boolean nativeSoftware,
       triedNativeHardware,
       triedNativeSoftware,
       rememberSoftwareFailureOnHardwareFrame;
   private int decoderPreference = NativeDecoderPolicy.AUTO;
+  private boolean forceNativeEngine;
   private long nativeSelectionRequest;
   // User intent outlives an engine replacement and remains valid while header selection is pending.
   private long explicitSeekSerial, explicitSeekTarget;
@@ -131,6 +137,35 @@ final class VideoPage extends FrameLayout {
   volatile long lastRenderedPositionUs = C.TIME_UNSET;
   volatile long lastRenderedFrameSequence;
   private volatile long lastFrameReleaseTimeNs;
+  private static final ScrubbingModeParameters EXO_SCRUB_PARAMETERS =
+      new ScrubbingModeParameters.Builder().setFractionalSeekTolerance(null, null).build();
+  volatile boolean exoHardwareConfigured;
+  volatile boolean exoSoftwareConfigured;
+  private long exoCodecGeneration;
+  private volatile ExoExactHold exoExactHold;
+  private Runnable exoExactTimeout;
+  private Runnable exoOutputProbe;
+  private ExoNoOutputWatchdog exoOutputWatchdog;
+  private boolean exoOutputProbeScheduled;
+  private long exoOutputSettledSeekSerial;
+
+  private static final class ExoExactHold {
+    final ExoPlayer source;
+    final long pageToken, frameToken, targetUs, frameBaseline;
+    // Main also checks the barrier before accepting READY/ENDED as optimization completion.
+    volatile boolean armed;
+    // These two fields are owned only by the playback thread.
+    boolean eligibleFrameSeen, completionPosted;
+
+    ExoExactHold(ExoPlayer source, long pageToken, long frameToken, long targetUs, long baseline) {
+      this.source = source;
+      this.pageToken = pageToken;
+      this.frameToken = frameToken;
+      this.targetUs = targetUs;
+      frameBaseline = baseline;
+    }
+  }
+
   private final PlaybackEngineHistory engineHistory;
   private SeekEnginePolicy enginePolicy;
 
@@ -213,6 +248,7 @@ final class VideoPage extends FrameLayout {
       float speed,
       boolean foreground) {
     release();
+    forceNativeEngine = forceVlc;
     this.item = item;
     this.index = index;
     this.single = single;
@@ -237,7 +273,17 @@ final class VideoPage extends FrameLayout {
   }
 
   private void startExo(long token, long start) {
-    triedExo = true;
+    startExo(token, start, false, false);
+  }
+
+  @androidx.annotation.OptIn(markerClass = androidx.media3.common.util.ExperimentalApi.class)
+  private void startExo(
+      long token, long start, boolean strictHardware, boolean hardwareFallbackSoftware) {
+    if (generation != token || item == null) return;
+    nativeSelectionRequest++;
+    final long codecToken = resetExoCodecState();
+    if (strictHardware) triedExoHardware = true;
+    else triedExo = true;
     firstFrameReady = false;
     buffering = true;
     failed = false;
@@ -260,7 +306,28 @@ final class VideoPage extends FrameLayout {
     }
     try {
       DefaultRenderersFactory renderers =
-          new DefaultRenderersFactory(getContext()).setEnableDecoderFallback(true);
+          new DefaultRenderersFactory(getContext()) {
+            @Override
+            protected MediaCodecAdapter.Factory getCodecAdapterFactory() {
+              MediaCodecAdapter.Factory normal = super.getCodecAdapterFactory();
+              return configuration -> {
+                MediaCodecAdapter adapter = normal.createAdapter(configuration);
+                if (configuration.format.sampleMimeType != null
+                    && configuration.format.sampleMimeType.startsWith("video/")) {
+                  boolean hardware = configuration.codecInfo.hardwareAccelerated;
+                  boolean software = configuration.codecInfo.softwareOnly;
+                  main.post(
+                      () -> {
+                        if (exoCodecGeneration != codecToken) return;
+                        exoHardwareConfigured = hardware;
+                        exoSoftwareConfigured = software;
+                      });
+                }
+                return adapter;
+              };
+            }
+          }.setEnableDecoderFallback(true);
+      if (strictHardware) renderers.setMediaCodecSelector(strictHardwareSelector());
       if (Build.VERSION.SDK_INT >= 34)
         renderers.experimentalSetEnableMediaCodecBufferDecodeOnlyFlag(true);
       ExoPlayer source =
@@ -274,18 +341,31 @@ final class VideoPage extends FrameLayout {
             lastRenderedPositionUs = presentationTimeUs;
             lastFrameReleaseTimeNs = releaseTimeNs;
             lastRenderedFrameSequence++;
+            ExoExactHold hold = exoExactHold;
+            long frameUs =
+                format.frameRate > 0 ? (long) Math.ceil(1_000_000d / format.frameRate) : 100_000;
+            if (hold != null
+                && hold.source == source
+                && hold.frameToken == frameToken
+                && !hold.completionPosted
+                && lastRenderedFrameSequence > hold.frameBaseline
+                && (hold.armed
+                    || Math.abs(presentationTimeUs - hold.targetUs)
+                        <= Math.max(1000, Math.min(100_000, frameUs)))) {
+              // After the command barrier any real output can end the optimization. Sparse/VFR
+              // media need not contain a frame near the requested time. This is never an accuracy
+              // acknowledgement; EXACT remains in force and the last requested seek is preserved.
+              // Before the barrier, retain only the cached matching-frame race recovery.
+              hold.eligibleFrameSeen = true;
+              maybeFinishExoHoldOnPlaybackThread(hold);
+            }
           });
       source.setAudioAttributes(MOVIE_AUDIO, false);
       source.setVolume(0);
       source.setPlayWhenReady(false);
       source.setHandleAudioBecomingNoisy(true);
-      // Keep the audio renderer attached across gestures. Scrubbing suppresses playback and our
-      // volume gate mutes it; disabling/reselecting the audio track only adds work on every
-      // release.
-      source.setScrubbingModeParameters(
-          new ScrubbingModeParameters.Builder()
-              .setDisabledTrackTypes(Collections.emptySet())
-              .build());
+      // Official AUDIO/METADATA suppression permits same-GOP forward decoder-state reuse.
+      source.setScrubbingModeParameters(EXO_SCRUB_PARAMETERS);
       source.setSeekParameters(scrubbing ? coarseSeekParameters() : SeekParameters.EXACT);
       source.setScrubbingModeEnabled(scrubbing);
       source.setRepeatMode(single ? Player.REPEAT_MODE_ONE : Player.REPEAT_MODE_OFF);
@@ -301,11 +381,13 @@ final class VideoPage extends FrameLayout {
             public void onPlaybackStateChanged(int state) {
               if (!current()) return;
               buffering = state == Player.STATE_BUFFERING;
-              listener.onChanged(VideoPage.this);
-              if (state == Player.STATE_ENDED && active && playRequested && !ended && !scrubbing) {
-                ended = true;
-                listener.onEnded(VideoPage.this);
+              syncExoOutputProbe();
+              if (state == Player.STATE_READY || state == Player.STATE_ENDED) {
+                ExoExactHold hold = exoExactHold;
+                if (hold != null) main.post(() -> finishExoHoldIfReady(hold));
               }
+              listener.onChanged(VideoPage.this);
+              if (state == Player.STATE_ENDED) checkExoEndedAfterCommands(token, source);
             }
 
             @Override
@@ -334,21 +416,137 @@ final class VideoPage extends FrameLayout {
               main.post(
                   () -> {
                     if (current()) {
-                      compatibleFailed(
-                          token, errorSeekSerial != explicitSeekSerial ? explicitSeekTarget : at);
+                      exoAttemptFailed(
+                          token,
+                          errorSeekSerial != explicitSeekSerial ? explicitSeekTarget : at,
+                          strictHardware,
+                          hardwareFallbackSoftware);
                     }
                   });
             }
           });
       source.setMediaItem(MediaItem.fromUri(playbackUri()), start);
       source.prepare();
+      if (strictHardware) beginExoOutputProbe(token, frameToken, source, hardwareFallbackSoftware);
       listener.onChanged(this);
       applyPlayback();
     } catch (RuntimeException error) {
-      if (generation == token) {
-        compatibleFailed(token, start);
+      if (generation == token && exoCodecGeneration == codecToken) {
+        exoAttemptFailed(token, start, strictHardware, hardwareFallbackSoftware);
       }
     }
+  }
+
+  private long resetExoCodecState() {
+    exoHardwareConfigured = false;
+    exoSoftwareConfigured = false;
+    return ++exoCodecGeneration;
+  }
+
+  private static MediaCodecSelector strictHardwareSelector() {
+    return (mime, secure, tunneled) -> {
+      List<MediaCodecInfo> available =
+          MediaCodecSelector.DEFAULT.getDecoderInfos(mime, secure, tunneled);
+      if (!mime.startsWith("video/")) return available;
+      ArrayList<MediaCodecInfo> hardware = new ArrayList<>();
+      for (MediaCodecInfo codec : available) {
+        if (codec.hardwareAccelerated && !codec.softwareOnly) hardware.add(codec);
+      }
+      return Collections.unmodifiableList(hardware);
+    };
+  }
+
+  private void exoAttemptFailed(
+      long token, long position, boolean strictHardware, boolean hardwareFallbackSoftware) {
+    if (generation != token) return;
+    // Preserve the original resolved choice and the unrestricted compatible-engine attempt.
+    if (strictHardware && hardwareFallbackSoftware && !triedNativeSoftware)
+      startVlc(token, position, true);
+    else if (strictHardware && !hardwareFallbackSoftware && !triedNativeHardware)
+      startVlc(token, position, false);
+    else compatibleFailed(token, position);
+  }
+
+  private void beginExoOutputProbe(
+      long token, long frameToken, ExoPlayer source, boolean fallbackSoftware) {
+    stopExoOutputProbe();
+    ExoNoOutputWatchdog watchdog = new ExoNoOutputWatchdog();
+    exoOutputWatchdog = watchdog;
+    exoOutputSettledSeekSerial = explicitSeekSerial;
+    exoOutputProbe =
+        () -> {
+          exoOutputProbeScheduled = false;
+          if (generation != token || exo != source || engineFrameGeneration != frameToken) return;
+          boolean opening = !firstFrameReady;
+          if (!ExoNoOutputWatchdog.canObserve(
+              isAttachedToWindow(), getWindowVisibility() == VISIBLE, active, opening)) {
+            watchdog.reset();
+            return;
+          }
+          boolean pending =
+              active
+                  && (source.getPlaybackState() == Player.STATE_BUFFERING || exoExactHold != null);
+          // READY with no hold is completed work, including sparse video/audio tails. Merely
+          // holding a paused thumb or revisiting the same coarse frame must not fail a decoder.
+          if (!opening && !pending) {
+            watchdog.reset();
+            if (!scrubbing) exoOutputSettledSeekSerial = explicitSeekSerial;
+            return;
+          }
+          if (watchdog.expired(
+              SystemClock.uptimeMillis(),
+              opening,
+              pending,
+              lastRenderedFrameSequence,
+              lastRenderedPositionUs)) {
+            long target =
+                scrubbing
+                    ? scrubTarget
+                    : explicitSeekSerial != exoOutputSettledSeekSerial
+                        ? explicitSeekTarget
+                        : Math.max(0, source.getCurrentPosition());
+            // This is a no-output failure, not a measured latency preference. The fallback choice
+            // belongs to this original attempt and must not be re-read from changing preferences.
+            exoAttemptFailed(token, target, true, fallbackSoftware);
+            return;
+          }
+          exoOutputProbeScheduled = true;
+          main.postDelayed(exoOutputProbe, 250);
+        };
+    syncExoOutputProbe();
+  }
+
+  private void syncExoOutputProbe() {
+    if (exoOutputProbe == null || exoOutputWatchdog == null) return;
+    boolean eligible =
+        exo != null
+            && ExoNoOutputWatchdog.canObserve(
+                isAttachedToWindow(), getWindowVisibility() == VISIBLE, active, !firstFrameReady);
+    boolean pending =
+        eligible
+            && (!firstFrameReady
+                || active
+                    && (exo.getPlaybackState() == Player.STATE_BUFFERING || exoExactHold != null));
+    if (!pending) {
+      main.removeCallbacks(exoOutputProbe);
+      exoOutputProbeScheduled = false;
+      exoOutputWatchdog.reset();
+      if (eligible
+          && !scrubbing
+          && (exo.getPlaybackState() == Player.STATE_READY
+              || exo.getPlaybackState() == Player.STATE_ENDED))
+        exoOutputSettledSeekSerial = explicitSeekSerial;
+    } else if (!exoOutputProbeScheduled) {
+      exoOutputProbeScheduled = true;
+      main.post(exoOutputProbe);
+    }
+  }
+
+  private void stopExoOutputProbe() {
+    if (exoOutputProbe != null) main.removeCallbacks(exoOutputProbe);
+    exoOutputProbe = null;
+    exoOutputWatchdog = null;
+    exoOutputProbeScheduled = false;
   }
 
   private void startVlc(long token, long start) {
@@ -373,7 +571,24 @@ final class VideoPage extends FrameLayout {
               explicitSeekSerial != selectedSeekSerial
                   ? explicitSeekTarget
                   : exo == null && vlc == null && pendingSeekSet ? pendingSeek : start;
-          startVlc(token, selectedStart, software);
+          boolean tryHardwareExo =
+              !forceNativeEngine
+                  && !triedExoHardware
+                  && !triedExo
+                  && !triedVlc
+                  && exo == null
+                  && vlc == null
+                  && NativeDecoderPolicy.useMedia3HardwareForLongGop(
+                      decoderPreference,
+                      PlaybackEngineChoice.get(getContext()),
+                      software,
+                      NativeDecoderSelector.cachedLongGop(item));
+          // cachedLongGop consumes this delivered header decision, including a timed-out null.
+          if (tryHardwareExo) {
+            boolean fallbackSoftware =
+                NativeDecoderPolicy.softwareAfterMedia3HardwareFailure(decoderPreference, software);
+            startExo(token, selectedStart, true, fallbackSoftware);
+          } else startVlc(token, selectedStart, software);
         });
   }
 
@@ -662,8 +877,30 @@ final class VideoPage extends FrameLayout {
   }
 
   @Override
+  protected void onAttachedToWindow() {
+    super.onAttachedToWindow();
+    syncExoOutputProbe();
+  }
+
+  @Override
+  protected void onDetachedFromWindow() {
+    // isAttachedToWindow() can remain true until this callback returns. Suspend explicitly rather
+    // than relying on that flag during removal; keep the probe so reattachment can resume it.
+    if (exoOutputProbe != null) main.removeCallbacks(exoOutputProbe);
+    exoOutputProbeScheduled = false;
+    if (exoOutputWatchdog != null) exoOutputWatchdog.reset();
+    super.onDetachedFromWindow();
+  }
+
+  @Override
   protected void onWindowVisibilityChanged(int visibility) {
     super.onWindowVisibilityChanged(visibility);
+    if (visibility != VISIBLE) cancelExoExactHold(true);
+    else if (exo != null && exoExactHold == null) {
+      // Visibility cancellation muted the old hold; restore gain without changing play intent.
+      exo.setVolume(active && exo.getPlayWhenReady() && audible && !scrubbing ? 1 : 0);
+    }
+    syncExoOutputProbe();
     if (vlc == null) return;
     syncNativeHealthProbe();
     if (visibility != VISIBLE) main.removeCallbacks(nativeSeekProbe);
@@ -1000,7 +1237,7 @@ final class VideoPage extends FrameLayout {
       nativeSeekAwaitingPause = true;
       armNativeSeekWatchdog(SystemClock.uptimeMillis());
     } else if (active && play) nativeSeekAwaitingPause = false;
-    if (!active && scrubbing) clearScrubState();
+    if (!active && (scrubbing || exoExactHold != null)) clearScrubState();
     if (active && play) rewindIfEnded();
     this.active = active;
     playRequested = play;
@@ -1011,6 +1248,7 @@ final class VideoPage extends FrameLayout {
       vlcNearEndArmed = false;
     }
     applyPlayback();
+    syncExoOutputProbe();
     if (!active) main.removeCallbacks(nativeSeekProbe);
     else if (nativeSeekQueue.hasWork()) {
       if (promoted) armNativeSeekWatchdog(SystemClock.uptimeMillis());
@@ -1048,7 +1286,8 @@ final class VideoPage extends FrameLayout {
       exo.setVolume(0);
       exo.setAudioAttributes(MOVIE_AUDIO, active && audible);
       exo.setPlayWhenReady(active && playRequested);
-      exo.setVolume(active && playRequested && audible && !scrubbing ? 1 : 0);
+      exo.setVolume(
+          active && playRequested && audible && !scrubbing && exoExactHold == null ? 1 : 0);
     }
     if (vlc != null) applyVlcPlayback(vlc);
   }
@@ -1183,6 +1422,7 @@ final class VideoPage extends FrameLayout {
   /** Uses the visible decoder for interactive frames; no second thumbnail decoder is needed. */
   void beginScrub() {
     if (scrubbing || failed || item == null) return;
+    cancelExoExactHold(false);
     scrubOrigin = position();
     scrubTarget = scrubOrigin;
     scrubFrameBaseline = lastRenderedFrameSequence;
@@ -1202,10 +1442,12 @@ final class VideoPage extends FrameLayout {
       nativeSurfaceFrames.beginPreview();
     }
     if (exo != null) {
-      // A short tap should issue only its final exact seek. Enter scrubbing mode lazily when the
-      // first intermediate target is actually dispatched, preserving the user's play/pause intent.
       playRequested = exo.getPlayWhenReady();
       exo.setVolume(0);
+      // Prepare the scrub renderer state on touch-down; a tap still issues only its final seek.
+      exo.setScrubbingModeParameters(EXO_SCRUB_PARAMETERS);
+      exo.setSeekParameters(coarseSeekParameters());
+      exo.setScrubbingModeEnabled(true);
     }
     // Keep the native clock and play intent; all scrub requests stay muted until the finger lifts.
     if (vlc != null) vlc.setVolume(0);
@@ -1256,10 +1498,9 @@ final class VideoPage extends FrameLayout {
     scrubSubmittedCount++;
     ended = false;
     if (exo != null) {
-      if (!exo.isScrubbingModeEnabled()) {
-        exo.setSeekParameters(coarseSeekParameters());
-        exo.setScrubbingModeEnabled(true);
-      }
+      exo.setScrubbingModeParameters(EXO_SCRUB_PARAMETERS);
+      exo.setSeekParameters(coarseSeekParameters());
+      if (!exo.isScrubbingModeEnabled()) exo.setScrubbingModeEnabled(true);
       exo.seekTo(target);
     } else if (vlc != null) {
       applyVlcPlayback(vlc);
@@ -1282,10 +1523,7 @@ final class VideoPage extends FrameLayout {
     if (exo != null) {
       // Focus loss/noisy handling can change this while scrub suppression is active.
       playRequested = exo.getPlayWhenReady();
-      // Dispatch the accurate seek before releasing the playback suppression.
-      exo.setSeekParameters(SeekParameters.EXACT);
-      exo.seekTo(target);
-      exo.setScrubbingModeEnabled(false);
+      submitExoExactSeek(target);
     } else if (vlc != null) {
       submitNativeSeek(target, false);
       // VLC's clock is not a frame PTS. Do not invent comparable latency samples from it.
@@ -1294,6 +1532,123 @@ final class VideoPage extends FrameLayout {
       pendingSeekSet = true;
     }
     applyPlayback();
+  }
+
+  /** Keep Media3's seek boost through final decoding, without changing the playback intent. */
+  private void submitExoExactSeek(long target) {
+    ExoPlayer source = exo;
+    ExoExactHold previous = exoExactHold;
+    if (previous != null && previous.source == source && previous.targetUs == target * 1000) return;
+    cancelExoExactHold(false);
+    // Non-null fractional tolerance overrides EXACT while scrubbing; always disable it here.
+    source.setScrubbingModeParameters(EXO_SCRUB_PARAMETERS);
+    source.setSeekParameters(SeekParameters.EXACT);
+    if (!active
+        || getWindowVisibility() != VISIBLE
+        || (source.getPlaybackState() == Player.STATE_READY
+            && source.getCurrentPosition() == target)) {
+      // Media3 may treat an unchanged position as a no-op with no new frame callback.
+      if (active) playRequested = source.getPlayWhenReady();
+      source.seekTo(target);
+      source.setScrubbingModeEnabled(false);
+      applyPlayback();
+      return;
+    }
+    ExoExactHold hold =
+        new ExoExactHold(
+            source, generation, engineFrameGeneration, target * 1000, lastRenderedFrameSequence);
+    exoExactHold = hold;
+    source.setVolume(0);
+    source.setScrubbingModeEnabled(true);
+    source.seekTo(target);
+    source
+        .createMessage(
+            (type, payload) -> {
+              if (exoExactHold != hold || engineFrameGeneration != hold.frameToken) return;
+              hold.armed = true;
+              maybeFinishExoHoldOnPlaybackThread(hold);
+              // READY may precede this message, and an audio tail may have no video callback.
+              main.post(() -> finishExoHoldIfReady(hold));
+            })
+        .send();
+    // Timeout releases only the optimization; it never acknowledges accurate frame delivery.
+    exoExactTimeout = () -> finishExoExactHold(hold);
+    main.postDelayed(exoExactTimeout, 2000);
+  }
+
+  private void maybeFinishExoHoldOnPlaybackThread(ExoExactHold hold) {
+    if (exoExactHold != hold
+        || engineFrameGeneration != hold.frameToken
+        || !hold.armed
+        || !hold.eligibleFrameSeen
+        || hold.completionPosted) return;
+    hold.completionPosted = true;
+    main.post(() -> finishExoExactHold(hold));
+  }
+
+  private void finishExoHoldIfReady(ExoExactHold hold) {
+    if (exoExactHold != hold
+        || exo != hold.source
+        || generation != hold.pageToken
+        || engineFrameGeneration != hold.frameToken
+        || !hold.armed) return;
+    int state = hold.source.getPlaybackState();
+    // Media3 masks READY to BUFFERING on seek submission. After the playback-thread command
+    // barrier, READY/ENDED can safely release this optimization even without another video frame.
+    // Neither state proves target-frame accuracy; this never changes the requested exact target.
+    if (state == Player.STATE_READY || state == Player.STATE_ENDED) finishExoExactHold(hold);
+  }
+
+  private void checkExoEndedAfterCommands(long pageToken, ExoPlayer source) {
+    if (generation != pageToken
+        || exo != source
+        || exoExactHold != null
+        || source.getPlaybackState() != Player.STATE_ENDED) return;
+    // Ending with AUDIO temporarily disabled is not necessarily the end of the complete media.
+    // Recheck after queued track restoration and seek commands, never inside their earlier event.
+    source
+        .createMessage(
+            (type, payload) ->
+                main.post(
+                    () -> {
+                      if (generation != pageToken
+                          || exo != source
+                          || exoExactHold != null
+                          || source.getPlaybackState() != Player.STATE_ENDED
+                          || !active
+                          || !playRequested
+                          || ended
+                          || scrubbing) return;
+                      ended = true;
+                      listener.onEnded(VideoPage.this);
+                    }))
+        .send();
+  }
+
+  private void finishExoExactHold(ExoExactHold hold) {
+    if (exoExactHold != hold
+        || exo != hold.source
+        || generation != hold.pageToken
+        || engineFrameGeneration != hold.frameToken) return;
+    // Audio-focus and noisy events can revoke playWhenReady while suppression is active.
+    playRequested = hold.source.getPlayWhenReady();
+    cancelExoExactHold(true);
+    applyPlayback();
+    syncExoOutputProbe();
+    listener.onChanged(this);
+    checkExoEndedAfterCommands(hold.pageToken, hold.source);
+  }
+
+  private void cancelExoExactHold(boolean releaseSuppression) {
+    ExoExactHold hold = exoExactHold;
+    exoExactHold = null;
+    if (exoExactTimeout != null) main.removeCallbacks(exoExactTimeout);
+    exoExactTimeout = null;
+    if (releaseSuppression && hold != null && exo == hold.source) {
+      exo.setVolume(0);
+      exo.setSeekParameters(SeekParameters.EXACT);
+      exo.setScrubbingModeEnabled(false);
+    }
   }
 
   /** Caller owns the result. Null means no confirmed new frame is available yet. */
@@ -1364,6 +1719,7 @@ final class VideoPage extends FrameLayout {
   }
 
   private void clearScrubState() {
+    cancelExoExactHold(true);
     main.removeCallbacks(dispatchScrub);
     if (nativeSurfaceFrames != null) nativeSurfaceFrames.endPreview();
     scrubPending = false;
@@ -1426,7 +1782,7 @@ final class VideoPage extends FrameLayout {
     if (length > 0) at = Math.min(at, Math.max(0, length - 1));
     recordSeekIntent(at);
     ended = false;
-    if (exo != null) exo.seekTo(at);
+    if (exo != null) submitExoExactSeek(at);
     else if (vlc != null) {
       submitNativeSeek(at, false);
     } else if (item != null) {
@@ -1468,7 +1824,7 @@ final class VideoPage extends FrameLayout {
     rememberVlcFailureOnExoFrame = false;
     rememberSoftwareFailureOnHardwareFrame = false;
     triedNativeHardware = triedNativeSoftware = nativeSoftware = false;
-    triedExo = triedVlc = false;
+    triedExo = triedExoHardware = triedVlc = false;
     active = playRequested = audible = false;
     nativeDucked = false;
     firstFrameReady = failed = buffering = ended = false;
@@ -1484,6 +1840,8 @@ final class VideoPage extends FrameLayout {
   }
 
   private void releaseEngine() {
+    stopExoOutputProbe();
+    resetExoCodecState();
     resetNativeSeekQueue();
     main.removeCallbacks(nativeHealthProbe);
     nativeHealthScheduled = false;

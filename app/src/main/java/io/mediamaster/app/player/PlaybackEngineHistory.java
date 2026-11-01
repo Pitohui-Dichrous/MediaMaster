@@ -17,7 +17,7 @@ import org.json.JSONObject;
 final class PlaybackEngineHistory {
   private static final int MAX_ENTRIES = 64;
   private static final String VERSION =
-      "native-preferences-v3/media3-1.8.0/libvlc-3.7.7/sdk-" + Build.VERSION.SDK_INT;
+      "adaptive-seek-v4/media3-1.11.1/libvlc-3.7.7/sdk-" + Build.VERSION.SDK_INT;
   private static PlaybackEngineHistory instance;
   private final SharedPreferences preferences;
   private final LinkedHashMap<String, SeekEnginePolicy> entries =

@@ -3,14 +3,14 @@ MediaMaster / 映序
 AndroidX Media3, RecyclerView, SwipeRefreshLayout and AndroidX test libraries
 Copyright The Android Open Source Project
 License: Apache License, Version 2.0
-Source: https://github.com/androidx/media (Media3 1.8.0)
+Source: https://github.com/androidx/media (Media3 1.11.1)
 Source: https://android.googlesource.com/platform/frameworks/support/
 License text: https://www.apache.org/licenses/LICENSE-2.0.txt
 
-LibVLC Android 3.6.5
+LibVLC Android 3.7.7
 Copyright VideoLAN and VLC authors
 License: GNU Lesser General Public License, version 2.1 or later
-Unmodified binary: org.videolan.android:libvlc-all:3.6.5
+Unmodified binary: org.videolan.android:libvlc-all:3.7.7
 Android bindings and build scripts: https://code.videolan.org/videolan/libvlcjni
 VLC source: https://code.videolan.org/videolan/vlc
 Published corresponding sources/build information: https://code.videolan.org/videolan/libvlcjni/-/tags

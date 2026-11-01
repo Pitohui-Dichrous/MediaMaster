@@ -19,7 +19,7 @@ public class NativeDecoderPolicyTest {
   }
 
   @Test
-  public void defaultTriesCommonEightBitStreamsThroughFullHdSixtyInEitherOrientation() {
+  public void defaultNativeFallbackAdmitsCommonStreamsThroughFullHdSixtyInEitherOrientation() {
     String[] codecs = {
       "video/avc",
       "video/hevc",
@@ -115,7 +115,7 @@ public class NativeDecoderPolicyTest {
   }
 
   @Test
-  public void explicitNativePreferencesCannotBeBypassedByOldCompatibleEngineHistory() {
+  public void explicitPreferencesResolveBeforeOldCompatibleEngineHistory() {
     assertFalse(NativeDecoderPolicy.prefersNativeBeforeHistory(NativeDecoderPolicy.AUTO));
     assertTrue(NativeDecoderPolicy.prefersNativeBeforeHistory(NativeDecoderPolicy.SOFTWARE));
     assertTrue(NativeDecoderPolicy.prefersNativeBeforeHistory(NativeDecoderPolicy.HARDWARE));
@@ -155,6 +155,73 @@ public class NativeDecoderPolicyTest {
 
   private static NativeDecoderPolicy.Metadata longGop(int width, int height, double fps, long gap) {
     return new NativeDecoderPolicy.Metadata("video/avc", width, height, fps, 8, false, gap);
+  }
+
+  @Test
+  public void defaultCanChooseHardwareSeekingEvenWhenNativeFallbackWouldUseSoftware() {
+    NativeDecoderPolicy.Metadata video = longGop(1920, 1080, 60, 10000);
+    assertTrue(automatic(video));
+    for (boolean software : new boolean[] {true, false}) {
+      assertTrue(
+          NativeDecoderPolicy.useMedia3HardwareForLongGop(
+              NativeDecoderPolicy.AUTO,
+              PlaybackEngineChoice.AUTO,
+              software,
+              NativeDecoderPolicy.demandingLongGop(video)));
+    }
+  }
+
+  @Test
+  public void explicitSoftwareNeverEntersTheHardwareSeekRoute() {
+    for (boolean software : new boolean[] {true, false}) {
+      assertFalse(
+          NativeDecoderPolicy.useMedia3HardwareForLongGop(
+              NativeDecoderPolicy.SOFTWARE, PlaybackEngineChoice.AUTO, software, true));
+    }
+  }
+
+  @Test
+  public void hardwarePreferenceRetainsItsResolvedHardwareAdmission() {
+    assertTrue(
+        NativeDecoderPolicy.useMedia3HardwareForLongGop(
+            NativeDecoderPolicy.HARDWARE, PlaybackEngineChoice.AUTO, false, true));
+    assertFalse(
+        NativeDecoderPolicy.useMedia3HardwareForLongGop(
+            NativeDecoderPolicy.HARDWARE, PlaybackEngineChoice.AUTO, true, true));
+  }
+
+  @Test
+  public void unknownMediaAndExplicitEngineChoicesKeepTheirExistingRoute() {
+    for (int mode : new int[] {NativeDecoderPolicy.AUTO, NativeDecoderPolicy.HARDWARE}) {
+      assertFalse(
+          NativeDecoderPolicy.useMedia3HardwareForLongGop(
+              mode, PlaybackEngineChoice.AUTO, false, NativeDecoderPolicy.demandingLongGop(null)));
+      assertFalse(
+          NativeDecoderPolicy.useMedia3HardwareForLongGop(
+              mode,
+              PlaybackEngineChoice.AUTO,
+              true,
+              NativeDecoderPolicy.demandingLongGop(longGop(1920, 1080, 60, 3999))));
+      for (int engine : new int[] {PlaybackEngineChoice.SYSTEM, PlaybackEngineChoice.VLC, -1, 3}) {
+        assertFalse(NativeDecoderPolicy.useMedia3HardwareForLongGop(mode, engine, false, true));
+      }
+    }
+  }
+
+  @Test
+  public void actualHardwareAttemptFailureReturnsToTheCapturedNativeChoice() {
+    assertTrue(
+        NativeDecoderPolicy.softwareAfterMedia3HardwareFailure(NativeDecoderPolicy.AUTO, true));
+    assertFalse(
+        NativeDecoderPolicy.softwareAfterMedia3HardwareFailure(NativeDecoderPolicy.AUTO, false));
+    for (boolean software : new boolean[] {true, false}) {
+      assertFalse(
+          NativeDecoderPolicy.softwareAfterMedia3HardwareFailure(
+              NativeDecoderPolicy.HARDWARE, software));
+      assertTrue(
+          NativeDecoderPolicy.softwareAfterMedia3HardwareFailure(
+              NativeDecoderPolicy.SOFTWARE, software));
+    }
   }
 
   @Test

@@ -175,7 +175,10 @@ public final class SustainedSeekStressTest {
     ArrayList<Signature> reference = new ArrayList<>();
     ArrayList<Tap> attemptedTaps = new ArrayList<>();
     long origin = 0;
+    ScopedPlaybackHistory history = null;
     try {
+      history = onMain(() -> ScopedPlaybackHistory.open(context), 2000);
+      result.put("engineHistoryIsolated", true);
       automation.grantRuntimePermission(
           context.getPackageName(),
           Build.VERSION.SDK_INT >= 33
@@ -500,73 +503,100 @@ public final class SustainedSeekStressTest {
       if (error instanceof Error) throw (Error) error;
       throw new RuntimeException(error);
     } finally {
-      measuringBurst = false;
-      stop.set(true);
-      if (sender != null) sender.join(2000);
-      if (taps.length() == 0) {
-        for (Tap tap : attemptedTaps) taps.put(tap.json(origin));
-      }
-      if (!attemptedTaps.isEmpty())
-        result.put("cadence", cadence(attemptedTaps, hz, origin, input.equals("physical")));
-      synchronized (surfaceTransitions) {
-        JSONArray transitions = new JSONArray();
-        for (JSONObject transition : surfaceTransitions) transitions.put(transition);
-        result.put("surfaceTransitions", transitions);
-      }
-      result.put("referenceInvalidatedByEngineReplacement", measuredReferenceInvalidated);
       try {
-        result.put("lastDiagnosticState", snapshot(500));
-      } catch (Exception error) {
-        result.put("lastDiagnosticStateError", error.getClass().getSimpleName());
-      }
-      SharedPreferences.Editor restore = preferences.edit();
-      for (int i = 0; i < keys.length; i++) {
-        if (present[i]) restore.putInt(keys[i], saved[i]);
-        else restore.remove(keys[i]);
-      }
-      restore.commit();
-      if (activity != null)
-        main.post(
-            () -> {
-              if (originalWindowCallback != null)
-                activity.getWindow().setCallback(originalWindowCallback);
-              activity.finish();
-            });
-      // Observe release after teardown without waiting indefinitely for a wedged native input.
-      // A nonzero bounded count at this deadline remains diagnostic, not proof of a leak.
-      JSONObject retirement = new JSONObject();
-      JSONArray retirementTimeline = new JSONArray();
-      retirement.put("samples", retirementTimeline).put("observationLimitMs", 2000);
-      long retirementStarted = SystemClock.uptimeMillis();
-      while (SystemClock.uptimeMillis() - retirementStarted < 2000) {
-        JSONObject sample;
-        try {
-          sample = retirementDiagnostics();
-        } catch (Exception unavailable) {
-          sample =
-              new JSONObject()
-                  .put("available", false)
-                  .put("errorType", unavailable.getClass().getSimpleName());
+        measuringBurst = false;
+        stop.set(true);
+        if (sender != null) sender.join(2000);
+        if (taps.length() == 0) {
+          for (Tap tap : attemptedTaps) taps.put(tap.json(origin));
         }
-        sample.put("afterFinishRequestMs", SystemClock.uptimeMillis() - retirementStarted);
-        boolean destroyed = false;
-        try {
-          destroyed = activity == null || onMain(activity::isDestroyed, 200);
-          sample.put("activityDestroyed", destroyed);
-        } catch (Exception stateUnavailable) {
-          sample.put("activityStateError", stateUnavailable.getClass().getSimpleName());
+        if (!attemptedTaps.isEmpty())
+          result.put("cadence", cadence(attemptedTaps, hz, origin, input.equals("physical")));
+        synchronized (surfaceTransitions) {
+          JSONArray transitions = new JSONArray();
+          for (JSONObject transition : surfaceTransitions) transitions.put(transition);
+          result.put("surfaceTransitions", transitions);
         }
-        retirementTimeline.put(sample);
-        if (!sample.optBoolean("available", false)
-            || destroyed && sample.optInt("ownedCount", -1) == 0) break;
-        SystemClock.sleep(100);
-      }
-      result.put("retirementAfterTeardown", retirement);
-      if (copyThread != null) copyThread.quitSafely();
-      try (OutputStreamWriter writer =
-          new OutputStreamWriter(
-              new FileOutputStream(new File(output, "results.json")), StandardCharsets.UTF_8)) {
-        writer.write(result.toString(2));
+        result.put("referenceInvalidatedByEngineReplacement", measuredReferenceInvalidated);
+        try {
+          result.put("lastDiagnosticState", snapshot(500));
+        } catch (Exception error) {
+          result.put("lastDiagnosticStateError", error.getClass().getSimpleName());
+        }
+      } finally {
+        try {
+          try {
+            SharedPreferences.Editor restore = preferences.edit();
+            for (int i = 0; i < keys.length; i++) {
+              if (present[i]) restore.putInt(keys[i], saved[i]);
+              else restore.remove(keys[i]);
+            }
+            result.put("preferencesRestored", restore.commit());
+          } finally {
+            if (activity != null)
+              onMain(
+                  () -> {
+                    try {
+                      if (originalWindowCallback != null)
+                        activity.getWindow().setCallback(originalWindowCallback);
+                    } finally {
+                      activity.finish();
+                    }
+                    return null;
+                  },
+                  2000);
+          }
+          // Observe release after teardown without waiting indefinitely for a wedged native input.
+          // A nonzero bounded count at this deadline remains diagnostic, not proof of a leak.
+          JSONObject retirement = new JSONObject();
+          JSONArray retirementTimeline = new JSONArray();
+          retirement.put("samples", retirementTimeline).put("observationLimitMs", 2000);
+          long retirementStarted = SystemClock.uptimeMillis();
+          while (SystemClock.uptimeMillis() - retirementStarted < 2000) {
+            JSONObject sample;
+            try {
+              sample = retirementDiagnostics();
+            } catch (Exception unavailable) {
+              sample =
+                  new JSONObject()
+                      .put("available", false)
+                      .put("errorType", unavailable.getClass().getSimpleName());
+            }
+            sample.put("afterFinishRequestMs", SystemClock.uptimeMillis() - retirementStarted);
+            boolean destroyed = false;
+            try {
+              destroyed = activity == null || onMain(activity::isDestroyed, 200);
+              sample.put("activityDestroyed", destroyed);
+            } catch (Exception stateUnavailable) {
+              sample.put("activityStateError", stateUnavailable.getClass().getSimpleName());
+            }
+            retirementTimeline.put(sample);
+            if (!sample.optBoolean("available", false)
+                || destroyed && sample.optInt("ownedCount", -1) == 0) break;
+            SystemClock.sleep(100);
+          }
+          result.put("retirementAfterTeardown", retirement);
+        } finally {
+          try {
+            if (history != null) {
+              history.closeAfterActivityDestroyed(activity);
+              result.put("engineHistoryRestored", true);
+            }
+          } catch (Exception cleanupFailure) {
+            result
+                .put("completed", false)
+                .put("historyCleanupErrorType", cleanupFailure.getClass().getSimpleName());
+            throw cleanupFailure;
+          } finally {
+            if (copyThread != null) copyThread.quitSafely();
+            try (OutputStreamWriter writer =
+                new OutputStreamWriter(
+                    new FileOutputStream(new File(output, "results.json")),
+                    StandardCharsets.UTF_8)) {
+              writer.write(result.toString(2));
+            }
+          }
+        }
       }
     }
   }
@@ -1153,7 +1183,27 @@ public final class SustainedSeekStressTest {
           if (page.exo != null)
             state
                 .put("media3PlayerIdentity", System.identityHashCode(page.exo))
-                .put("media3PlaybackState", page.exo.getPlaybackState());
+                .put("media3PlaybackState", page.exo.getPlaybackState())
+                .put("media3Playing", page.exo.isPlaying())
+                .put("media3SuppressionReason", page.exo.getPlaybackSuppressionReason())
+                .put("media3Scrubbing", page.exo.isScrubbingModeEnabled())
+                .put("media3PreciseHold", readOptionalObject(page, "exoExactHold") != null)
+                .put("media3AudioGain", page.exo.getVolume())
+                .put(
+                    "media3LowLatencyConfigured",
+                    readOptionalObject(page, "exoLowLatencyConfigured"))
+                .put("media3HardwareConfigured", readOptionalObject(page, "exoHardwareConfigured"))
+                .put(
+                    "media3AdvertisedLowLatency",
+                    readOptionalObject(page, "exoAdvertisedLowLatency"))
+                .put("media3SoftwareConfigured", readOptionalObject(page, "exoSoftwareConfigured"))
+                .put(
+                    "media3AudioReuseAdmissions",
+                    readOptionalObject(page, "exoAudioReuseAdmissions"))
+                .put("media3AudioCodecReuses", readOptionalObject(page, "exoAudioCodecReuses"))
+                .put(
+                    "media3AudioKeyframeResets",
+                    readOptionalObject(page, "exoAudioKeyframeResets"));
           if (page.vlc != null) {
             state
                 .put("nativePlayerIdentity", System.identityHashCode(page.vlc))

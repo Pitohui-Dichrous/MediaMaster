@@ -26,6 +26,7 @@ import java.util.function.Consumer;
 final class NativeDecoderSelector {
   private static final int MAX_ENTRIES = 128;
   private static final long DECISION_TIMEOUT_MS = 150;
+  private static final long INDEX_PROBE_BUDGET_MS = 150;
   private static final Handler MAIN = new Handler(Looper.getMainLooper());
   private static final NativeDecoderPolicy.Metadata UNKNOWN =
       new NativeDecoderPolicy.Metadata(null, 0, 0, 0, -1, false);
@@ -244,7 +245,6 @@ final class NativeDecoderSelector {
 
   private static NativeDecoderPolicy.Metadata readHeaders(Context context, VideoItem item) {
     MediaExtractor extractor = null;
-    long probeDeadline = SystemClock.uptimeMillis() + DECISION_TIMEOUT_MS;
     try {
       Uri uri = item.uri.isEmpty() ? Uri.fromFile(new File(item.path)) : Uri.parse(item.uri);
       if (!"file".equals(uri.getScheme()) && !"content".equals(uri.getScheme())) return UNKNOWN;
@@ -274,7 +274,10 @@ final class NativeDecoderSelector {
           frameRate(video),
           video.containsKey(MediaFormat.KEY_PROFILE) ? integer(video, MediaFormat.KEY_PROFILE) : -1,
           hdr,
-          syncGapMs(extractor, videoTrack, video, probeDeadline));
+          // Slow header I/O must not silently consume the separate index-inspection budget.
+          // The original UI decision deadline and once-only callback remain unchanged.
+          syncGapMs(
+              extractor, videoTrack, video, SystemClock.uptimeMillis() + INDEX_PROBE_BUDGET_MS));
     } catch (Exception unreadable) {
       return UNKNOWN;
     } finally {

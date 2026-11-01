@@ -76,6 +76,21 @@ final class NativeDecoderPolicy {
     return normalizeMode(mode) == AUTO;
   }
 
+  /** A bounded initial engine choice; this is not a native exact-seek latency measurement. */
+  static boolean useMedia3HardwareForLongGop(
+      int mode, int engineChoice, boolean resolvedSoftware, boolean knownDemandingLongGop) {
+    mode = normalizeMode(mode);
+    return engineChoice == PlaybackEngineChoice.AUTO
+        && knownDemandingLongGop
+        && (mode == AUTO || (mode == HARDWARE && !resolvedSoftware));
+  }
+
+  /** Capture this result for the attempt; an error must not re-run a changing resource decision. */
+  static boolean softwareAfterMedia3HardwareFailure(int mode, boolean resolvedSoftware) {
+    mode = normalizeMode(mode);
+    return mode == SOFTWARE || (mode == AUTO && resolvedSoftware);
+  }
+
   static boolean hasLongSyncGap(Metadata metadata) {
     return metadata != null && metadata.syncGapMs >= 4000;
   }
@@ -101,7 +116,7 @@ final class NativeDecoderPolicy {
     return hasMemoryAndThermalHeadroom(metadata, resources, 64 * MIB, 64) ? 8 : 0;
   }
 
-  /** Native preference is honored before history chooses a different engine. */
+  /** Resolve explicit decoder preferences before per-file engine compatibility history. */
   static boolean prefersNativeBeforeHistory(int mode) {
     return normalizeMode(mode) != AUTO;
   }

@@ -12,13 +12,14 @@ if (officialRelease && !previewInstall) {
 android {
     namespace 'io.mediamaster.app'
     compileSdk 36
+    ndkVersion '27.3.13750724'
     defaultConfig {
         applicationId previewInstall ? 'io.mediamaster.app.preview' : 'io.mediamaster.app'
         resValue 'string', 'app_name', '映序'
         minSdk 26
         targetSdk 35
-        versionCode 31
-        versionName '2.5.0'
+        versionCode 32
+        versionName '2.5.1-dev.1'
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
     }
     compileOptions {
@@ -37,7 +38,11 @@ android {
     }
     buildTypes {
         release {
-            minifyEnabled false
+            minifyEnabled true
+            shrinkResources true
+            // Artwork is precompressed losslessly; avoid a second encoder changing sampled pixels.
+            crunchPngs false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
             signingConfig !previewInstall && releasePropertiesFile.exists() ? signingConfigs.localRelease : signingConfigs.debug
         }
     }
@@ -59,10 +64,12 @@ android {
 dependencies {
     implementation 'androidx.core:core:1.15.0'
     implementation 'androidx.recyclerview:recyclerview:1.3.2'
-    implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'
     implementation 'androidx.media3:media3-exoplayer:1.11.1'
     implementation 'androidx.media3:media3-ui:1.11.1'
-    implementation 'org.videolan.android:libvlc-all:3.7.7'
+    implementation('org.videolan.android:libvlc-all:3.7.7') {
+        // The app uses its own pull-to-refresh view; LibVLC does not reference this legacy UI module.
+        exclude group: 'androidx.swiperefreshlayout', module: 'swiperefreshlayout'
+    }
     testImplementation 'junit:junit:4.13.2'
     androidTestImplementation 'androidx.test:runner:1.6.2'
     androidTestImplementation 'androidx.test:rules:1.6.1'

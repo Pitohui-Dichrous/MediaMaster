@@ -1,6 +1,6 @@
 MediaMaster / 映序
 
-AndroidX Media3, RecyclerView, SwipeRefreshLayout and AndroidX test libraries
+AndroidX Media3, RecyclerView and AndroidX test libraries
 Copyright The Android Open Source Project
 License: Apache License, Version 2.0
 Source: https://github.com/androidx/media (Media3 1.11.1)
@@ -10,12 +10,12 @@ License text: https://www.apache.org/licenses/LICENSE-2.0.txt
 LibVLC Android 3.7.7
 Copyright VideoLAN and VLC authors
 License: GNU Lesser General Public License, version 2.1 or later
-Unmodified binary: org.videolan.android:libvlc-all:3.7.7
+Upstream binary dependency: org.videolan.android:libvlc-all:3.7.7
 Android bindings and build scripts: https://code.videolan.org/videolan/libvlcjni
 VLC source: https://code.videolan.org/videolan/vlc
 Published corresponding sources/build information: https://code.videolan.org/videolan/libvlcjni/-/tags
 License text: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt
-LibVLC is dynamically linked through its provided Android shared libraries. No modifications to LibVLC were made. Application sources and build configuration accompany this delivery to allow replacement/relinking with a compatible library. VideoLAN components include additional third-party libraries under their respective licenses; see the upstream source distribution.
+LibVLC is dynamically linked through its provided Android shared libraries. Its runtime code and decoder modules are unchanged; the Android build strips non-runtime debug/symbol sections. Application sources and build configuration accompany this delivery to allow replacement/relinking with a compatible library. VideoLAN components include additional third-party libraries under their respective licenses; see the upstream source distribution.
 
 JUnit 4.13.2 (test-only)
 Eclipse Public License 1.0
@@ -48,17 +48,16 @@ filled icon, so the rotation provides a consistent genuine outline state.
 Source: https://github.com/google/material-design-icons/blob/master/src/action/thumb_down_off_alt/materialiconsround/24px.svg
 
 Launcher icon
-The launcher foreground now uses the same Google Material Icons Round play_arrow
-vector path listed above, rendered natively by Android at each display density.
-The adaptive-icon white background is a native Android color. No low-resolution
-Icons8 PNG or paid-size asset is included in this version.
-Source: https://github.com/google/material-design-icons/blob/master/src/av/play_arrow/materialiconsround/24px.svg
-License: Apache License, Version 2.0 (full text: Apache-2.0.txt)
+The green long-shadow play artwork was supplied by the user and is bundled as
+drawable-nodpi/ic_launcher_artwork.png. Its existing pixels, transparency and
+proportions are preserved; only the PNG IDAT stream is recompressed losslessly.
+The application makes no independent claim to this artwork's rights.
 
 Character seek-bar artwork supplied by the user
 Original names: 1.png, 2.png (1254 x 1254, RGBA PNG)
 Bundled as drawable-nodpi/scrubber_forward.png and scrubber_backward.png.
-The original PNG file bytes and transparent, irregular outlines are preserved.
+Pixels, rendering metadata and transparent, irregular outlines are preserved;
+the PNG IDAT streams are recompressed losslessly.
 Android Canvas trims transparent margins, normalizes visual area, and mirrors
 2.png only at render time. No reconstructed or AI-generated character art is used.
 These user-provided images are included for the user's personal application;
@@ -66,8 +65,9 @@ the application makes no independent claim to their artwork rights.
 
 Double-tap like artwork supplied by the user
 Original name: like.png (1086 x 1448, RGBA PNG)
-Bundled as drawable-nodpi/like_effect.png, byte-for-byte unchanged.
+Bundled as drawable-nodpi/like_effect.png with lossless PNG IDAT recompression.
 The original transparent margins, pixel geometry, colors and 3:4 proportions are
-preserved. Android samples the bitmap for display and animates its view transform.
+preserved, including rendering metadata. Android samples the bitmap for display
+and animates its view transform.
 These user-provided images are included for the user's personal application;
 the application makes no independent claim to their artwork rights.

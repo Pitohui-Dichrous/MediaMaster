@@ -8,6 +8,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1 assembleRelease -Pp
 
 `officialRelease` 关闭全架构包，仅生成 `app-arm64-v8a-release.apk`、`app-armeabi-v7a-release.apk`。两个版本使用相同版本号、包名和签名。省略该选项时仍可生成开发用的全部架构包；构建目录可能保留早先产物，发布时不得直接使用通配符上传。
 
+Release 已启用 R8 和资源精简，并使用 NDK r27d 剥离非运行时符号。交付前检查 JNI 保留契约、原生运行时内容及实际混淆包的播放行为；保存本次 mapping 文件用于错误堆栈还原。具体命令与测量边界见 [安装体积优化](../docs/INSTALLED_SIZE_OPTIMIZATION.md)。
+
 完成必要验证、合并到 `main` 并提交后，准备只描述本次已执行检查的 UTF-8 验证记录，再使用 Python 3.11 或更新版本执行打包脚本。以下变量由发布者填写，不使用历史结果替代本次证据：
 
 ```powershell

@@ -957,7 +957,7 @@ public class MainActivity extends Activity {
   }
 
   private void settings() {
-    String[] choices = {"外观", "灵敏度", "扫描设置", "使用说明", "关于映序"};
+    String[] choices = {"外观", "灵敏度", "解码", "扫描设置", "使用说明", "关于映序"};
     new AlertDialog.Builder(this)
         .setTitle("设置")
         .setItems(
@@ -982,8 +982,9 @@ public class MainActivity extends Activity {
                         })
                     .setNegativeButton("取消", null)
                     .show();
-              } else if (b == 2) sources();
-              else if (b == 3)
+              } else if (b == 2) decoder();
+              else if (b == 3) sources();
+              else if (b == 4)
                 new AlertDialog.Builder(this)
                     .setTitle("使用说明")
                     .setMessage(
@@ -1023,6 +1024,26 @@ public class MainActivity extends Activity {
                     .show();
             })
         .setNegativeButton("关闭", null)
+        .show();
+  }
+
+  private void decoder() {
+    int current = getSharedPreferences("player", 0).getInt("native_decoder_mode", 0);
+    int selected = current == 2 ? 0 : current == 1 ? 2 : 1;
+    int[] modes = {2, 0, 1};
+    new AlertDialog.Builder(this)
+        .setTitle("解码")
+        .setSingleChoiceItems(
+            new String[] {"优先软解", "默认解码", "优先硬解"},
+            selected,
+            (dialog, choice) -> {
+              getSharedPreferences("player", 0)
+                  .edit()
+                  .putInt("native_decoder_mode", modes[choice])
+                  .apply();
+              dialog.dismiss();
+            })
+        .setNegativeButton("取消", null)
         .show();
   }
 

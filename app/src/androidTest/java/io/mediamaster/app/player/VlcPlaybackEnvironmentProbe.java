@@ -153,7 +153,6 @@ public final class VlcPlaybackEnvironmentProbe {
                 .put("barcodeFrame", code.frame)
                 .put("uptimeMs", SystemClock.uptimeMillis())
                 .put("sdk", Build.VERSION.SDK_INT)
-                .put("model", "reference-device")
                 .put("note", "Playback controls only; no decoder conclusion or preference changes")
                 .put("hierarchy", hierarchy(root));
         try (FileOutputStream png = new FileOutputStream(new File(output, "controls.png"))) {

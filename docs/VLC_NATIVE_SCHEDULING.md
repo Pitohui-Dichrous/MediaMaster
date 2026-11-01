@@ -43,7 +43,7 @@ MP4的 [Seek](https://github.com/videolan/vlc/blob/84177b2273abc5c4300234e6e18b5
 
 ## 真机解码路径与显示承载
 
-reference-device、Android 14上的调查改变了原先只比较“Media3与LibVLC”的判断：被调查VLC在指定H.264样片中实际使用了avcodec软件解码路径。进程线程名出现 `av:h264:df1` 至 `df5`，对应 [FFmpeg帧线程命名](https://github.com/FFmpeg/FFmpeg/blob/n8.1.2/libavcodec/pthread_frame.c#L164-L172)。证据为 `.tools/qa-2.2.0-test.2/vlc-thread-names-generated.txt` 与 `video-info-v1/selection.json`；后者核对了应用、文件名及1080p/25fps轨道。`scoped-codec-metrics.txt` 中映序使用Qualcomm硬件解码器的记录是交叉证据，不单凭“没有VLC的MediaCodec记录”推断软解。
+一款Android 14实机上的调查改变了原先只比较“Media3与LibVLC”的判断：被调查VLC在指定H.264样片中实际使用了avcodec软件解码路径。进程线程名出现 `av:h264:df1` 至 `df5`，对应 [FFmpeg帧线程命名](https://github.com/FFmpeg/FFmpeg/blob/n8.1.2/libavcodec/pthread_frame.c#L164-L172)。证据为 `.tools/qa-2.2.0-test.2/vlc-thread-names-generated.txt` 与 `video-info-v1/selection.json`；后者核对了应用、文件名及1080p/25fps轨道。`scoped-codec-metrics.txt` 中映序使用设备硬件解码器的记录是交叉证据，不单凭“没有VLC的MediaCodec记录”推断软解。
 
 这不证明VLC的通用默认设置是软解。安装包 `setMediaOptions` 的反编译 Evidence `ev_15b9a884a4b1b73d397f8699e133425c5511f0d6be4ed92733d128b600ea969a` 显示设置值、媒体标志与自动路径会共同影响选择；未读取该手机的私有设置，不能确定这次进入软解的初始原因。
 
@@ -61,11 +61,13 @@ avcodec还会按当前输入包的preroll标志决定是否输出，而FFmpeg帧
 
 不采用固定时间补偿或盲目 `nextFrame()`：包重排、帧率及目标位置不同会造成偏移变化；Java层 `getTime()` 是播放时间信息，并非表面当前画面的PTS。真正按目标PTS过滤需要原生层支持，当前性能结果必须同时保留落点误差。
 
-## 自动选择的保守范围
+## 历史自动选择的保守范围（test.2 / test.3）
+
+以下保留历史版本的选择规则；test.4 的用户选项见 [解码选择](DECODER_SETTINGS.md)。
 
 `NativeDecoderSelector` 只对请求播放或相邻预载的文件读取媒体头，不扫描全库、不启动对照解码器。单后台工作线程、最多8项等待任务和128项内存缓存限制资源占用；150ms内没有结果即采用硬解优先，迟到结果只影响以后打开。缓存键含文件身份、修改时间、大小及系统指纹。
 
-自动软解仅覆盖已验证的reference-device/API34：明确的8-bit AVC配置、没有HDR标记、长边不超过1920且短边不超过1080。2.2.0-test.2原先限制为不超过30fps；2.2.0-test.3将已知帧率上限扩展到60fps，同时要求 `宽 × 高 × 帧率 ≤ 1920 × 1080 × 30`（每秒62,208,000像素）。720p60符合预算，1080p60不符合。未知轨道信息、高规格视频和其他设备保留硬解优先。像素率不包含全部GOP及参考帧成本；这是有证据边界的候选策略，不是逐文件测出“最快解码器”。60fps样本及连续播放观察见 [持续定位验证](SEEK_STRESS_TEST.md)。
+这两个历史版本的自动软解仅覆盖已验证的一款API34实机：明确的8-bit AVC配置、没有HDR标记、长边不超过1920且短边不超过1080。2.2.0-test.2原先限制为不超过30fps；2.2.0-test.3将已知帧率上限扩展到60fps，同时要求 `宽 × 高 × 帧率 ≤ 1920 × 1080 × 30`（每秒62,208,000像素）。720p60符合预算，1080p60不符合。未知轨道信息、高规格视频及其他设备当时保留硬解优先。像素率不包含全部GOP及参考帧成本；这是有证据边界的历史候选策略，不是逐文件测出“最快解码器”。60fps样本及连续播放观察见 [持续定位验证](SEEK_STRESS_TEST.md)。
 
 软解错误会先尝试原生硬解，再按已有兼容性路径转Media3。连续播放健康检查只在前台当前页、正常1倍速、非定位/缓冲状态采样：两个连续2秒窗口中，丢帧比例超过10%或呈现率低于轨道帧率75%时允许尝试硬解。缺失或完全不变的计数不作为解码器失败证据；它不能检测所有冻结，也不能测量定位精度。只有替代硬解实际产生首帧后，才记录该文件24小时内避开软解；这份记忆与整个LibVLC的失败记忆分开，记录数量有界。`--no-stats` 已移除以允许这些计数可用。
 

@@ -14,6 +14,21 @@ def number(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
+def native_capabilities(value):
+    """Export decoder capabilities only, including when reading older raw artifacts."""
+    if not isinstance(value, dict):
+        return {}
+    result = {}
+    for key in ("nativeSoftware", "nativeSurfacePlayback"):
+        if isinstance(value.get(key), bool):
+            result[key] = value[key]
+    if value.get("surfaceType") in ("SurfaceView", "TextureView"):
+        result["surfaceType"] = value["surfaceType"]
+    if number(value.get("configuredFfmpegThreads")):
+        result["configuredFfmpegThreads"] = value["configuredFfmpegThreads"]
+    return result
+
+
 def interval(record, prefix):
     lower, upper = record.get(prefix + "LowerMs"), record.get(prefix + "UpperMs")
     if lower is None and upper is None:
@@ -151,12 +166,12 @@ def summarize_run(data, artifact):
         else:
             trajectory.append(anchored_trajectory(data, timeline, last["requestedMs"], tolerance, last["downMs"]))
         eligible = 1
-    runtime = data.get("nativeRuntime", {})
+    runtime = native_capabilities(data.get("nativeRuntime"))
     runtime_paths = set()
     for owner in [data] + (records if kind == "isolated" else []):
         for key in ("nativeRuntime", "nativeRuntimeAfter"):
-            value = owner.get(key)
-            if isinstance(value, dict):
+            value = native_capabilities(owner.get(key))
+            if value:
                 runtime_paths.add((value.get("nativeSoftware"), value.get("surfaceType")))
     summary = {
         "run": data.get("run", artifact.parent.name), "artifact": str(artifact),
@@ -165,7 +180,7 @@ def summarize_run(data, artifact):
         "observed_native_paths": [{"native_software": path[0], "surface_type": path[1]}
                                   for path in sorted(runtime_paths, key=str)],
         "native_path_changed": len(runtime_paths) > 1,
-        "model": data.get("model"), "sdk": data.get("sdk"),
+        "sdk": data.get("sdk"),
         "actual_targets_ms": targets, "target_tolerance_ms": tolerance,
         "collection_completed": True, "harness_assertions_passed": data.get("completed") is True,
         "first_picture_change": summarize_intervals(first_jump, eligible),
@@ -184,7 +199,7 @@ def summarize_run(data, artifact):
         summary["target_anchored_consistent_trajectory"] = summarize_intervals(trajectory, eligible)
         summary["paused_accuracy"] = None
     summary["comparison_key"] = {
-        "kind": kind, "state": state, "file": data["file"], "model": data.get("model"),
+        "kind": kind, "state": state, "file": data["file"],
         "sdk": data.get("sdk"), "actual_targets_ms": targets, "target_tolerance_ms": tolerance,
         "protocol": "B2-calibrated-origin400-25fps",
         "paused_minimum_observation_ms": data.get("pausedMinimumObservationMs") if state == "paused" else None,
@@ -229,6 +244,7 @@ def main():
             "Trajectory values require a target-near frame in the suffix; unanchored suffixes remain unobserved.",
             "Burst first change after finalDOWN may belong to an earlier queued request.",
             "Compare actual target sequences, not supplied fractions; matching file names do not independently prove equal file hashes.",
+            "Device identity is omitted. Matching SDK and protocol groups do not establish equal hardware; confirm the same test setup independently.",
             "Excluded interrupted/process-crash collections do not establish a product crash or decoder latency.",
         ],
     }

@@ -119,7 +119,6 @@ public final class OpticalSeekBurstBenchmark {
             .put("file", name)
             .put("state", state)
             .put("sdk", Build.VERSION.SDK_INT)
-            .put("model", "reference-device")
             .put("durationMs", fixture.durationMs)
             .put("protocolDurationMs", SeekTouchCalibration.PROTOCOL_DURATION_MS)
             .put("physicalTouchCalibration", calibrate)

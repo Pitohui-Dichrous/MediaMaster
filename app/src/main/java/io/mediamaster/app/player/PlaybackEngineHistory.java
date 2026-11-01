@@ -17,7 +17,7 @@ import org.json.JSONObject;
 final class PlaybackEngineHistory {
   private static final int MAX_ENTRIES = 64;
   private static final String VERSION =
-      "native-first-v2/media3-1.8.0/libvlc-3.7.7/" + ("api-" + Build.VERSION.SDK_INT);
+      "native-preferences-v3/media3-1.8.0/libvlc-3.7.7/sdk-" + Build.VERSION.SDK_INT;
   private static PlaybackEngineHistory instance;
   private final SharedPreferences preferences;
   private final LinkedHashMap<String, SeekEnginePolicy> entries =
@@ -31,7 +31,18 @@ final class PlaybackEngineHistory {
 
   private PlaybackEngineHistory(Context context) {
     preferences = context.getSharedPreferences("player_engine_history", Context.MODE_PRIVATE);
-    if (!VERSION.equals(preferences.getString("version", ""))) return;
+    if (!VERSION.equals(preferences.getString("version", ""))) {
+      // Replace obsolete identity-bearing policy metadata immediately, without touching playback
+      // preferences. A failed disk write remains dirty so ordinary teardown will retry it.
+      dirty =
+          !preferences
+              .edit()
+              .clear()
+              .putString("version", VERSION)
+              .putString("entries", "[]")
+              .commit();
+      return;
+    }
     try {
       JSONArray rows = new JSONArray(preferences.getString("entries", "[]"));
       for (int i = Math.max(0, rows.length() - MAX_ENTRIES); i < rows.length(); i++) {

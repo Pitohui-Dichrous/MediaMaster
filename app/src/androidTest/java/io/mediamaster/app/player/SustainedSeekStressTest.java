@@ -142,7 +142,7 @@ public final class SustainedSeekStressTest {
             .put("barcodeFps", barcodeFps)
             .put("barcodeFrameCount", barcodeFps == 0 ? JSONObject.NULL : barcodeFrameCount)
             .put("barcodeToleranceMs", barcodeFps == 0 ? JSONObject.NULL : 150)
-            .put("model", "reference-device")
+            .put("sdk", Build.VERSION.SDK_INT)
             .put("timeline", samples)
             .put("taps", taps)
             .put("baseline", baseline)

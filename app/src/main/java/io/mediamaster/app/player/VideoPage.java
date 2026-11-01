@@ -100,6 +100,9 @@ final class VideoPage extends FrameLayout {
   private final NativeSeekQueue nativeSeekQueue = new NativeSeekQueue();
   private final Runnable nativeSeekProbe = this::probeNativeSeek;
   private static final long NATIVE_SEEK_WATCHDOG_MS = 2000;
+  private static final long PREFERRED_SOFTWARE_NO_PROGRESS_MS = 10000;
+  private final NativeDecodeProgress nativeDecodeProgress = new NativeDecodeProgress();
+  private long nextNativeProgressStatsAt;
   private long nativeSeekFrameBaseline, nativeSeekTextureBaseline, nativeSeekDeadline;
   private long nativeSeekSubmittedAt;
   private long nativeSeekClockStepMs = 33;
@@ -107,7 +110,11 @@ final class VideoPage extends FrameLayout {
   private boolean nativeSeekAwaitingPause;
   private boolean scrubbing, scrubPending, triedExo, triedVlc;
   private boolean rememberVlcFailureOnExoFrame;
-  private boolean nativeSoftware, triedNativeHardware, rememberSoftwareFailureOnHardwareFrame;
+  private boolean nativeSoftware,
+      triedNativeHardware,
+      triedNativeSoftware,
+      rememberSoftwareFailureOnHardwareFrame;
+  private int decoderPreference = NativeDecoderPolicy.AUTO;
   private long nativeSelectionRequest;
   // User intent outlives an engine replacement and remains valid while header selection is pending.
   private long explicitSeekSerial, explicitSeekTarget;
@@ -211,6 +218,7 @@ final class VideoPage extends FrameLayout {
     this.single = single;
     this.speed = Math.max(.1f, speed);
     this.foreground = foreground;
+    decoderPreference = NativeDecoderSelector.preference(getContext());
     enginePolicy = engineHistory.forItem(item);
     pendingSeek = Math.max(0, start);
     pendingSeekSet = pendingSeek > 0;
@@ -223,7 +231,8 @@ final class VideoPage extends FrameLayout {
             || (!forceVlc
                 && engineChoice == PlaybackEngineChoice.AUTO
                 && enginePolicy.chooseVlc(System.currentTimeMillis()));
-    if (forceVlc || preferVlc) startVlc(token, pendingSeek);
+    if (NativeDecoderPolicy.prefersNativeBeforeHistory(decoderPreference) || forceVlc || preferVlc)
+      startVlc(token, pendingSeek);
     else startExo(token, pendingSeek);
   }
 
@@ -325,10 +334,8 @@ final class VideoPage extends FrameLayout {
               main.post(
                   () -> {
                     if (current()) {
-                      if (!triedVlc)
-                        startVlc(
-                            token, errorSeekSerial != explicitSeekSerial ? explicitSeekTarget : at);
-                      else fail(token);
+                      compatibleFailed(
+                          token, errorSeekSerial != explicitSeekSerial ? explicitSeekTarget : at);
                     }
                   });
             }
@@ -339,8 +346,7 @@ final class VideoPage extends FrameLayout {
       applyPlayback();
     } catch (RuntimeException error) {
       if (generation == token) {
-        if (!triedVlc) startVlc(token, start);
-        else fail(token);
+        compatibleFailed(token, start);
       }
     }
   }
@@ -350,7 +356,9 @@ final class VideoPage extends FrameLayout {
     long selection = ++nativeSelectionRequest;
     long selectedSeekSerial = explicitSeekSerial;
     boolean avoidSoftware =
-        enginePolicy != null && enginePolicy.shouldAvoidSoftware(System.currentTimeMillis());
+        decoderPreference != NativeDecoderPolicy.SOFTWARE
+            && enginePolicy != null
+            && enginePolicy.shouldAvoidSoftware(System.currentTimeMillis());
     NativeDecoderSelector.resolve(
         getContext(),
         item,
@@ -376,6 +384,7 @@ final class VideoPage extends FrameLayout {
     if (scrubbing) start = scrubTarget;
     triedVlc = true;
     nativeSoftware = software;
+    if (software) triedNativeSoftware = true;
     if (!software) triedNativeHardware = true;
     firstFrameReady = false;
     buffering = true;
@@ -490,7 +499,9 @@ final class VideoPage extends FrameLayout {
 
   private void beginVlcFrameProbe(long token, MediaPlayer source) {
     if (frameProbe != null) main.removeCallbacks(frameProbe);
-    warmupDeadline = SystemClock.uptimeMillis() + 12000;
+    long now = SystemClock.uptimeMillis();
+    warmupDeadline = now + 12000;
+    if (prefersUnthrottledSoftware()) resetNativeDecodeProgress(now);
     frameProbe = () -> probeVlcFrame(token, source);
     main.postDelayed(frameProbe, 30);
   }
@@ -498,6 +509,10 @@ final class VideoPage extends FrameLayout {
   private void probeVlcFrame(long token, MediaPlayer source) {
     if (generation != token || vlc != source || firstFrameReady || failed) return;
     if (nativeSurfacePlayback && getWindowVisibility() != VISIBLE) return;
+    if (prefersUnthrottledSoftware()) {
+      observeNativeDecodeProgress(source, SystemClock.uptimeMillis());
+      warmupDeadline = nativeDecodeProgress.deadline(12000);
+    }
     try {
       applyPendingSeek(source);
       if (nativeSurfacePlayback) {
@@ -650,7 +665,7 @@ final class VideoPage extends FrameLayout {
     syncNativeHealthProbe();
     if (visibility != VISIBLE) main.removeCallbacks(nativeSeekProbe);
     else {
-      nativeSeekDeadline = SystemClock.uptimeMillis() + NATIVE_SEEK_WATCHDOG_MS;
+      armNativeSeekWatchdog(SystemClock.uptimeMillis());
       if (nativeSeekQueue.hasWork()) {
         dispatchNativeSeek();
         main.post(nativeSeekProbe);
@@ -721,7 +736,7 @@ final class VideoPage extends FrameLayout {
     if (request == null) return;
     nativeSeekSubmittedAt = now;
     nativeSeekClockRate = speed;
-    nativeSeekDeadline = now + NATIVE_SEEK_WATCHDOG_MS;
+    armNativeSeekWatchdog(now);
     nativeSeekClockStepMs = 33;
     if (!nativeSoftware) {
       IMedia.VideoTrack track = source.getCurrentVideoTrack();
@@ -752,6 +767,12 @@ final class VideoPage extends FrameLayout {
     if (source == null || failed || !active || getWindowVisibility() != VISIBLE) return;
     if (!firstFrameReady || warmingVlc) return;
     long now = SystemClock.uptimeMillis();
+    if (prefersUnthrottledSoftware()) {
+      observeNativeDecodeProgress(source, now);
+      nativeSeekDeadline = nativeDecodeProgress.deadline(PREFERRED_SOFTWARE_NO_PROGRESS_MS);
+      if (nativeSurfacePlayback && nativeSurfaceFrames != null)
+        nativeSurfaceFrames.observeNextFrame();
+    }
     if (nativeSeekAwaitingPause) {
       if (now >= nativeSeekDeadline)
         vlcFailed(generation, nativeSeekQueue.latestPositionMs(), false);
@@ -812,6 +833,51 @@ final class VideoPage extends FrameLayout {
     nativeSeekQueue.reset();
     nativeSeekAwaitingPause = false;
     nativeSeekDeadline = 0;
+  }
+
+  private boolean prefersUnthrottledSoftware() {
+    return decoderPreference == NativeDecoderPolicy.SOFTWARE && nativeSoftware;
+  }
+
+  private long nativeFrameProgressToken() {
+    return nativeSurfacePlayback && nativeSurfaceFrames != null
+        ? nativeSurfaceFrames.frameSequence()
+        : textureTimestamp(currentTexture());
+  }
+
+  private void resetNativeDecodeProgress(long now) {
+    nativeDecodeProgress.reset(now, nativeFrameProgressToken());
+    nextNativeProgressStatsAt = 0;
+  }
+
+  private void armNativeSeekWatchdog(long now) {
+    nativeSeekDeadline =
+        now
+            + (prefersUnthrottledSoftware()
+                ? PREFERRED_SOFTWARE_NO_PROGRESS_MS
+                : NATIVE_SEEK_WATCHDOG_MS);
+    if (prefersUnthrottledSoftware()) resetNativeDecodeProgress(now);
+  }
+
+  private void observeNativeDecodeProgress(MediaPlayer source, long now) {
+    long decoded = -1, displayed = -1;
+    if (now >= nextNativeProgressStatsAt) {
+      nextNativeProgressStatsAt = now + 250;
+      IMedia media = null;
+      try {
+        media = source.getMedia();
+        IMedia.Stats stats = media == null ? null : media.getStats();
+        if (stats != null) {
+          decoded = stats.decodedVideo;
+          displayed = stats.displayedPictures;
+        }
+      } catch (RuntimeException unavailable) {
+        // Missing statistics cannot establish poor performance; actual frame activity also counts.
+      } finally {
+        if (media != null) media.release();
+      }
+    }
+    nativeDecodeProgress.observe(now, decoded, displayed, nativeFrameProgressToken());
   }
 
   private void applyPendingSeek(MediaPlayer source) {
@@ -929,7 +995,7 @@ final class VideoPage extends FrameLayout {
       resetNativeSeekQueue();
       nativeSeekQueue.offer(latest, false);
       nativeSeekAwaitingPause = true;
-      nativeSeekDeadline = SystemClock.uptimeMillis() + NATIVE_SEEK_WATCHDOG_MS;
+      armNativeSeekWatchdog(SystemClock.uptimeMillis());
     } else if (active && play) nativeSeekAwaitingPause = false;
     if (!active && scrubbing) clearScrubState();
     if (active && play) rewindIfEnded();
@@ -944,7 +1010,7 @@ final class VideoPage extends FrameLayout {
     applyPlayback();
     if (!active) main.removeCallbacks(nativeSeekProbe);
     else if (nativeSeekQueue.hasWork()) {
-      if (promoted) nativeSeekDeadline = SystemClock.uptimeMillis() + NATIVE_SEEK_WATCHDOG_MS;
+      if (promoted) armNativeSeekWatchdog(SystemClock.uptimeMillis());
       dispatchNativeSeek();
       if (promoted || nativeSeekAwaitingPause) main.post(nativeSeekProbe);
     }
@@ -1017,6 +1083,7 @@ final class VideoPage extends FrameLayout {
 
   private boolean canObserveNativeHealth() {
     return vlc != null
+        && NativeDecoderPolicy.allowsPerformanceFallback(decoderPreference)
         && nativeSoftware
         && active
         && playRequested
@@ -1318,19 +1385,35 @@ final class VideoPage extends FrameLayout {
     if (nativeSeekQueue.hasWork()) position = nativeSeekQueue.latestPositionMs();
     else if (pendingSeekSet) position = pendingSeek;
     else if (nativeSurfacePauseRestore) position = nativeSurfacePauseTarget;
-    if (nativeSoftware && !triedNativeHardware) {
+    int fallback =
+        NativeDecoderPolicy.afterNativeFailure(
+            nativeSoftware, triedNativeSoftware, triedNativeHardware, triedExo);
+    if (fallback == NativeDecoderPolicy.HARDWARE) {
       rememberSoftwareFailureOnHardwareFrame =
           SeekEnginePolicy.shouldRememberVlcFailure(foreground, active, nativeError);
       startVlc(token, position, false);
       return;
     }
+    if (fallback == NativeDecoderPolicy.SOFTWARE) {
+      rememberSoftwareFailureOnHardwareFrame = false;
+      startVlc(token, position, true);
+      return;
+    }
     rememberSoftwareFailureOnHardwareFrame = false;
     rememberVlcFailureOnExoFrame =
         !triedExo && SeekEnginePolicy.shouldRememberVlcFailure(foreground, active, nativeError);
-    if (!triedExo) {
+    if (fallback == NativeDecoderPolicy.COMPATIBLE) {
       releaseEngineForReplacement();
       startExo(token, position);
     } else fail(token);
+  }
+
+  private void compatibleFailed(long token, long position) {
+    if (generation != token) return;
+    if (!triedVlc) startVlc(token, position);
+    else if (!triedNativeHardware) startVlc(token, position, false);
+    else if (!triedNativeSoftware) startVlc(token, position, true);
+    else fail(token);
   }
 
   void seekTo(long position) {
@@ -1381,7 +1464,7 @@ final class VideoPage extends FrameLayout {
     enginePolicy = null;
     rememberVlcFailureOnExoFrame = false;
     rememberSoftwareFailureOnHardwareFrame = false;
-    triedNativeHardware = nativeSoftware = false;
+    triedNativeHardware = triedNativeSoftware = nativeSoftware = false;
     triedExo = triedVlc = false;
     active = playRequested = audible = false;
     nativeDucked = false;

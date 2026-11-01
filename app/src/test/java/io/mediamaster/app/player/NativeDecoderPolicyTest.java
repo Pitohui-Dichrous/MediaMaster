@@ -5,125 +5,151 @@ import static org.junit.Assert.*;
 import org.junit.Test;
 
 public class NativeDecoderPolicyTest {
+  private static final long MIB = 1024 * 1024L;
+  private static final NativeDecoderPolicy.Resources AVAILABLE =
+      new NativeDecoderPolicy.Resources(1024 * MIB, 128 * MIB, false, false);
+
   private static NativeDecoderPolicy.Metadata media(
       String mime, int width, int height, double fps, int profile, boolean hdr) {
     return new NativeDecoderPolicy.Metadata(mime, width, height, fps, profile, hdr);
   }
 
   private static boolean automatic(NativeDecoderPolicy.Metadata metadata) {
-    return NativeDecoderPolicy.useSoftware(0, false, "reference-device", 34, metadata);
+    return NativeDecoderPolicy.useSoftware(NativeDecoderPolicy.AUTO, false, metadata, AVAILABLE);
   }
 
   @Test
-  public void measuredDeviceAcceptsOrdinaryAvcInBothOrientations() {
-    assertTrue(automatic(media("video/avc", 1920, 1080, 25, 8, false)));
-    assertTrue(automatic(media("video/avc", 1080, 1920, 30, 8, false)));
-    assertTrue(automatic(media("video/avc", 1280, 720, 29.97, 2, false)));
-  }
-
-  @Test
-  public void smallerSixtyFpsAvcFitsThePixelBudgetInBothOrientations() {
-    assertTrue(automatic(media("video/avc", 1280, 720, 60, 8, false)));
-    assertTrue(automatic(media("video/avc", 720, 1280, 60, 8, false)));
-    assertTrue(automatic(media("video/avc", 1280, 720, 59.94, 2, false)));
-    assertTrue(automatic(media("video/avc", 1600, 900, 30, 2, false)));
-  }
-
-  @Test
-  public void pixelBudgetIncludesItsBoundaryWithoutRoundingFrameRateDown() {
-    assertTrue(automatic(media("video/avc", 1920, 1080, 30, 8, false)));
-    assertFalse(automatic(media("video/avc", 1920, 1080, Math.nextUp(30d), 8, false)));
-    assertTrue(automatic(media("video/avc", 960, 1080, 60, 8, false)));
-    assertTrue(automatic(media("video/avc", 1080, 960, 60, 8, false)));
-    assertFalse(automatic(media("video/avc", 961, 1080, 60, 8, false)));
-    assertFalse(automatic(media("video/avc", 1080, 961, 60, 8, false)));
-    assertFalse(automatic(media("video/avc", 1600, 900, 60, 8, false)));
-    assertFalse(automatic(media("video/avc", 1920, 1080, 60, 8, false)));
-  }
-
-  @Test
-  public void onlyPositivelyKnownEightBitProfilesAreEligible() {
-    for (int profile : new int[] {1, 2, 8, 0x10000, 0x80000}) {
-      assertTrue(automatic(media("video/avc", 1280, 720, 25, profile, false)));
-    }
-    // Unknown, Extended, High10, High422, High444 and an unrecognized value stay conservative.
-    for (int profile : new int[] {0, -1, 4, 16, 32, 64, 999}) {
-      assertFalse(automatic(media("video/avc", 1280, 720, 25, profile, false)));
-    }
-  }
-
-  @Test
-  public void unknownOrOverSixtyFrameRatesStayHardwareEvenForSmallPictures() {
-    for (double fps :
-        new double[] {
-          0,
-          -1,
-          Math.nextUp(60d),
-          60.01,
-          120,
-          Double.NaN,
-          Double.POSITIVE_INFINITY,
-          Double.NEGATIVE_INFINITY
-        }) {
-      assertFalse(automatic(media("video/avc", 640, 360, fps, 8, false)));
-    }
-  }
-
-  @Test
-  public void dimensionsMustBeKnownAndWithinBothAxes() {
-    int[][] sizes = {
-      {0, 1080},
-      {1920, 0},
-      {-1, 720},
-      {1280, -1},
-      {1921, 1080},
-      {1080, 1921},
-      {1440, 1440},
-      {3840, 2160},
-      {Integer.MAX_VALUE, Integer.MAX_VALUE}
+  public void defaultTriesCommonEightBitStreamsThroughFullHdSixtyInEitherOrientation() {
+    String[] codecs = {
+      "video/avc",
+      "video/hevc",
+      "video/x-vnd.on2.vp8",
+      "video/x-vnd.on2.vp9",
+      "video/mp4v-es",
+      "video/mpeg2",
+      "video/3gpp"
     };
-    for (int[] size : sizes) {
-      assertFalse(automatic(media("video/avc", size[0], size[1], 25, 8, false)));
+    int[] profiles = {8, 1, -1, 1, 1, 1, -1};
+    for (int i = 0; i < codecs.length; i++) {
+      assertTrue(codecs[i], automatic(media(codecs[i], 1920, 1080, 60, profiles[i], false)));
+      assertTrue(codecs[i], automatic(media(codecs[i], 1080, 1920, 59.94, profiles[i], false)));
     }
   }
 
   @Test
-  public void codecAndHdrCannotBeInferredFromAnMp4Container() {
+  public void defaultDoesNotRoundOverBudgetDimensionsOrRatesDown() {
+    assertFalse(automatic(media("video/avc", 1920, 1080, Math.nextUp(60d), 8, false)));
+    assertFalse(automatic(media("video/avc", 1921, 1080, 30, 8, false)));
+    assertFalse(automatic(media("video/avc", 1440, 1440, 30, 8, false)));
+    assertFalse(automatic(media("video/avc", 3840, 2160, 30, 8, false)));
+    for (double fps : new double[] {0, -1, Double.NaN, Double.POSITIVE_INFINITY})
+      assertFalse(automatic(media("video/avc", 640, 360, fps, 8, false)));
+    assertFalse(automatic(media("video/avc", 0, 1080, 30, 8, false)));
+  }
+
+  @Test
+  public void defaultRetainsQualityAndUnknownHeaderGuards() {
     assertFalse(automatic(null));
-    for (String mime :
-        new String[] {null, "video/mp4", "video/hevc", "video/av01", "video/x-vnd.on2.vp9"}) {
-      assertFalse(automatic(media(mime, 1280, 720, 25, 8, false)));
-    }
-    assertFalse(automatic(media("video/avc", 1280, 720, 25, 8, true)));
+    assertFalse(automatic(media("video/avc", 1280, 720, 30, 8, true)));
+    assertFalse(automatic(media("video/avc", 1280, 720, 30, 16, false)));
+    assertFalse(automatic(media("video/avc", 1280, 720, 30, -1, false)));
+    assertFalse(automatic(media("video/hevc", 1280, 720, 30, 2, false)));
+    assertFalse(automatic(media("video/x-vnd.on2.vp9", 1280, 720, 30, 4, false)));
+    assertFalse(automatic(media("video/mpeg2", 1280, 720, 30, -1, false)));
+    assertTrue(automatic(media("video/mpeg2", 1280, 720, 30, 0, false)));
+    assertFalse(automatic(media("video/unknown", 1280, 720, 30, 1, false)));
   }
 
   @Test
-  public void otherDevicesAndAndroidVersionsKeepHardwarePreference() {
-    NativeDecoderPolicy.Metadata metadata = media("video/avc", 1280, 720, 25, 8, false);
-    assertFalse(NativeDecoderPolicy.useSoftware(0, false, "other-device", 34, metadata));
-    assertFalse(NativeDecoderPolicy.useSoftware(0, false, null, 34, metadata));
-    assertFalse(NativeDecoderPolicy.useSoftware(0, false, "reference-device", 33, metadata));
-    assertFalse(NativeDecoderPolicy.useSoftware(0, false, "reference-device", 35, metadata));
+  public void defaultUsesActualMemoryHeadroomAndThermalPressure() {
+    NativeDecoderPolicy.Metadata video = media("video/avc", 1920, 1080, 60, 8, false);
+    assertTrue(automatic(video));
+    assertFalse(
+        NativeDecoderPolicy.useSoftware(
+            0,
+            false,
+            video,
+            new NativeDecoderPolicy.Resources(1024 * MIB, 128 * MIB, true, false)));
+    assertFalse(
+        NativeDecoderPolicy.useSoftware(
+            0,
+            false,
+            video,
+            new NativeDecoderPolicy.Resources(1024 * MIB, 128 * MIB, false, true)));
+    assertFalse(
+        NativeDecoderPolicy.useSoftware(
+            0,
+            false,
+            video,
+            new NativeDecoderPolicy.Resources(200 * MIB, 128 * MIB, false, false)));
+    assertFalse(NativeDecoderPolicy.useSoftware(0, false, video, null));
+    assertFalse(
+        NativeDecoderPolicy.useSoftware(
+            0, false, video, new NativeDecoderPolicy.Resources(0, 0, false, false)));
   }
 
   @Test
-  public void sixtyFpsExpansionDoesNotBypassExistingSafetyGates() {
-    NativeDecoderPolicy.Metadata metadata = media("video/avc", 1280, 720, 60, 8, false);
-    assertFalse(NativeDecoderPolicy.useSoftware(0, true, "reference-device", 34, metadata));
-    assertFalse(NativeDecoderPolicy.useSoftware(0, false, "other-device", 34, metadata));
-    assertFalse(NativeDecoderPolicy.useSoftware(0, false, "reference-device", 35, metadata));
-    assertFalse(automatic(media("video/avc", 1280, 720, 60, 0, false)));
-    assertFalse(automatic(media("video/avc", 1280, 720, 60, 16, false)));
-    assertFalse(automatic(media("video/avc", 1280, 720, 60, 8, true)));
-    assertFalse(automatic(media("video/hevc", 1280, 720, 60, 8, false)));
+  public void softwarePreferenceIgnoresPixelRateQualityResourceAndOldSlowHistoryGates() {
+    NativeDecoderPolicy.Metadata demanding = media("video/hevc", 7680, 4320, 120, 2, true);
+    NativeDecoderPolicy.Resources pressured =
+        new NativeDecoderPolicy.Resources(0, 128 * MIB, true, true);
+    assertTrue(
+        NativeDecoderPolicy.useSoftware(NativeDecoderPolicy.SOFTWARE, true, demanding, pressured));
+    assertTrue(NativeDecoderPolicy.useSoftware(NativeDecoderPolicy.SOFTWARE, true, null, null));
   }
 
   @Test
-  public void internalOverridesAreExplicitButCannotDefeatFallbackGuard() {
-    NativeDecoderPolicy.Metadata metadata = media("video/avc", 1280, 720, 25, 8, false);
-    assertFalse(NativeDecoderPolicy.useSoftware(1, false, "reference-device", 34, metadata));
-    assertTrue(NativeDecoderPolicy.useSoftware(2, false, "other", 26, null));
-    assertFalse(NativeDecoderPolicy.useSoftware(2, true, "reference-device", 34, metadata));
-    assertFalse(NativeDecoderPolicy.useSoftware(0, true, "reference-device", 34, metadata));
+  public void hardwarePreferenceAndDefaultHistoryRemainDistinct() {
+    NativeDecoderPolicy.Metadata video = media("video/avc", 640, 360, 24, 8, false);
+    assertFalse(
+        NativeDecoderPolicy.useSoftware(NativeDecoderPolicy.HARDWARE, false, video, AVAILABLE));
+    assertFalse(NativeDecoderPolicy.useSoftware(NativeDecoderPolicy.AUTO, true, video, AVAILABLE));
+    assertTrue(NativeDecoderPolicy.useSoftware(NativeDecoderPolicy.AUTO, false, video, AVAILABLE));
+  }
+
+  @Test
+  public void onlyDefaultMayChangeEnginesBecauseOfSustainedPoorPlayback() {
+    assertTrue(NativeDecoderPolicy.allowsPerformanceFallback(NativeDecoderPolicy.AUTO));
+    assertFalse(NativeDecoderPolicy.allowsPerformanceFallback(NativeDecoderPolicy.SOFTWARE));
+    assertFalse(NativeDecoderPolicy.allowsPerformanceFallback(NativeDecoderPolicy.HARDWARE));
+  }
+
+  @Test
+  public void explicitNativePreferencesCannotBeBypassedByOldCompatibleEngineHistory() {
+    assertFalse(NativeDecoderPolicy.prefersNativeBeforeHistory(NativeDecoderPolicy.AUTO));
+    assertTrue(NativeDecoderPolicy.prefersNativeBeforeHistory(NativeDecoderPolicy.SOFTWARE));
+    assertTrue(NativeDecoderPolicy.prefersNativeBeforeHistory(NativeDecoderPolicy.HARDWARE));
+  }
+
+  @Test
+  public void realSoftwareFailureTriesHardwareThenCompatibleAtMostOnce() {
+    assertEquals(
+        NativeDecoderPolicy.HARDWARE,
+        NativeDecoderPolicy.afterNativeFailure(true, true, false, false));
+    assertEquals(
+        NativeDecoderPolicy.COMPATIBLE,
+        NativeDecoderPolicy.afterNativeFailure(false, true, true, false));
+    assertEquals(
+        NativeDecoderPolicy.NONE, NativeDecoderPolicy.afterNativeFailure(false, true, true, true));
+  }
+
+  @Test
+  public void realHardwareFailureKeepsCompatibleHardwareAheadOfSoftwareFallback() {
+    assertEquals(
+        NativeDecoderPolicy.COMPATIBLE,
+        NativeDecoderPolicy.afterNativeFailure(false, false, true, false));
+    assertEquals(
+        NativeDecoderPolicy.SOFTWARE,
+        NativeDecoderPolicy.afterNativeFailure(false, false, true, true));
+    assertEquals(
+        NativeDecoderPolicy.NONE, NativeDecoderPolicy.afterNativeFailure(true, true, true, true));
+  }
+
+  @Test
+  public void invalidPreferencesNormalizeToDefaultWithoutNewPersistedValues() {
+    assertEquals(0, NativeDecoderPolicy.normalizeMode(-1));
+    assertEquals(0, NativeDecoderPolicy.normalizeMode(3));
+    assertEquals(1, NativeDecoderPolicy.normalizeMode(1));
+    assertEquals(2, NativeDecoderPolicy.normalizeMode(2));
   }
 }

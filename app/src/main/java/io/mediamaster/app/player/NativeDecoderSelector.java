@@ -1,5 +1,6 @@
 package io.mediamaster.app.player;
 
+import android.app.ActivityManager;
 import android.content.Context;
 import android.media.MediaExtractor;
 import android.media.MediaFormat;
@@ -7,6 +8,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.os.SystemClock;
 import io.mediamaster.app.media.VideoItem;
 import java.io.File;
@@ -26,7 +28,7 @@ final class NativeDecoderSelector {
   private static final long DECISION_TIMEOUT_MS = 150;
   private static final Handler MAIN = new Handler(Looper.getMainLooper());
   private static final NativeDecoderPolicy.Metadata UNKNOWN =
-      new NativeDecoderPolicy.Metadata(null, 0, 0, 0, 0, false);
+      new NativeDecoderPolicy.Metadata(null, 0, 0, 0, -1, false);
   // These two maps and all Request/Probe subscriber lists are accessed only on the main thread.
   private static final LinkedHashMap<String, NativeDecoderPolicy.Metadata> CACHE =
       new LinkedHashMap<>(16, .75f, true);
@@ -61,16 +63,9 @@ final class NativeDecoderSelector {
 
   private static void resolveOnMain(
       Context context, VideoItem item, boolean avoidSoftware, Consumer<Boolean> callback) {
-    int mode = context.getSharedPreferences("player", 0).getInt("native_decoder_mode", 0);
-    if (mode < NativeDecoderPolicy.AUTO || mode > NativeDecoderPolicy.SOFTWARE) {
-      mode = NativeDecoderPolicy.AUTO;
-    }
-    if (avoidSoftware
-        || mode != NativeDecoderPolicy.AUTO
-        || !NativeDecoderPolicy.validatedDevice("reference-device", Build.VERSION.SDK_INT)) {
-      callback.accept(
-          NativeDecoderPolicy.useSoftware(
-              mode, avoidSoftware, "reference-device", Build.VERSION.SDK_INT, null));
+    int mode = preference(context);
+    if (avoidSoftware || mode != NativeDecoderPolicy.AUTO) {
+      callback.accept(NativeDecoderPolicy.useSoftware(mode, avoidSoftware, null, null));
       return;
     }
     if (item == null) {
@@ -78,20 +73,10 @@ final class NativeDecoderSelector {
       return;
     }
     String key =
-        ("api-" + Build.VERSION.SDK_INT)
-            + '|'
-            + item.id
-            + '|'
-            + item.uri
-            + '|'
-            + item.path
-            + '|'
-            + item.size
-            + '|'
-            + item.modifiedMs;
+        item.id + '|' + item.uri + '|' + item.path + '|' + item.size + '|' + item.modifiedMs;
     NativeDecoderPolicy.Metadata cached = CACHE.get(key);
     if (cached != null) {
-      callback.accept(eligible(cached));
+      callback.accept(eligible(context, cached));
       return;
     }
     Probe probe = IN_FLIGHT.get(key);
@@ -114,9 +99,43 @@ final class NativeDecoderSelector {
     }
   }
 
-  private static boolean eligible(NativeDecoderPolicy.Metadata metadata) {
+  static int preference(Context context) {
+    return NativeDecoderPolicy.normalizeMode(
+        context
+            .getSharedPreferences("player", 0)
+            .getInt("native_decoder_mode", NativeDecoderPolicy.AUTO));
+  }
+
+  private static boolean eligible(Context context, NativeDecoderPolicy.Metadata metadata) {
     return NativeDecoderPolicy.useSoftware(
-        NativeDecoderPolicy.AUTO, false, "reference-device", Build.VERSION.SDK_INT, metadata);
+        NativeDecoderPolicy.AUTO, false, metadata, resources(context));
+  }
+
+  private static NativeDecoderPolicy.Resources resources(Context context) {
+    long available = 0, threshold = 0;
+    boolean lowMemory = true, thermalPressure = false;
+    try {
+      ActivityManager manager = context.getSystemService(ActivityManager.class);
+      if (manager != null) {
+        ActivityManager.MemoryInfo memory = new ActivityManager.MemoryInfo();
+        manager.getMemoryInfo(memory);
+        available = memory.availMem;
+        threshold = memory.threshold;
+        lowMemory = memory.lowMemory;
+      }
+    } catch (RuntimeException unavailable) {
+      // Unknown memory headroom keeps AUTO conservative; explicit software ignores this guard.
+    }
+    if (Build.VERSION.SDK_INT >= 29) {
+      try {
+        PowerManager power = context.getSystemService(PowerManager.class);
+        thermalPressure =
+            power != null && power.getCurrentThermalStatus() >= PowerManager.THERMAL_STATUS_SEVERE;
+      } catch (RuntimeException unavailable) {
+        // Thermal reporting is optional; no device identity is used as a substitute.
+      }
+    }
+    return new NativeDecoderPolicy.Resources(available, threshold, lowMemory, thermalPressure);
   }
 
   private static final class Request implements Runnable {
@@ -165,7 +184,8 @@ final class NativeDecoderSelector {
             CACHE.put(key, metadata);
             while (CACHE.size() > MAX_ENTRIES) CACHE.remove(CACHE.keySet().iterator().next());
             for (Request request : new ArrayList<>(requests)) {
-              request.finish(SystemClock.uptimeMillis() < request.deadline && eligible(metadata));
+              request.finish(
+                  SystemClock.uptimeMillis() < request.deadline && eligible(context, metadata));
             }
           });
     }
@@ -186,8 +206,7 @@ final class NativeDecoderSelector {
         if (video != null) return UNKNOWN; // Do not guess which video track LibVLC will choose.
         video = format;
       }
-      if (video == null || !"video/avc".equals(video.getString(MediaFormat.KEY_MIME)))
-        return UNKNOWN;
+      if (video == null) return UNKNOWN;
       int transfer = integer(video, MediaFormat.KEY_COLOR_TRANSFER);
       boolean hdr =
           transfer == MediaFormat.COLOR_TRANSFER_ST2084
@@ -199,7 +218,7 @@ final class NativeDecoderSelector {
           integer(video, MediaFormat.KEY_WIDTH),
           integer(video, MediaFormat.KEY_HEIGHT),
           frameRate(video),
-          integer(video, MediaFormat.KEY_PROFILE),
+          video.containsKey(MediaFormat.KEY_PROFILE) ? integer(video, MediaFormat.KEY_PROFILE) : -1,
           hdr);
     } catch (Exception unreadable) {
       return UNKNOWN;

@@ -366,7 +366,7 @@ public final class ScrubSessionTest {
                   VideoPage.class.getDeclaredMethod("startVlc", long.class, long.class);
               fallback.setAccessible(true);
               fallback.invoke(page, page.generation, 4200L);
-              assertSelectionIsPendingOnValidatedDevice(page, original);
+              assertColdSelectionIsPending(page, original);
               return position;
             });
     await(() -> onMain(() -> page.exo == null && page.vlc != null), 20000);
@@ -490,9 +490,9 @@ public final class ScrubSessionTest {
           Method fallback = VideoPage.class.getDeclaredMethod("startVlc", long.class, long.class);
           fallback.setAccessible(true);
           fallback.invoke(page, page.generation, 4200L);
-          assertSelectionIsPendingOnValidatedDevice(page, original);
+          assertColdSelectionIsPending(page, original);
           // Keep this in the same callback: header selection has not replaced the old Exo
-          // input yet on validated devices. Other devices may already be warming VLC.
+          // input yet. The cold AUTO header callback is asynchronous on every platform.
           page.endScrub(0, true);
           return null;
         });
@@ -541,7 +541,7 @@ public final class ScrubSessionTest {
                   VideoPage.class.getDeclaredMethod("startVlc", long.class, long.class);
               fallback.setAccessible(true);
               fallback.invoke(page, page.generation, 4200L);
-              assertSelectionIsPendingOnValidatedDevice(page, original);
+              assertColdSelectionIsPending(page, original);
               page.endScrub(4200, false);
               return at;
             });
@@ -560,16 +560,14 @@ public final class ScrubSessionTest {
           Method fallback = VideoPage.class.getDeclaredMethod("startVlc", long.class, long.class);
           fallback.setAccessible(true);
           fallback.invoke(page, page.generation, 4200L);
-          assertSelectionIsPendingOnValidatedDevice(page, original);
+          assertColdSelectionIsPending(page, original);
           page.seekTo(0);
           return null;
         });
     awaitPausedFallbackTarget(page, 0);
   }
 
-  private static void assertSelectionIsPendingOnValidatedDevice(
-      VideoPage page, ExoPlayer original) {
-    if (!NativeDecoderPolicy.validatedDevice("reference-device", Build.VERSION.SDK_INT)) return;
+  private static void assertColdSelectionIsPending(VideoPage page, ExoPlayer original) {
     // Every fixture uses a per-test trialId in its cache/history key and starts on Exo, so AUTO's
     // first header probe is cold. Its main-thread callback cannot run inside this same UI callback.
     assertSame(

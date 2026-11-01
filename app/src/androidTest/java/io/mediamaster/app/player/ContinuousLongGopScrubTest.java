@@ -28,10 +28,14 @@ import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
 import androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry;
 import androidx.test.runner.lifecycle.Stage;
+import io.mediamaster.app.media.VideoItem;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.util.ArrayList;
+import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
@@ -52,12 +56,15 @@ public final class ContinuousLongGopScrubTest {
   private final AtomicBoolean stop = new AtomicBoolean(), fingerDown = new AtomicBoolean();
   private final JSONArray delivered = new JSONArray();
   private PlayerActivity activity;
+  private VideoItem fixtureItem;
+  private String queueToken;
   private VideoPage page;
   private View surface;
   private Object player;
   private Window.Callback originalCallback;
   private long frameGeneration, duration;
   private volatile long downTime, deliveredUp, deliveredTarget;
+  private volatile long eventDown, eventUp, receivedDown, receivedUp, handledDown;
   private volatile int lastX;
   private int trackLeft, trackWidth, y, barcodeFps;
 
@@ -86,7 +93,18 @@ public final class ContinuousLongGopScrubTest {
     JSONArray samples = new JSONArray();
     JSONObject result =
         new JSONObject()
-            .put("protocol", "continuous-forward-v1")
+            .put("protocol", "continuous-forward-v2")
+            .put(
+                "timingEvidence",
+                "Injected means MotionEvent eventTime; Dispatch means callback entry")
+            .put(
+                "legacyTimingFields",
+                "firstChangedPictureUpperMs starts at scheduled DOWN; finalAccurateRecoveryUpperMs"
+                    + " starts after the UP callback completes, as in v1")
+            .put(
+                "timestampOrigin",
+                "input timestamps relative to injected DOWN; trace columns relative to scheduled"
+                    + " DOWN")
             .put("engineChoice", engine)
             .put("nativeDecoderChoice", decoder)
             .put("wallMs", wallMs)
@@ -98,7 +116,9 @@ public final class ContinuousLongGopScrubTest {
                 "sampleColumns",
                 "endMs,copyMs,lastChangedDistance,referenceDistance,ptsMs,uiTargetMs,ready")
             .put("samples", samples)
-            .put("deliveredColumns", "action,eventMs,handledMs,x,targetMs")
+            .put(
+                "deliveredColumns",
+                "action,eventMs,handledMs,x,targetMs,receivedMs,deliveryLagMs,dispatchMs")
             .put("delivered", delivered)
             .put("passed", false);
     Thread sender = null;
@@ -121,11 +141,7 @@ public final class ContinuousLongGopScrubTest {
               .putInt(keys[1], decoder)
               .putInt(keys[2], PlaybackOrder.SINGLE)
               .commit());
-      context.startActivity(
-          new Intent(Intent.ACTION_VIEW)
-              .setClass(context, PlayerActivity.class)
-              .setDataAndType(fixture, "video/mp4")
-              .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION));
+      launchInMemory(context, fixture);
       awaitReady(fixture);
       onMain(
           () -> {
@@ -208,6 +224,7 @@ public final class ContinuousLongGopScrubTest {
       installDeliveryProbe();
       previous = origin;
       origin = null;
+      eventDown = eventUp = receivedDown = receivedUp = handledDown = deliveredUp = 0;
       downTime = SystemClock.uptimeMillis() + 100;
       final int moveCount = wallMs * 30 / 1000;
       sender =
@@ -311,6 +328,34 @@ public final class ContinuousLongGopScrubTest {
           .put("changedPicturesDuringGesture", changes)
           .put("longestUnchangedDuringGestureUpperMs", longestUnchanged)
           .put("finalAccurateRecoveryUpperMs", finalRecovery)
+          .put("eventDownMs", elapsed(eventDown, eventDown))
+          .put("eventUpMs", elapsed(eventUp, eventDown))
+          .put("callbackReceivedDownMs", elapsed(receivedDown, eventDown))
+          .put("callbackHandledDownMs", elapsed(handledDown, eventDown))
+          .put("callbackReceivedUpMs", elapsed(receivedUp, eventDown))
+          .put("callbackHandledUpMs", elapsed(deliveredUp, eventDown))
+          .put("downDeliveryLagMs", elapsed(receivedDown, eventDown))
+          .put("upDeliveryLagMs", elapsed(receivedUp, eventUp))
+          .put("downDispatchMs", elapsed(handledDown, receivedDown))
+          .put("upDispatchMs", elapsed(deliveredUp, receivedUp))
+          .put(
+              "firstChangedPictureFromInjectedDownMs",
+              elapsed(firstChanged < 0 ? -1 : downTime + firstChanged, eventDown))
+          .put(
+              "firstChangedPictureFromInjectedUpMs",
+              elapsed(firstChanged < 0 ? -1 : downTime + firstChanged, eventUp))
+          .put(
+              "firstChangedPictureFromDispatchDownMs",
+              elapsed(firstChanged < 0 ? -1 : downTime + firstChanged, receivedDown))
+          .put(
+              "firstChangedPictureFromDispatchUpMs",
+              elapsed(firstChanged < 0 ? -1 : downTime + firstChanged, receivedUp))
+          .put(
+              "finalAccurateRecoveryFromInjectedUpMs",
+              elapsed(finalRecovery < 0 ? -1 : deliveredUp + finalRecovery, eventUp))
+          .put(
+              "finalAccurateRecoveryFromDispatchUpMs",
+              elapsed(finalRecovery < 0 ? -1 : deliveredUp + finalRecovery, receivedUp))
           .put("stableFinalSamples", stableFinal);
       checkDelivery(fromX, toX, wallMs);
       assertTrue("No actual picture change during the gesture", changes > 0);
@@ -373,15 +418,19 @@ public final class ContinuousLongGopScrubTest {
                 .put("historyCleanupErrorType", cleanupFailure.getClass().getSimpleName());
             throw cleanupFailure;
           } finally {
+            QueueStore.forget(queueToken);
             SharedPreferences.Editor restore = preferences.edit();
             for (int i = 0; i < keys.length; i++) {
               if (present[i]) restore.putInt(keys[i], saved[i]);
               else restore.remove(keys[i]);
             }
-            result.put("preferencesRestored", restore.commit());
+            boolean preferencesRestored = restore.commit();
+            result.put("preferencesRestored", preferencesRestored);
+            if (!preferencesRestored) result.put("passed", false);
             Bundle status = new Bundle();
             status.putString("continuousScrub", result.toString());
             instrumentation.sendStatus(2, status);
+            assertTrue("Original preferences must be restored", preferencesRestored);
           }
         }
       }
@@ -403,7 +452,7 @@ public final class ContinuousLongGopScrubTest {
             .getContentResolver()
             .query(
                 uri,
-                new String[] {"_id", "duration", "_display_name"},
+                new String[] {"_id", "duration", "_display_name", "_size", "width", "height"},
                 explicit.isEmpty() ? "_display_name=? AND relative_path=?" : null,
                 explicit.isEmpty() ? new String[] {name, path} : null,
                 null)) {
@@ -416,8 +465,43 @@ public final class ContinuousLongGopScrubTest {
             c.getString(2).matches("mm_seek_stress_[A-Za-z0-9_-]+\\.mp4"));
         assertEquals("Barcode fixture must contain 480 frames at 60 fps", 8000, c.getLong(1), 150);
       }
-      return Uri.withAppendedPath(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, c.getString(0));
+      Uri fixture =
+          Uri.withAppendedPath(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, c.getString(0));
+      String sourceName = c.getString(2);
+      int dot = sourceName == null ? -1 : sourceName.lastIndexOf('.');
+      String suffix = dot < 0 ? "" : sourceName.substring(dot).toLowerCase(java.util.Locale.ROOT);
+      if (!suffix.matches("\\.(mp4|mkv|avi|mov|webm|m4v|3gp|flv|wmv|mpg|mpeg|ts|m2ts)"))
+        suffix = ".mp4";
+      fixtureItem =
+          new VideoItem(
+              "continuous-fixture",
+              "fixture" + suffix,
+              fixture.toString(),
+              "",
+              c.getLong(3),
+              c.getLong(1),
+              0,
+              0,
+              c.getInt(4),
+              c.getInt(5));
+      return fixture;
     }
+  }
+
+  @SuppressWarnings("unchecked")
+  private void launchInMemory(Context context, Uri fixture) throws Exception {
+    assertEquals(fixture.toString(), fixtureItem.uri);
+    queueToken = UUID.randomUUID().toString();
+    ArrayList<VideoItem> queue = new ArrayList<>();
+    queue.add(fixtureItem);
+    Field memory = QueueStore.class.getDeclaredField("MEMORY");
+    memory.setAccessible(true);
+    // Avoid ACTION_VIEW, whose normal queue handoff persists source names and URIs in cache.
+    ((Map<String, ArrayList<VideoItem>>) memory.get(null)).put(queueToken, queue);
+    context.startActivity(
+        new Intent(context, PlayerActivity.class)
+            .putExtra("queue", queueToken)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
   }
 
   private void awaitReady(Uri uri) throws Exception {
@@ -591,16 +675,23 @@ public final class ContinuousLongGopScrubTest {
                                         && arguments[0] instanceof MotionEvent
                                     ? (MotionEvent) arguments[0]
                                     : null;
+                            boolean tracked =
+                                event != null && downTime > 0 && event.getDownTime() == downTime;
+                            long received = SystemClock.uptimeMillis();
+                            if (tracked) {
+                              if (event.getActionMasked() == MotionEvent.ACTION_DOWN)
+                                receivedDown = received;
+                              else if (event.getActionMasked() == MotionEvent.ACTION_UP)
+                                receivedUp = received;
+                            }
                             try {
                               return method.invoke(originalCallback, arguments);
                             } catch (InvocationTargetException e) {
                               throw e.getCause();
                             } finally {
-                              if (event != null
-                                  && downTime > 0
-                                  && event.getDownTime() == downTime) {
+                              long handled = SystemClock.uptimeMillis();
+                              if (tracked) {
                                 deliveredTarget = (long) read(activity, "gestureTarget");
-                                long handled = SystemClock.uptimeMillis();
                                 synchronized (delivered) {
                                   assertTrue(
                                       "Unexpectedly large input trace", delivered.length() < 256);
@@ -610,9 +701,14 @@ public final class ContinuousLongGopScrubTest {
                                           .put(event.getEventTime() - downTime)
                                           .put(handled - downTime)
                                           .put(Math.round(event.getRawX()))
-                                          .put(deliveredTarget));
+                                          .put(deliveredTarget)
+                                          .put(received - downTime)
+                                          .put(received - event.getEventTime())
+                                          .put(handled - received));
                                 }
-                                if (event.getActionMasked() == MotionEvent.ACTION_UP)
+                                if (event.getActionMasked() == MotionEvent.ACTION_DOWN)
+                                  handledDown = handled;
+                                else if (event.getActionMasked() == MotionEvent.ACTION_UP)
                                   deliveredUp = handled;
                               }
                             }
@@ -651,6 +747,8 @@ public final class ContinuousLongGopScrubTest {
   private void inject(int action, int x, boolean synchronous) {
     lastX = x;
     MotionEvent event = MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), action, x, y, 0);
+    if (action == MotionEvent.ACTION_DOWN) eventDown = event.getEventTime();
+    else if (action == MotionEvent.ACTION_UP) eventUp = event.getEventTime();
     event.setSource(InputDevice.SOURCE_TOUCHSCREEN);
     try {
       assertTrue("Input injection rejected", automation.injectInputEvent(event, synchronous));
@@ -681,6 +779,10 @@ public final class ContinuousLongGopScrubTest {
 
   private static double round(double value) {
     return Math.round(value * 100d) / 100d;
+  }
+
+  private static Object elapsed(long observed, long origin) {
+    return observed > 0 && origin > 0 ? observed - origin : JSONObject.NULL;
   }
 
   private static void waitUntil(long time) {

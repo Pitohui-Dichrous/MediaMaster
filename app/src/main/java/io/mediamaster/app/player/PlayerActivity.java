@@ -591,7 +591,7 @@ public final class PlayerActivity extends Activity {
           if (Math.abs(dx) > dp(14) && Math.abs(dx) > Math.abs(dy) * 1.3f && duration() > 0) {
             gestureKind = GESTURE_SEEK;
             gestureSeeking = true;
-            beginPlayerScrub();
+            beginPlayerScrub(event.getDownTime());
             cancelTapRecognition();
             showChrome();
             updateLoadingIndicator();
@@ -880,11 +880,15 @@ public final class PlayerActivity extends Activity {
   }
 
   private void beginPlayerScrub() {
+    beginPlayerScrub(0);
+  }
+
+  private void beginPlayerScrub(long inputDownTimeMs) {
     invalidateCompletion();
     handler.removeCallbacks(preloadWindow);
     if (previewLoader != null) previewLoader.reset();
     scrubbingPage = currentPage;
-    if (scrubbingPage != null) scrubbingPage.beginScrub();
+    if (scrubbingPage != null) scrubbingPage.beginScrub(inputDownTimeMs);
     handler.removeCallbacks(refreshScrubPreview);
     handler.post(refreshScrubPreview);
   }

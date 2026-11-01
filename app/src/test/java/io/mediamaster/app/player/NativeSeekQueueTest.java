@@ -42,6 +42,39 @@ public class NativeSeekQueueTest {
   }
 
   @Test
+  public void frequentPreviewOffersDoNotRenewSubmittedDeadlineOrLoseFinalExactZero() {
+    NativeSeekQueue queue = new NativeSeekQueue();
+    queue.offer(4200, true);
+    NativeSeekQueue.Request old = queue.take(0);
+    assertTrue(queue.acknowledge(old.id));
+    queue.offer(8000, true);
+    NativeSeekQueue.Request submitted = queue.take(100);
+
+    for (int step = 1; step <= 128; step++) {
+      long now = 100 + step * 16L;
+      queue.offer(step % 2 == 0 ? 5000 : 9000, true);
+      assertNull(queue.take(now));
+      assertSame(submitted, queue.submitted());
+      assertEquals(now >= 1600, queue.isStalled(now, 1500));
+      assertFalse(queue.acknowledge(old.id));
+    }
+
+    queue.offer(0, false);
+    assertEquals(0, queue.latestPositionMs());
+    assertTrue(queue.isStalled(2149, 1500));
+    assertNull(queue.take(2149));
+    assertTrue(queue.acknowledge(submitted.id));
+    NativeSeekQueue.Request precise = queue.take(2150);
+    assertEquals(0, precise.positionMs);
+    assertFalse(precise.fast);
+    assertFalse(queue.hasPending());
+    assertFalse(queue.acknowledge(submitted.id));
+    assertTrue(queue.acknowledge(precise.id));
+    assertFalse(queue.hasWork());
+    assertNull(queue.take(5000));
+  }
+
+  @Test
   public void finalAccurateTargetSurvivesAnInFlightFastRequestAtTheSamePosition() {
     NativeSeekQueue queue = new NativeSeekQueue();
     queue.offer(6200, true);

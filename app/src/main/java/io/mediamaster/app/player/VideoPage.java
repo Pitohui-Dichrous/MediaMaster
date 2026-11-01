@@ -99,6 +99,7 @@ final class VideoPage extends FrameLayout {
   private long vlcPreviousTime = -1, vlcSeekFenceTarget = -1, vlcSeekFenceDeadline;
   private boolean vlcNearEndArmed;
   private static final long SCRUB_INTERVAL_MS = 80;
+  private static final long EXO_SCRUB_INTERVAL_MS = 16;
   private static final long FIRST_SCRUB_DELAY_MS = 50;
   private static final long SCRUB_TOLERANCE_MS = 250;
   private final Runnable dispatchScrub = this::dispatchScrub;
@@ -130,7 +131,9 @@ final class VideoPage extends FrameLayout {
   private long scrubOrigin, scrubTarget, scrubStartedAt, lastScrubDispatch, scrubTextureBaseline;
   private long capturedTextureTimestamp, scrubFrameBaseline;
   private long scrubSessionFrameBaseline, scrubSessionTextureBaseline;
-  private final long[] scrubSubmittedTargets = new long[8];
+  // Keep enough bounded target history for delayed preview output at the faster Media3 cadence.
+  // This is a target-count limit, not a frame-freshness or fixed-time guarantee.
+  private final long[] scrubSubmittedTargets = new long[40];
   private int scrubSubmittedCount;
   long lastScrubPreviewPositionMs = -1;
   private volatile long engineFrameGeneration;
@@ -1421,6 +1424,10 @@ final class VideoPage extends FrameLayout {
 
   /** Uses the visible decoder for interactive frames; no second thumbnail decoder is needed. */
   void beginScrub() {
+    beginScrub(0);
+  }
+
+  void beginScrub(long inputDownTimeMs) {
     if (scrubbing || failed || item == null) return;
     cancelExoExactHold(false);
     scrubOrigin = position();
@@ -1432,7 +1439,10 @@ final class VideoPage extends FrameLayout {
     scrubSubmittedCount = 0;
     lastScrubPreviewPositionMs = -1;
     capturedTextureTimestamp = 0;
-    scrubStartedAt = SystemClock.uptimeMillis();
+    long now = SystemClock.uptimeMillis();
+    // Direction recognition must not restart the tap guard after a screen gesture has aged.
+    // Other entry points and invalid/future input times retain the normal guard from this call.
+    scrubStartedAt = inputDownTimeMs > 0 && inputDownTimeMs <= now ? inputDownTimeMs : now;
     lastScrubDispatch = 0;
     scrubPending = false;
     scrubbing = true;
@@ -1468,10 +1478,13 @@ final class VideoPage extends FrameLayout {
     }
     scrubPending = true;
     main.removeCallbacks(dispatchScrub);
+    // Keep the first-preview delay so short taps still submit only the final exact seek.
+    // Once dragging, bound UI messages while Media3 itself coalesces pending decode work.
+    long interval = exo != null ? EXO_SCRUB_INTERVAL_MS : SCRUB_INTERVAL_MS;
     long earliest =
         scrubSubmittedCount == 0
             ? scrubStartedAt + FIRST_SCRUB_DELAY_MS
-            : lastScrubDispatch + SCRUB_INTERVAL_MS;
+            : lastScrubDispatch + interval;
     long delay = Math.max(0, earliest - SystemClock.uptimeMillis());
     if (delay == 0) dispatchScrub();
     else main.postDelayed(dispatchScrub, delay);
@@ -1480,15 +1493,8 @@ final class VideoPage extends FrameLayout {
   private void dispatchScrub() {
     if (!scrubbing || !scrubPending || failed) return;
     long now = SystemClock.uptimeMillis();
-    // While a decoder is still catching up, replace the pending target rather than repeatedly
-    // flushing it. A bounded deadline still lets a very slow/failed request be superseded.
-    if (exo != null
-        && scrubSubmittedCount > 0
-        && lastRenderedFrameSequence <= scrubFrameBaseline
-        && now - lastScrubDispatch < 180) {
-      main.postDelayed(dispatchScrub, 180 - (now - lastScrubDispatch));
-      return;
-    }
+    // Media3's scrub queue retains only its newest pending seek until real video output arrives.
+    // Do not add a second frame-wait timer here; input submission remains rate-limited above.
     scrubPending = false;
     lastScrubDispatch = now;
     scrubFrameBaseline = lastRenderedFrameSequence;
@@ -1665,17 +1671,23 @@ final class VideoPage extends FrameLayout {
     }
     TextureView texture = currentTexture();
     if (texture == null || !texture.isAvailable()) return null;
-    if (exo != null) {
-      long pts = lastRenderedPositionUs;
+    ExoPlayer previewExo = exo;
+    MediaPlayer previewVlc = vlc;
+    long frameToken = engineFrameGeneration;
+    long frameSequence = lastRenderedFrameSequence;
+    long pts = lastRenderedPositionUs;
+    long releaseTimeNs = lastFrameReleaseTimeNs;
+    if (previewExo != null) {
       if (pts == C.TIME_UNSET
-          || lastRenderedFrameSequence <= scrubSessionFrameBaseline
+          || frameSequence <= scrubSessionFrameBaseline
           || !matchesSubmittedTarget(pts / 1000)
-          || System.nanoTime() < lastFrameReleaseTimeNs) return null;
-    } else if (vlc != null) {
+          || System.nanoTime() < releaseTimeNs) return null;
+    } else if (previewVlc != null) {
       // Native fast seek may stop at a distant keyframe. A fresh rendered texture is still useful;
       // the VLC clock is only an approximate caption, not proof of an exact decoded frame PTS.
       if (buffering) return null;
     } else return null;
+    long previewPositionMs = previewExo != null ? pts / 1000 : Math.max(0, previewVlc.getTime());
     long timestamp = textureTimestamp(texture);
     if (timestamp <= 0
         || timestamp == scrubSessionTextureBaseline
@@ -1688,9 +1700,24 @@ final class VideoPage extends FrameLayout {
           texture.getBitmap(
               Math.max(1, Math.round(width * scale)), Math.max(1, Math.round(height * scale)));
       if (bitmap != null) {
-        capturedTextureTimestamp = textureTimestamp(texture);
-        lastScrubPreviewPositionMs =
-            exo != null ? lastRenderedPositionUs / 1000 : Math.max(0, vlc.getTime());
+        // Playback-thread metadata and the GPU texture can advance independently during copy.
+        // Reject observed changes and keep the pre-copy label/timestamp; this fence does not
+        // independently prove that a TextureView bitmap has the metadata callback's media PTS.
+        if (!scrubbing
+            || exo != previewExo
+            || vlc != previewVlc
+            || engineFrameGeneration != frameToken
+            || currentTexture() != texture
+            || textureTimestamp(texture) != timestamp
+            || (previewExo != null
+                && (lastRenderedFrameSequence != frameSequence
+                    || lastRenderedPositionUs != pts
+                    || lastFrameReleaseTimeNs != releaseTimeNs))) {
+          bitmap.recycle();
+          return null;
+        }
+        capturedTextureTimestamp = timestamp;
+        lastScrubPreviewPositionMs = previewPositionMs;
       }
       return bitmap;
     } catch (RuntimeException | OutOfMemoryError unavailable) {

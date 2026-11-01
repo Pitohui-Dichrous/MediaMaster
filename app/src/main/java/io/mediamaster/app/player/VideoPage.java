@@ -471,6 +471,9 @@ final class VideoPage extends FrameLayout {
       try {
         // Set this on Media before enabling HW decoding; otherwise LibVLC adds 1500ms here.
         media.addOption(":file-caching=250");
+        int threads =
+            software ? NativeDecoderSelector.cachedSoftwareThreads(getContext(), item) : 0;
+        if (threads > 0) media.addOption(":avcodec-threads=" + threads);
         media.setHWDecoderEnabled(!software, false);
         // LibVLC 3 has no live input-repeat setter. Keep its decoder looping and change
         // only our

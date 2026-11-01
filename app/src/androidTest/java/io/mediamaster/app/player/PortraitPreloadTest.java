@@ -62,10 +62,13 @@ public final class PortraitPreloadTest {
   private ArrayList<VideoItem> fixtures;
   private final ArrayList<Bitmap> references = new ArrayList<>();
   private int savedMode;
+  private boolean hadMode;
   private int savedPortraitNavigation;
   private boolean hadPortraitNavigation;
   private boolean hadEngine;
   private int savedEngine;
+  private boolean preferencesSaved, hadNativeDecoder;
+  private int savedNativeDecoder;
   private long downTime;
   private AudioExclusivityProbe audioProbe;
 
@@ -81,21 +84,27 @@ public final class PortraitPreloadTest {
                 ? Manifest.permission.READ_MEDIA_VIDEO
                 : Manifest.permission.READ_EXTERNAL_STORAGE);
     savedMode = context.getSharedPreferences("player", 0).getInt("playback_mode", 0);
+    hadMode = context.getSharedPreferences("player", 0).contains("playback_mode");
     hadEngine = context.getSharedPreferences("player", 0).contains("engine_choice");
     savedEngine = context.getSharedPreferences("player", 0).getInt("engine_choice", 0);
+    hadNativeDecoder = context.getSharedPreferences("player", 0).contains("native_decoder_mode");
+    savedNativeDecoder = context.getSharedPreferences("player", 0).getInt("native_decoder_mode", 0);
     hadPortraitNavigation =
         context.getSharedPreferences("player", 0).contains("portrait_navigation_mode");
     savedPortraitNavigation =
         context
             .getSharedPreferences("player", 0)
             .getInt("portrait_navigation_mode", PlaybackOrder.SEQUENTIAL);
-    context
-        .getSharedPreferences("player", 0)
-        .edit()
-        .putInt("playback_mode", PlaybackOrder.SINGLE)
-        .putInt("portrait_navigation_mode", PlaybackOrder.SEQUENTIAL)
-        .putInt("engine_choice", 1)
-        .commit();
+    preferencesSaved = true;
+    assertTrue(
+        context
+            .getSharedPreferences("player", 0)
+            .edit()
+            .putInt("playback_mode", PlaybackOrder.SINGLE)
+            .putInt("portrait_navigation_mode", PlaybackOrder.SEQUENTIAL)
+            .putInt("engine_choice", 1)
+            .putInt("native_decoder_mode", NativeDecoderPolicy.AUTO)
+            .commit());
     fixtures = new ArrayList<>();
     // Three visibly different, real fixture files; explicit compatibility-engine coverage is below.
     for (String name : new String[] {"01_Aurora.mp4", "02_Horizon.mkv", "04_Portrait_Loop.mp4"}) {
@@ -134,25 +143,38 @@ public final class PortraitPreloadTest {
 
   @After
   public void finish() throws Exception {
-    if (audioProbe != null)
-      onMain(
-          () -> {
-            audioProbe.stop();
-            return null;
-          });
-    if (activity != null) rule.finishActivity();
-    if (context != null) {
-      android.content.SharedPreferences.Editor preferences =
-          context.getSharedPreferences("player", 0).edit().putInt("playback_mode", savedMode);
-      if (hadPortraitNavigation)
-        preferences.putInt("portrait_navigation_mode", savedPortraitNavigation);
-      else preferences.remove("portrait_navigation_mode");
-      if (hadEngine) preferences.putInt("engine_choice", savedEngine);
-      else preferences.remove("engine_choice");
-      preferences.commit();
+    try {
+      try {
+        if (audioProbe != null)
+          onMain(
+              () -> {
+                audioProbe.stop();
+                return null;
+              });
+      } finally {
+        if (activity != null) rule.finishActivity();
+      }
+    } finally {
+      try {
+        if (context != null && preferencesSaved) {
+          android.content.SharedPreferences.Editor preferences =
+              context.getSharedPreferences("player", 0).edit();
+          if (hadMode) preferences.putInt("playback_mode", savedMode);
+          else preferences.remove("playback_mode");
+          if (hadPortraitNavigation)
+            preferences.putInt("portrait_navigation_mode", savedPortraitNavigation);
+          else preferences.remove("portrait_navigation_mode");
+          if (hadEngine) preferences.putInt("engine_choice", savedEngine);
+          else preferences.remove("engine_choice");
+          if (hadNativeDecoder) preferences.putInt("native_decoder_mode", savedNativeDecoder);
+          else preferences.remove("native_decoder_mode");
+          assertTrue(preferences.commit());
+        }
+      } finally {
+        for (Bitmap bitmap : references) bitmap.recycle();
+        references.clear();
+      }
     }
-    for (Bitmap bitmap : references) bitmap.recycle();
-    references.clear();
     if (audioProbe != null) audioProbe.assertHealthy();
   }
 

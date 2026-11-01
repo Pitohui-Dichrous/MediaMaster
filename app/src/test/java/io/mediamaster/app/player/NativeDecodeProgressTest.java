@@ -38,6 +38,37 @@ public class NativeDecodeProgressTest {
   }
 
   @Test
+  public void redrawnFramesAndSkippedStatsCannotExtendKnownStalledCounters() {
+    NativeDecodeProgress progress = new NativeDecodeProgress();
+    progress.reset(100, 1);
+    progress.observe(200, 438, 9, 1);
+    for (int i = 1; i <= 30; i++) {
+      // VideoPage checks the surface more frequently than it queries native statistics.
+      progress.observe(200 + i * 500L, 438, 9, i * 2L);
+      progress.observe(250 + i * 500L, -1, -1, i * 2L + 1);
+    }
+    assertEquals(10100, progress.deadline(10000));
+    progress.observe(16000, 0, 0, 100);
+    progress.observe(16500, -1, -1, 101);
+    assertEquals(10100, progress.deadline(10000));
+  }
+
+  @Test
+  public void displayProgressCountsAndANewRequestCanUseUnavailableStatsFallback() {
+    NativeDecodeProgress progress = new NativeDecodeProgress();
+    progress.reset(100, 1);
+    progress.observe(200, 438, 9, 1);
+    progress.observe(500, 438, 10, 2);
+    assertEquals(10500, progress.deadline(10000));
+    progress.reset(1000, 2);
+    // All-zero native counters do not prove that statistics are implemented/enabled.
+    progress.observe(2000, 0, 0, 3);
+    assertEquals(12000, progress.deadline(10000));
+    progress.observe(2500, -1, -1, 4);
+    assertEquals(12500, progress.deadline(10000));
+  }
+
+  @Test
   public void counterResetAndANewSeekCannotBorrowOldProgress() {
     NativeDecodeProgress progress = new NativeDecodeProgress();
     progress.reset(0, 1);

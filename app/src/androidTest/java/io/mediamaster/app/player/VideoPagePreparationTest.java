@@ -3,6 +3,7 @@ package io.mediamaster.app.player;
 import static org.junit.Assert.*;
 
 import android.app.Instrumentation;
+import android.content.SharedPreferences;
 import android.view.ContextThemeWrapper;
 import androidx.media3.common.util.UnstableApi;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
@@ -21,9 +22,17 @@ import org.junit.runner.RunWith;
 public final class VideoPagePreparationTest {
   private final Instrumentation instrumentation = InstrumentationRegistry.getInstrumentation();
   private VideoPage page;
+  private SharedPreferences preferences;
+  private boolean preferenceSaved, hadNativeDecoder;
+  private int savedNativeDecoder;
 
   @Before
   public void pendingPage() {
+    preferences = instrumentation.getTargetContext().getSharedPreferences("player", 0);
+    hadNativeDecoder = preferences.contains("native_decoder_mode");
+    savedNativeDecoder = preferences.getInt("native_decoder_mode", NativeDecoderPolicy.AUTO);
+    preferenceSaved = true;
+    assertTrue(preferences.edit().putInt("native_decoder_mode", NativeDecoderPolicy.AUTO).commit());
     instrumentation.runOnMainSync(
         () -> {
           page =
@@ -58,7 +67,16 @@ public final class VideoPagePreparationTest {
 
   @After
   public void release() {
-    if (page != null) instrumentation.runOnMainSync(page::release);
+    try {
+      if (page != null) instrumentation.runOnMainSync(page::release);
+    } finally {
+      if (preferenceSaved) {
+        SharedPreferences.Editor restore = preferences.edit();
+        if (hadNativeDecoder) restore.putInt("native_decoder_mode", savedNativeDecoder);
+        else restore.remove("native_decoder_mode");
+        assertTrue(restore.commit());
+      }
+    }
   }
 
   @Test

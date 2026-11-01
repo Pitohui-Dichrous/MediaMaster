@@ -26,6 +26,7 @@ import android.view.TextureView;
 import android.view.View;
 import android.view.Window;
 import android.widget.SeekBar;
+import androidx.media3.common.Player;
 import androidx.media3.common.util.UnstableApi;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
@@ -119,6 +120,8 @@ public final class SustainedSeekStressTest {
     assertTrue(engine >= 0 && engine <= 2 && decoder >= 0 && decoder <= 2);
     long recoveryLimit = Long.parseLong(args.getString("benchRecoveryLimitMs", "1500"));
     assertTrue(recoveryLimit >= 250 && recoveryLimit <= 3000);
+    long referenceTimeout = Long.parseLong(args.getString("benchReferenceTimeoutMs", "5000"));
+    assertTrue(referenceTimeout >= 5000 && referenceTimeout <= 15000);
     int steadySeconds = Integer.parseInt(args.getString("benchSteadySeconds", "0"));
     assertTrue(steadySeconds >= 0 && steadySeconds <= 60);
     assertTrue("Steady playback tail requires playing state", steadySeconds == 0 || playing);
@@ -203,11 +206,12 @@ public final class SustainedSeekStressTest {
       // used for the isolated final-target reference and the last tap of the stress stream.
       setPlaying(false);
       showControls();
-      injectOne(tapAt(.12), input);
-      Signature referenceOrigin = stablePicture(5000);
+      Tap referenceOriginTap = tapAt(.12);
+      injectOne(referenceOriginTap, input);
+      Signature referenceOrigin = stablePicture(referenceOriginTap.target, referenceTimeout);
       Tap finalTap = tapAt(.65);
       injectOne(finalTap, input);
-      Signature targetReference = stablePicture(5000);
+      Signature targetReference = stablePicture(finalTap.target, referenceTimeout);
       if (barcodeFps != 0) {
         assertTrue(
             "Synthetic isolated target did not produce a guarded barcode",
@@ -236,7 +240,7 @@ public final class SustainedSeekStressTest {
       showControls();
       Tap reset = tapAt(.12);
       injectOne(reset, input);
-      Signature before = stablePicture(5000);
+      Signature before = stablePicture(reset.target, referenceTimeout);
       double distinct = distance(before, targetReference);
       result
           .put("referenceDistanceFromOrigin", distinct)
@@ -931,20 +935,65 @@ public final class SustainedSeekStressTest {
     }
   }
 
-  private Signature stablePicture(long timeout) throws Exception {
+  private Signature stablePicture(long targetMs, long timeout) throws Exception {
     long until = SystemClock.uptimeMillis() + timeout;
     Signature previous = null;
     int stable = 0;
-    // Let the isolated reference request complete; a stale old frame is not a valid baseline.
-    SystemClock.sleep(650);
     while (SystemClock.uptimeMillis() < until) {
+      // An unchanged old picture during buffering is not a completed isolated seek. Start the
+      // image-stability window only after this exact request has reached the paused renderer.
+      if (!referenceSettled(targetMs)) {
+        previous = null;
+        stable = 0;
+        SystemClock.sleep(50);
+        continue;
+      }
       Signature current = capture();
-      stable = previous != null && distance(previous, current) < .15 ? stable + 1 : 0;
+      if (!referenceSettled(targetMs)) {
+        previous = null;
+        stable = 0;
+        continue;
+      }
+      stable =
+          previous != null
+                  && previous.bindingEpoch == current.bindingEpoch
+                  && distance(previous, current) < .15
+              ? stable + 1
+              : 0;
       if (stable >= 3) return current;
       previous = current;
       SystemClock.sleep(100);
     }
     throw new AssertionError("Isolated paused seek did not settle; no valid comparison reference");
+  }
+
+  private boolean referenceSettled(long targetMs) throws Exception {
+    return onMain(
+        () -> {
+          if (page == null
+              || read(activity, "currentPage") != page
+              || !page.firstFrameReady
+              || page.failed
+              || page.buffering
+              || page.playRequested
+              || (boolean) read(page, "scrubbing")
+              || Math.abs((long) read(page, "explicitSeekTarget") - targetMs) > 200) return false;
+          if (page.exo != null) {
+            long ptsUs = page.lastRenderedPositionUs;
+            return page.exo.getPlaybackState() == Player.STATE_READY
+                && !page.exo.getPlayWhenReady()
+                && page.lastRenderedFrameSequence > 0
+                && ptsUs >= 0
+                && Math.abs(ptsUs - targetMs * 1000) <= 200_000
+                && System.nanoTime() >= (long) read(page, "lastFrameReleaseTimeNs");
+          }
+          if (page.vlc == null || page.vlc.isPlaying()) return false;
+          NativeSeekQueue queue = (NativeSeekQueue) read(page, "nativeSeekQueue");
+          // Native clocks alone do not prove frame PTS. Keep the queue/output fence and the
+          // following pixel-stability checks; synthetic media retains its independent barcode.
+          return !queue.hasWork() && Math.abs(page.vlc.getTime() - targetMs) <= 200;
+        },
+        1000);
   }
 
   private Signature capture() throws Exception {

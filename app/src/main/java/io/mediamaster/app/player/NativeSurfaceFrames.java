@@ -158,6 +158,11 @@ final class NativeSurfaceFrames {
 
   /** Call immediately before submitting a native seek, never from the playback clock callback. */
   void beforeSeek(boolean reprime) {
+    // A previous frame's transaction may already be committed while its main-thread callback is
+    // still queued. It cannot acknowledge a new seek whose native clock is assigned immediately.
+    // Give each submitted seek its own watch; late callbacks keep their old serial and are ignored.
+    watchSerial++;
+    watchPending = false;
     previewSession++;
     previewAfterSequence = copiedPreviewSequence = frameSequence;
     discardCompletedPreview();

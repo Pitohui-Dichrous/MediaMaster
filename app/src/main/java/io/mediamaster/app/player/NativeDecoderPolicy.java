@@ -11,14 +11,27 @@ final class NativeDecoderPolicy {
     final int width, height, profile;
     final double frameRate;
     final boolean hdr;
+    final long syncGapMs;
 
     Metadata(String mime, int width, int height, double frameRate, int profile, boolean hdr) {
+      this(mime, width, height, frameRate, profile, hdr, 0);
+    }
+
+    Metadata(
+        String mime,
+        int width,
+        int height,
+        double frameRate,
+        int profile,
+        boolean hdr,
+        long syncGapMs) {
       this.mime = mime;
       this.width = width;
       this.height = height;
       this.frameRate = frameRate;
       this.profile = profile;
       this.hdr = hdr;
+      this.syncGapMs = Math.max(0, syncGapMs);
     }
   }
 
@@ -63,6 +76,31 @@ final class NativeDecoderPolicy {
     return normalizeMode(mode) == AUTO;
   }
 
+  static boolean hasLongSyncGap(Metadata metadata) {
+    return metadata != null && metadata.syncGapMs >= 4000;
+  }
+
+  static boolean demandingLongGop(Metadata metadata) {
+    return metadata != null
+        && "video/avc".equals(metadata.mime)
+        && isEightBitAvcProfile(metadata.profile)
+        && !metadata.hdr
+        && Double.isFinite(metadata.frameRate)
+        && metadata.frameRate >= 48
+        && metadata.width > 0
+        && metadata.height > 0
+        && (long) metadata.width * metadata.height >= 1920L * 1080
+        && hasLongSyncGap(metadata);
+  }
+
+  /** Zero preserves the native decoder's automatic thread choice; this is not a speed guarantee. */
+  static int softwareThreads(Metadata metadata, Resources resources, int logicalProcessors) {
+    if (!demandingLongGop(metadata) || logicalProcessors < 8) return 0;
+    // Extra frame workers retain additional reference/output buffers. Use a larger admission
+    // reserve than the ordinary software-selection guard; CPU count alone is insufficient.
+    return hasMemoryAndThermalHeadroom(metadata, resources, 64 * MIB, 64) ? 8 : 0;
+  }
+
   /** Native preference is honored before history chooses a different engine. */
   static boolean prefersNativeBeforeHistory(int mode) {
     return normalizeMode(mode) != AUTO;
@@ -78,11 +116,18 @@ final class NativeDecoderPolicy {
   }
 
   private static boolean hasMemoryAndThermalHeadroom(Metadata metadata, Resources resources) {
+    return hasMemoryAndThermalHeadroom(metadata, resources, 32 * MIB, 48);
+  }
+
+  private static boolean hasMemoryAndThermalHeadroom(
+      Metadata metadata, Resources resources, long fixedBytes, long bytesPerPixel) {
     if (resources == null || resources.lowMemory || resources.severeThermalPressure) return false;
     // Approximate native reference/output buffers plus working space. This admission guard uses
     // currently available RAM; it does not label CPU count or a codec-capability entry as a speed
     // test.
-    long workingBytes = 32 * MIB + (long) metadata.width * metadata.height * 48;
+    long pixels = (long) metadata.width * metadata.height;
+    if (pixels <= 0 || pixels > (Long.MAX_VALUE - fixedBytes) / bytesPerPixel) return false;
+    long workingBytes = fixedBytes + pixels * bytesPerPixel;
     long reserve = Math.max(64 * MIB, resources.lowMemoryThresholdBytes);
     return resources.availableBytes > reserve && resources.availableBytes - reserve >= workingBytes;
   }

@@ -152,4 +152,85 @@ public class NativeDecoderPolicyTest {
     assertEquals(1, NativeDecoderPolicy.normalizeMode(1));
     assertEquals(2, NativeDecoderPolicy.normalizeMode(2));
   }
+
+  private static NativeDecoderPolicy.Metadata longGop(int width, int height, double fps, long gap) {
+    return new NativeDecoderPolicy.Metadata("video/avc", width, height, fps, 8, false, gap);
+  }
+
+  @Test
+  public void heavyIndexedAvcGetsOnlyEightWorkersWithResourcesAndEnoughCpus() {
+    assertEquals(
+        8, NativeDecoderPolicy.softwareThreads(longGop(1920, 1080, 60, 10000), AVAILABLE, 8));
+    assertEquals(
+        8, NativeDecoderPolicy.softwareThreads(longGop(1080, 1920, 48, 4000), AVAILABLE, 64));
+    assertEquals(
+        0, NativeDecoderPolicy.softwareThreads(longGop(1920, 1080, 60, 10000), AVAILABLE, 7));
+  }
+
+  @Test
+  public void missingOrLightMediaKeepsNativeThreadDefaults() {
+    assertEquals(0, NativeDecoderPolicy.softwareThreads(null, AVAILABLE, 8));
+    assertEquals(
+        0,
+        NativeDecoderPolicy.softwareThreads(
+            media("video/avc", 1920, 1080, 60, 8, false), AVAILABLE, 8));
+    assertEquals(
+        0, NativeDecoderPolicy.softwareThreads(longGop(1920, 1080, 60, 3999), AVAILABLE, 8));
+    assertEquals(
+        0, NativeDecoderPolicy.softwareThreads(longGop(1280, 720, 60, 10000), AVAILABLE, 8));
+    for (double rate : new double[] {24, 47.99, Double.NaN, Double.POSITIVE_INFINITY})
+      assertEquals(
+          0, NativeDecoderPolicy.softwareThreads(longGop(1920, 1080, rate, 10000), AVAILABLE, 8));
+    assertEquals(
+        0,
+        NativeDecoderPolicy.softwareThreads(
+            new NativeDecoderPolicy.Metadata("video/hevc", 1920, 1080, 60, 1, false, 10000),
+            AVAILABLE,
+            8));
+    assertEquals(
+        0,
+        NativeDecoderPolicy.softwareThreads(
+            new NativeDecoderPolicy.Metadata("video/avc", 1920, 1080, 60, 16, false, 10000),
+            AVAILABLE,
+            8));
+    assertEquals(
+        0,
+        NativeDecoderPolicy.softwareThreads(
+            new NativeDecoderPolicy.Metadata("video/avc", 1920, 1080, 60, 8, true, 10000),
+            AVAILABLE,
+            8));
+  }
+
+  @Test
+  public void workerAdmissionUsesLargerMemoryReserveAndPreservesExplicitSoftware() {
+    NativeDecoderPolicy.Metadata video = longGop(1920, 1080, 60, 10000);
+    NativeDecoderPolicy.Resources tight =
+        new NativeDecoderPolicy.Resources(300 * MIB, 128 * MIB, false, false);
+    assertTrue(NativeDecoderPolicy.useSoftware(NativeDecoderPolicy.AUTO, false, video, tight));
+    assertEquals(0, NativeDecoderPolicy.softwareThreads(video, tight, 8));
+    for (NativeDecoderPolicy.Resources pressure :
+        new NativeDecoderPolicy.Resources[] {
+          null,
+          new NativeDecoderPolicy.Resources(1024 * MIB, 128 * MIB, true, false),
+          new NativeDecoderPolicy.Resources(1024 * MIB, 128 * MIB, false, true)
+        }) {
+      assertEquals(0, NativeDecoderPolicy.softwareThreads(video, pressure, 8));
+      assertTrue(
+          NativeDecoderPolicy.useSoftware(NativeDecoderPolicy.SOFTWARE, true, video, pressure));
+    }
+    assertFalse(
+        NativeDecoderPolicy.useSoftware(NativeDecoderPolicy.HARDWARE, false, video, AVAILABLE));
+    assertTrue(NativeDecoderPolicy.demandingLongGop(video));
+  }
+
+  @Test
+  public void unknownDecisionCannotInvertAnExplicitDecoderPreference() {
+    assertTrue(NativeDecoderPolicy.useSoftware(NativeDecoderPolicy.SOFTWARE, true, null, null));
+    assertFalse(NativeDecoderPolicy.useSoftware(NativeDecoderPolicy.HARDWARE, false, null, null));
+    assertFalse(NativeDecoderPolicy.useSoftware(NativeDecoderPolicy.AUTO, false, null, null));
+    assertEquals(
+        0,
+        NativeDecoderPolicy.softwareThreads(
+            longGop(Integer.MAX_VALUE, Integer.MAX_VALUE, 60, 10000), AVAILABLE, 8));
+  }
 }

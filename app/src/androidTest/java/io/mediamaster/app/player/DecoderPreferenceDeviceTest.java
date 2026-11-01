@@ -12,11 +12,13 @@ import android.graphics.Bitmap;
 import android.graphics.Rect;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.provider.MediaStore;
+import android.util.Log;
 import android.view.View;
 import android.view.accessibility.AccessibilityNodeInfo;
 import androidx.media3.common.util.UnstableApi;
@@ -28,6 +30,7 @@ import io.mediamaster.app.media.VideoItem;
 import java.io.File;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
@@ -38,6 +41,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import org.json.JSONObject;
 import org.junit.After;
 import org.junit.Assume;
 import org.junit.Before;
@@ -45,6 +49,7 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.videolan.libvlc.MediaPlayer;
+import org.videolan.libvlc.interfaces.IMedia;
 
 /** Real settings and decoder routing. Only explicitly named, generated public files are opened. */
 @UnstableApi
@@ -53,6 +58,7 @@ public final class DecoderPreferenceDeviceTest {
   private static final String FOLDER = "Movies/MediaMasterGeneric_20261101/";
   private static final String HIGH_RATE = "mm_modes_1080p60.mp4";
   private static final String BARCODE = "mm_seek_b2_h264_720_gop1.mp4";
+  private static final String LONG_GOP = "mm_seek_stress_1080p60_gop600.mp4";
   private static final String[] PREF_KEYS = {
     "engine_choice", "playback_mode", "native_decoder_mode"
   };
@@ -282,6 +288,293 @@ public final class DecoderPreferenceDeviceTest {
           }
         });
     assertPausedAndRetained(false);
+  }
+
+  @Test
+  public void longGopSoftwareUsesRealHeadersAndRetainsAccuratePausedFrames() throws Exception {
+    setMode(NativeDecoderPolicy.SOFTWARE);
+    VideoItem item = fixture(LONG_GOP);
+    NativeDecoderPolicy.Metadata headers =
+        (NativeDecoderPolicy.Metadata)
+            invokeStatic(
+                NativeDecoderSelector.class,
+                "readHeaders",
+                new Class<?>[] {Context.class, VideoItem.class},
+                context,
+                item);
+    assertEquals("video/avc", headers.mime);
+    assertEquals(1920, Math.max(headers.width, headers.height));
+    assertEquals(1080, Math.min(headers.width, headers.height));
+    assertEquals(60, headers.frameRate, .1);
+    assertTrue(
+        "The real media index exposes a long dependency interval", headers.syncGapMs >= 4000);
+    await(() -> resolveSoftware(item) && onMain(() -> NativeDecoderSelector.cachedLongGop(item)));
+    int threads = onMain(() -> NativeDecoderSelector.cachedSoftwareThreads(context, item));
+    assertTrue(
+        "Live resources choose bounded threads or the native default",
+        threads == 0 || threads == 8);
+    launch(item, true);
+    assertFalse(
+        "High-rate long GOP does not override the explicit software preference",
+        onMain(() -> field(VideoPage.class, "nativeHealthScheduled").getBoolean(page)));
+    LongGopDiagnostics diagnostics = new LongGopDiagnostics();
+    onMain(
+        () -> {
+          diagnostics.start();
+          return null;
+        });
+    try {
+      pause();
+      for (long target : new long[] {6200, 1200, 4800, 2400, 7000}) {
+        Bitmap before = capture();
+        OpticalSeekBenchmark.Code previous;
+        try {
+          previous = OpticalSeekBenchmark.decode(before);
+          assertNotNull("The generated frame barcode is readable before seeking", previous);
+        } finally {
+          before.recycle();
+        }
+        onMain(
+            () -> {
+              diagnostics.beginTarget(target, Math.round(previous.frame * 1000.0 / 60));
+              page.seekTo(target);
+              diagnostics.sample();
+              return null;
+            });
+        awaitQueueDrain();
+        await(
+            () ->
+                onMain(
+                    () ->
+                        !source.isPlaying()
+                            && !page.playRequested
+                            && !field(VideoPage.class, "nativeSeekAwaitingPause")
+                                .getBoolean(page)));
+        await(
+            () -> {
+              Bitmap after = capture();
+              try {
+                OpticalSeekBenchmark.Code code = OpticalSeekBenchmark.decode(after);
+                diagnostics.lastDecodedFrameMs =
+                    code == null ? -1 : Math.round(code.frame * 1000.0 / 60);
+                return code != null
+                    && code.frame != previous.frame
+                    && Math.abs(Math.round(code.frame * 1000.0 / 60) - target) <= 200;
+              } finally {
+                after.recycle();
+              }
+            });
+        assertPausedAndRetained(true);
+      }
+    } catch (Exception | AssertionError failure) {
+      try {
+        diagnostics.dump();
+      } catch (Exception diagnosticFailure) {
+        failure.addSuppressed(diagnosticFailure);
+      }
+      throw failure;
+    } finally {
+      onMain(
+          () -> {
+            diagnostics.stop();
+            return null;
+          });
+    }
+  }
+
+  /** Bounded numeric state only: no media URI, media pixels, or device identity is recorded. */
+  private final class LongGopDiagnostics implements Runnable {
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private final ArrayDeque<String> samples = new ArrayDeque<>();
+    private final ArrayList<String> targetStarts = new ArrayList<>();
+    private boolean running;
+    private long targetMs = -1;
+    private long targetStartedAt = -1;
+    private int targetSamples;
+    private volatile long lastDecodedFrameMs = -1;
+    private long previousFrameMs = -1;
+
+    void beginTarget(long target, long previous) {
+      targetMs = target;
+      previousFrameMs = previous;
+      lastDecodedFrameMs = previous;
+      targetStartedAt = SystemClock.uptimeMillis();
+      targetSamples = 0;
+    }
+
+    void start() {
+      running = true;
+      run();
+    }
+
+    void stop() {
+      running = false;
+      handler.removeCallbacks(this);
+    }
+
+    @Override
+    public void run() {
+      if (!running) return;
+      sample();
+      if (running) handler.postDelayed(this, 100);
+    }
+
+    void sample() {
+      try {
+        record(snapshot().toString());
+      } catch (Exception failure) {
+        record("{\"diagnosticError\":\"" + failure.getClass().getSimpleName() + "\"}");
+      }
+    }
+
+    private void record(String sample) {
+      if (samples.size() == 60) samples.removeFirst();
+      samples.addLast(sample);
+      if (targetStartedAt >= 0
+          && SystemClock.uptimeMillis() - targetStartedAt <= 2000
+          && targetSamples < 20
+          && targetStarts.size() < 100) {
+        targetStarts.add(sample);
+        targetSamples++;
+      }
+    }
+
+    private JSONObject snapshot() throws Exception {
+      JSONObject state =
+          new JSONObject()
+              .put("atUptime", SystemClock.uptimeMillis())
+              .put("targetMs", targetMs)
+              .put("targetStartedAt", targetStartedAt)
+              .put("previousFrameMs", previousFrameMs)
+              .put("lastDecodedFrameMs", lastDecodedFrameMs);
+      if (page == null) return state.put("available", false);
+      state
+          .put("engine", page.exo != null ? "Media3" : page.vlc != null ? "LibVLC" : "none")
+          .put("sameSource", page.vlc == source)
+          .put("playRequested", page.playRequested)
+          .put("buffering", page.buffering)
+          .put("failed", page.failed)
+          .put("firstFrameReady", page.firstFrameReady)
+          .put("windowVisibility", page.getWindowVisibility())
+          .put("latestSurfaceProgress", invoke(page, "nativeFrameProgressToken", new Class<?>[0]));
+      JSONObject seek = new JSONObject();
+      for (String name :
+          new String[] {
+            "nativeSeekFrameBaseline",
+            "nativeSeekTextureBaseline",
+            "nativeSeekDeadline",
+            "nativeSeekSubmittedAt",
+            "nativeSeekClockStepMs",
+            "nativeSeekClockRate",
+            "nativeSeekAwaitingPause",
+            "lastRenderedFrameSequence",
+            "lastRenderedPositionUs",
+            "warmingVlc",
+            "scrubbing",
+            "pendingSeek",
+            "pendingSeekSet",
+            "active",
+            "nativeSoftware",
+            "decoderPreference",
+            "vlcRunningRequested",
+            "nativeSurfacePlayback",
+            "explicitSeekTarget",
+            "explicitSeekSerial",
+            "nextNativeProgressStatsAt"
+          }) seek.put(name, numericField(page, name));
+      NativeSeekQueue queue = (NativeSeekQueue) field(VideoPage.class, "nativeSeekQueue").get(page);
+      JSONObject queueState =
+          new JSONObject()
+              .put("serial", numericField(queue, "serial"))
+              .put("submittedAtMs", numericField(queue, "submittedAtMs"))
+              .put("hasWork", queue.hasWork())
+              .put("latestPositionMs", queue.latestPositionMs());
+      for (String name : new String[] {"submitted", "pending"}) {
+        Object request = field(NativeSeekQueue.class, name).get(queue);
+        queueState.put(
+            name,
+            request == null
+                ? JSONObject.NULL
+                : new JSONObject()
+                    .put("id", numericField(request, "id"))
+                    .put("positionMs", numericField(request, "positionMs"))
+                    .put("fast", numericField(request, "fast")));
+      }
+      seek.put("queue", queueState);
+      Object progress = field(VideoPage.class, "nativeDecodeProgress").get(page);
+      JSONObject progressState = new JSONObject();
+      for (String name :
+          new String[] {"decoded", "displayed", "frameToken", "lastProgressMs", "statsSeen"})
+        progressState.put(name, numericField(progress, name));
+      seek.put("decodeProgress", progressState);
+      Object frames = field(VideoPage.class, "nativeSurfaceFrames").get(page);
+      JSONObject surfaceState = new JSONObject();
+      if (frames != null) {
+        for (String name :
+            new String[] {
+              "frameSequence",
+              "readyAfterSequence",
+              "watchPending",
+              "watchSerial",
+              "available",
+              "ready",
+              "surfaceEpoch",
+              "binding",
+              "copyInFlight"
+            }) surfaceState.put(name, numericField(frames, name));
+      }
+      seek.put("surfaceFrames", frames == null ? JSONObject.NULL : surfaceState);
+      state.put("nativeSeekDiagnostics", seek);
+      MediaPlayer current = page.vlc;
+      if (current != null) {
+        state
+            .put("nativePlayerIdentity", System.identityHashCode(current))
+            .put("clockMs", current.getTime())
+            .put("nativePlaying", current.isPlaying())
+            .put("seekable", current.isSeekable())
+            .put("volume", current.getVolume());
+        IMedia media = current.getMedia();
+        try {
+          IMedia.Stats stats = media == null ? null : media.getStats();
+          if (stats != null)
+            state
+                .put("decoded", stats.decodedVideo)
+                .put("displayed", stats.displayedPictures)
+                .put("lost", stats.lostPictures);
+        } finally {
+          if (media != null) media.release();
+        }
+      }
+      return state;
+    }
+
+    private Object numericField(Object target, String name) throws Exception {
+      Object value = field(target.getClass(), name).get(target);
+      return value instanceof Number || value instanceof Boolean ? value : JSONObject.NULL;
+    }
+
+    void dump() throws Exception {
+      ArrayList<String> frozen =
+          onMain(
+              () -> {
+                stop();
+                try {
+                  record(snapshot().toString());
+                } catch (Exception failure) {
+                  record("{\"diagnosticError\":\"" + failure.getClass().getSimpleName() + "\"}");
+                }
+                ArrayList<String> result = new ArrayList<>(targetStarts);
+                result.addAll(samples);
+                return result;
+              });
+      for (String sample : frozen) {
+        String line = "LONG_GOP_SEEK_DIAGNOSTIC " + sample;
+        Log.e("LongGopSeek", line);
+        Bundle status = new Bundle();
+        status.putString("stream", line + "\n");
+        instrumentation.sendStatus(0, status);
+      }
+    }
   }
 
   private void assertHighRatePausedScrubRetainsDecoder() throws Exception {

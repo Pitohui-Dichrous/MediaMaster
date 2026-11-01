@@ -2,6 +2,8 @@ package io.mediamaster.app.player;
 
 import static org.junit.Assert.*;
 
+import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Random;
 import org.junit.Test;
@@ -51,7 +53,7 @@ public class PlayerLogicTest {
   }
 
   @Test
-  public void shuffleVisitsEntireDeckAndPreviousRetracesHistory() {
+  public void shuffleVisitsEntireRoundAndPreviousReversesForwardNavigation() {
     PlaybackOrder order = new PlaybackOrder(20, 4, PlaybackOrder.SHUFFLE, new Random(42));
     HashSet<Integer> visited = new HashSet<>();
     visited.add(order.current());
@@ -81,13 +83,18 @@ public class PlayerLogicTest {
   }
 
   @Test
-  public void randomPreviousAvailabilityFollowsActualWatchHistory() {
+  public void randomPreviousWrapsFromItsInitialItemAndReturnsForward() {
     PlaybackOrder order = new PlaybackOrder(4, 0, PlaybackOrder.SHUFFLE, new Random(7));
-    assertFalse(order.hasPrevious());
+    assertTrue(order.hasPrevious());
+    int previous = order.peekPrevious();
+    assertNotEquals(0, previous);
+    assertEquals(previous, order.previous());
+    assertEquals(0, order.peekNext());
+    assertEquals(0, order.next(false));
     order.next(false);
     assertTrue(order.hasPrevious());
     assertEquals(0, order.previous());
-    assertFalse(order.hasPrevious());
+    assertTrue(order.hasPrevious());
     order.setMode(PlaybackOrder.SINGLE);
     assertTrue(order.hasPrevious());
   }
@@ -97,6 +104,7 @@ public class PlayerLogicTest {
     PlaybackOrder order = new PlaybackOrder(1, 0, PlaybackOrder.SHUFFLE);
     for (int i = 0; i < 10; i++) assertEquals(0, order.next(true));
     assertEquals(0, order.previous());
+    assertFalse(order.hasPrevious());
   }
 
   @Test
@@ -116,7 +124,7 @@ public class PlayerLogicTest {
   }
 
   @Test
-  public void shufflePreloadingDoesNotCreateHistoryOrConsumeAnyDeckCandidates() {
+  public void shufflePreloadingDoesNotAdvanceOrChangeTheForwardRounds() {
     PlaybackOrder preloaded = new PlaybackOrder(7, 2, PlaybackOrder.SHUFFLE, new Random(27));
     PlaybackOrder baseline = new PlaybackOrder(7, 2, PlaybackOrder.SHUFFLE, new Random(27));
     for (int i = 0; i < 80; i++) {
@@ -135,23 +143,26 @@ public class PlayerLogicTest {
   }
 
   @Test
-  public void shufflePeeksAtOriginDoNotInventAPreviousVideo() {
+  public void shufflePeeksAtOriginExposeStableNeighborsWithoutNavigating() {
     PlaybackOrder order = new PlaybackOrder(6, 4, PlaybackOrder.SHUFFLE, new Random(11));
     int candidate = order.peekNext();
+    int predecessor = order.peekPrevious();
+    assertNotEquals(4, predecessor);
     for (int i = 0; i < 50; i++) {
-      assertFalse(order.hasPrevious());
-      assertEquals(4, order.peekPrevious());
+      assertTrue(order.hasPrevious());
+      assertEquals(predecessor, order.peekPrevious());
       assertEquals(4, order.current());
       assertEquals(candidate, order.peekNext());
     }
-    assertEquals(4, order.previous());
+    assertEquals(predecessor, order.previous());
+    assertEquals(4, order.next(false));
     assertEquals(candidate, order.next(false));
     assertTrue(order.hasPrevious());
     assertEquals(4, order.peekPrevious());
   }
 
   @Test
-  public void shuffleBacktrackingKeepsForwardHistoryAndPreparedFutureCandidateStable() {
+  public void shuffleBacktrackingKeepsBothPreloadedNeighborsStable() {
     PlaybackOrder order = new PlaybackOrder(5, 0, PlaybackOrder.SHUFFLE, new Random(5));
     int first = order.next(false);
     int second = order.next(false);
@@ -162,7 +173,8 @@ public class PlayerLogicTest {
     assertEquals(0, order.peekPrevious());
     assertEquals(0, order.previous());
     assertEquals(first, order.peekNext());
-    assertFalse(order.hasPrevious());
+    assertTrue(order.hasPrevious());
+    assertNotEquals(0, order.peekPrevious());
     assertEquals(first, order.next(false));
     assertEquals(second, order.peekNext());
     assertEquals(second, order.next(false));
@@ -194,6 +206,7 @@ public class PlayerLogicTest {
       for (int i = 0; i < 6; i++) {
         assertEquals(0, single.peekNext());
         assertEquals(0, single.peekPrevious());
+        assertFalse(single.hasPrevious());
         assertEquals(0, single.current());
         assertEquals(0, single.next(false));
         assertEquals(0, single.previous());
@@ -211,8 +224,9 @@ public class PlayerLogicTest {
   }
 
   @Test
-  public void changingModeDiscardsPreparedShuffleCandidateAndResetsHistory() {
-    PlaybackOrder order = new PlaybackOrder(6, 3, PlaybackOrder.SHUFFLE, new Random(17));
+  public void changingModeCreatesANewInitialRoundAnchoredAtTheCurrentVideo() {
+    CountingRandom random = new CountingRandom(17);
+    PlaybackOrder order = new PlaybackOrder(6, 3, PlaybackOrder.SHUFFLE, random);
     order.next(false);
     order.peekNext();
     int current = order.current();
@@ -223,8 +237,10 @@ public class PlayerLogicTest {
     assertEquals(current, order.next(true));
     order.setMode(PlaybackOrder.SHUFFLE);
     assertEquals(current, order.current());
-    assertEquals(current, order.peekPrevious());
-    assertFalse(order.hasPrevious());
+    int drawsBeforeReentry = random.draws;
+    assertNotEquals(current, order.peekPrevious());
+    assertTrue("A new shuffle session draws a new permutation", random.draws > drawsBeforeReentry);
+    assertTrue(order.hasPrevious());
     int candidate = order.peekNext();
     assertNotEquals(current, candidate);
     assertEquals(candidate, order.next(false));
@@ -257,7 +273,7 @@ public class PlayerLogicTest {
   }
 
   @Test
-  public void portraitRandomNaturalLoopsNeverConsumePreloadedCandidatesOrWatchHistory() {
+  public void portraitRandomNaturalLoopsNeverAdvanceTheRoundsOrItsPreloadedCandidates() {
     PlaybackOrder portrait = new PlaybackOrder(7, 2, PlaybackOrder.SHUFFLE, new Random(32));
     PlaybackOrder manualBaseline = new PlaybackOrder(7, 2, PlaybackOrder.SHUFFLE, new Random(32));
     portrait.setPortraitMode(true);
@@ -313,7 +329,7 @@ public class PlayerLogicTest {
   }
 
   @Test
-  public void sameNavigationClassModeRoundTripsKeepShuffleHistoryAndPreparedCandidate() {
+  public void sameNavigationClassModeRoundTripsKeepShuffleRoundsAndPreparedCandidate() {
     PlaybackOrder order = new PlaybackOrder(6, 0, PlaybackOrder.SHUFFLE, new Random(6));
     int first = order.next(false);
     int second = order.next(false);
@@ -338,7 +354,7 @@ public class PlayerLogicTest {
   }
 
   @Test
-  public void restoringInactivePortraitChoiceLeavesFullScreenHistoryUntouched() {
+  public void restoringInactivePortraitChoiceLeavesFullScreenRoundsUntouched() {
     PlaybackOrder order = new PlaybackOrder(6, 0, PlaybackOrder.SHUFFLE, new Random(9));
     order.next(false);
     int current = order.current();
@@ -361,8 +377,246 @@ public class PlayerLogicTest {
     assertEquals((current + 1) % 6, order.peekNext());
     assertEquals(PlaybackOrder.SHUFFLE, order.fullScreenMode());
     order.setPortraitMode(false);
-    assertFalse("A genuine order-class change starts a fresh random context", order.hasPrevious());
-    assertEquals(current, order.peekPrevious());
+    assertTrue("A new random context still has a previous-round item", order.hasPrevious());
+    assertNotEquals(current, order.peekPrevious());
+    assertEquals(current, order.current());
+  }
+
+  @Test
+  public void everyNewRoundVisitsAllVideosOnceInEitherDirectionBeyondTheOldHistoryLimit() {
+    for (int count : new int[] {1, 2, 7, 2053}) {
+      int initial = count / 2;
+      int[] visits = new int[count];
+      for (boolean forward : new boolean[] {true, false}) {
+        PlaybackOrder order =
+            new PlaybackOrder(count, initial, PlaybackOrder.SHUFFLE, new Random(43));
+        for (int round = 0; round < 6; round++) {
+          if (round > 0 || !forward) {
+            int before = order.current();
+            int item = forward ? order.next(false) : order.previous();
+            if (count > 1) assertNotEquals(before, item);
+          }
+          HashSet<Integer> seen = new HashSet<>();
+          seen.add(order.current());
+          visits[order.current()]++;
+          for (int step = 1; step < count; step++) {
+            int before = order.current();
+            int candidate = forward ? order.peekNext() : order.peekPrevious();
+            assertEquals(before, order.current());
+            int item = forward ? order.next(false) : order.previous();
+            assertEquals(candidate, item);
+            if (count > 1) assertNotEquals(before, item);
+            assertTrue("Every item must appear exactly once per round", seen.add(item));
+            visits[item]++;
+          }
+          assertEquals(count, seen.size());
+        }
+      }
+      for (int visitsForItem : visits) assertEquals(12, visitsForItem);
+    }
+  }
+
+  @Test
+  public void initialRoundShuffleDrawsGiveEveryEligibleItemEqualPositions() {
+    // Enumerate all 4! equally likely draw paths for four unanchored items. This is exact,
+    // deterministic coverage of inclusion and positional fairness, not a random frequency test.
+    for (int initial = 0; initial < 5; initial++) {
+      HashSet<String> permutations = new HashSet<>();
+      int[][] positions = new int[5][5];
+      for (int a = 0; a < 4; a++) {
+        for (int b = 0; b < 3; b++) {
+          for (int c = 0; c < 2; c++) {
+            int[] draws = {a, b, c};
+            Random random =
+                new Random(0) {
+                  private int index;
+
+                  @Override
+                  public int nextInt(int bound) {
+                    assertTrue("Unexpected extra random draw", index < draws.length);
+                    int value = draws[index++];
+                    assertTrue(value >= 0 && value < bound);
+                    return value;
+                  }
+                };
+            PlaybackOrder order = new PlaybackOrder(5, initial, PlaybackOrder.SHUFFLE, random);
+            int[] round = new int[5];
+            round[0] = order.current();
+            for (int position = 1; position < round.length; position++) {
+              round[position] = order.next(false);
+              positions[position][round[position]]++;
+            }
+            assertEquals(initial, round[0]);
+            assertTrue(
+                "Every draw path must produce a distinct permutation",
+                permutations.add(Arrays.toString(round)));
+          }
+        }
+      }
+      assertEquals(24, permutations.size());
+      for (int position = 1; position < 5; position++) {
+        for (int item = 0; item < 5; item++) {
+          assertEquals(item == initial ? 0 : 6, positions[position][item]);
+        }
+      }
+    }
+  }
+
+  @Test
+  public void eachBoundaryAllowedPermutationIsEquallyLikelyAndStillIncludesTheLastVideo() {
+    // Four-item permutations have 24 equally likely shuffle paths. Enumerating a third
+    // repair choice even when unused weights each path identically and covers all 72 cases.
+    HashMap<String, Integer> permutations = new HashMap<>();
+    int[] firstPositions = new int[4];
+    int previousLast = -1;
+    for (int a = 0; a < 4; a++) {
+      for (int b = 0; b < 3; b++) {
+        for (int c = 0; c < 2; c++) {
+          for (int repair = 0; repair < 3; repair++) {
+            int[] draws = {0, 0, a, b, c, repair};
+            Random random =
+                new Random(0) {
+                  private int index;
+
+                  @Override
+                  public int nextInt(int bound) {
+                    assertTrue("Unexpected extra random draw", index < draws.length);
+                    int value = draws[index++];
+                    assertTrue(value >= 0 && value < bound);
+                    return value;
+                  }
+                };
+            PlaybackOrder order = new PlaybackOrder(4, 0, PlaybackOrder.SHUFFLE, random);
+            for (int step = 1; step < 4; step++) order.next(false);
+            previousLast = order.current();
+            int[] round = new int[4];
+            HashSet<Integer> seen = new HashSet<>();
+            for (int position = 0; position < 4; position++) {
+              round[position] = order.next(false);
+              assertTrue(seen.add(round[position]));
+            }
+            assertNotEquals(previousLast, round[0]);
+            assertEquals(4, seen.size());
+            firstPositions[round[0]]++;
+            String permutation = Arrays.toString(round);
+            permutations.put(permutation, permutations.getOrDefault(permutation, 0) + 1);
+          }
+        }
+      }
+    }
+    assertEquals(18, permutations.size());
+    for (int occurrences : permutations.values()) assertEquals(4, occurrences);
+    for (int item = 0; item < 4; item++) {
+      assertEquals(item == previousLast ? 0 : 24, firstPositions[item]);
+    }
+  }
+
+  @Test
+  public void recentRoundBoundariesRetraceExactlyWhilePeekingBothSides() {
+    for (int count : new int[] {2, 3, 9}) {
+      PlaybackOrder order = new PlaybackOrder(count, 0, PlaybackOrder.SHUFFLE, new Random(91));
+      int[] path = new int[2 * count];
+      path[0] = order.current();
+      for (int step = 1; step < path.length; step++) {
+        order.peekPrevious();
+        int candidate = order.peekNext();
+        path[step] = order.next(false);
+        assertEquals(candidate, path[step]);
+      }
+      order.peekNext();
+      for (int step = path.length - 2; step >= 0; step--) {
+        order.peekNext();
+        assertEquals(path[step], order.peekPrevious());
+        assertEquals(path[step], order.previous());
+      }
+      order.peekPrevious();
+      for (int step = 1; step < path.length; step++) {
+        assertEquals(path[step], order.peekNext());
+        assertEquals(path[step], order.next(false));
+      }
+    }
+  }
+
+  private static final class CountingRandom extends Random {
+    int draws;
+
+    CountingRandom(long seed) {
+      super(seed);
+    }
+
+    @Override
+    public int nextInt(int bound) {
+      draws++;
+      return super.nextInt(bound);
+    }
+  }
+
+  @Test
+  public void weightedRoundsCoverAllItemsWithoutBoundaryRepeatsInBothDirections() {
+    for (int count : new int[] {1, 2, 17, 2053}) {
+      for (boolean forward : new boolean[] {true, false}) {
+        PlaybackOrder order =
+            new PlaybackOrder(
+                count,
+                count / 2,
+                PlaybackOrder.SHUFFLE,
+                new Random(67),
+                index -> WeightedShuffle.weight(index * 20L));
+        for (int round = 0; round < 6; round++) {
+          if (round > 0 || !forward) {
+            int before = order.current();
+            int item = forward ? order.next(false) : order.previous();
+            if (count > 1) assertNotEquals(before, item);
+          }
+          HashSet<Integer> seen = new HashSet<>();
+          seen.add(order.current());
+          for (int step = 1; step < count; step++) {
+            int before = order.current();
+            int candidate = forward ? order.peekNext() : order.peekPrevious();
+            assertEquals(before, order.current());
+            assertEquals(candidate, forward ? order.next(false) : order.previous());
+            assertTrue(seen.add(candidate));
+          }
+          assertEquals(count, seen.size());
+        }
+      }
+    }
+  }
+
+  @Test
+  public void changedPlayCountsDoNotInvalidatePreparedNeighborsOrRecentWeightedHistory() {
+    long[] plays = {0, 1, 10, 100};
+    int[] reads = new int[4];
+    PlaybackOrder order =
+        new PlaybackOrder(
+            4,
+            0,
+            PlaybackOrder.SHUFFLE,
+            new Random(78),
+            index -> {
+              reads[index]++;
+              return WeightedShuffle.weight(plays[index]);
+            });
+    int next = order.peekNext();
+    int previous = order.peekPrevious();
+    for (int readCount : reads) assertEquals(2, readCount);
+    Arrays.fill(plays, 1000);
+    plays[3] = 0;
+    for (int repeat = 0; repeat < 10; repeat++) {
+      assertEquals(next, order.peekNext());
+      assertEquals(previous, order.peekPrevious());
+    }
+    for (int readCount : reads) assertEquals(2, readCount);
+    int[] path = new int[8];
+    path[0] = order.current();
+    for (int step = 1; step < path.length; step++) path[step] = order.next(false);
+    for (int readCount : reads) assertEquals(3, readCount);
+    for (int step = path.length - 2; step >= 0; step--) {
+      assertEquals(path[step], order.peekPrevious());
+      assertEquals(path[step], order.previous());
+    }
+    assertEquals(previous, order.peekPrevious());
+    for (int readCount : reads) assertEquals(3, readCount);
   }
 
   @Test

@@ -15,7 +15,9 @@ import android.widget.*;
 import androidx.recyclerview.widget.*;
 import io.mediamaster.app.library.*;
 import io.mediamaster.app.media.*;
+import io.mediamaster.app.player.PlaybackStatsStore;
 import io.mediamaster.app.player.PlayerActivity;
+import io.mediamaster.app.player.WeightedShuffle;
 import java.text.*;
 import java.util.*;
 import java.util.concurrent.*;
@@ -23,6 +25,7 @@ import java.util.concurrent.*;
 @androidx.media3.common.util.UnstableApi
 public class MainActivity extends Activity {
   private VideoRepository repository;
+  private PlaybackStatsStore playbackStats;
   private ThumbnailLoader thumbnails;
   private final ExecutorService worker = Executors.newSingleThreadExecutor();
   private final Handler handler = new Handler(Looper.getMainLooper());
@@ -42,6 +45,8 @@ public class MainActivity extends Activity {
   private EditText search;
   private ImageButton scanButton;
   private boolean scanning, scanAgain, active, destroyed;
+  private boolean randomPending;
+  private int randomRequest;
   private int sort = 0;
   private int renderedDateKind = -1;
   private String query = "";
@@ -67,6 +72,7 @@ public class MainActivity extends Activity {
     setTheme(Ui.isDark(this) ? R.style.AppThemeDark : R.style.AppTheme);
     super.onCreate(state);
     TaskIdentity.update(this);
+    playbackStats = PlaybackStatsStore.get(this);
     getWindow().setStatusBarColor(Ui.BG);
     getWindow().setNavigationBarColor(Ui.BG);
     updateSystemBarAppearance();
@@ -453,6 +459,8 @@ public class MainActivity extends Activity {
   @Override
   protected void onPause() {
     active = false;
+    randomRequest++;
+    randomPending = false;
     mediaObserver.stop();
     handler.removeCallbacks(reconcileMediaIndex);
     super.onPause();
@@ -786,6 +794,8 @@ public class MainActivity extends Activity {
       toast("暂无视频");
       return;
     }
+    randomRequest++;
+    randomPending = false;
     search.clearFocus();
     ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE))
         .hideSoftInputFromWindow(search.getWindowToken(), 0);
@@ -798,7 +808,23 @@ public class MainActivity extends Activity {
       else toast("暂无视频");
       return;
     }
-    open(new Random().nextInt(visible.size()), true);
+    if (randomPending) return;
+    randomPending = true;
+    int request = ++randomRequest;
+    playbackStats.whenReady(
+        () -> {
+          if (request != randomRequest || destroyed || !active) return;
+          randomPending = false;
+          if (visible.isEmpty()) {
+            toast("暂无视频");
+            return;
+          }
+          long[] counts = playbackStats.snapshot(visible);
+          int index =
+              WeightedShuffle.choose(
+                  counts.length, i -> WeightedShuffle.weight(counts[i]), new Random());
+          open(index, true);
+        });
   }
 
   private void sources() {
@@ -1197,6 +1223,7 @@ public class MainActivity extends Activity {
   /** Runs on the serial library worker, before any queued observer reconciliation. */
   private void persistMutation(VideoItem original, VideoItem replacement, String message) {
     repository.rememberMutation(original, replacement);
+    if (replacement != null) playbackStats.migrate(original, replacement);
     List<VideoItem> items = repository.snapshot();
     handler.post(
         () -> {

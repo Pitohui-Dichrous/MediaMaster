@@ -56,6 +56,7 @@ import io.mediamaster.app.media.VideoItem;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Locale;
+import java.util.Random;
 import org.videolan.libvlc.LibVLC;
 import org.videolan.libvlc.MediaPlayer;
 import org.videolan.libvlc.util.VLCVideoLayout;
@@ -70,6 +71,10 @@ public final class PlayerActivity extends Activity {
   private final Handler handler = new Handler(Looper.getMainLooper());
   private ArrayList<VideoItem> queue = new ArrayList<>();
   private PlaybackOrder order;
+  private PlaybackStatsStore playbackStats;
+  private boolean playEntryRecorded, mutatingPageWindow;
+  private boolean navigationPending;
+  private int navigationRequestGeneration;
   private String queueToken;
   private FrameLayout root, videoStage;
   private PlayerView exoView;
@@ -221,7 +226,19 @@ public final class PlayerActivity extends Activity {
     if (getIntent().getBooleanExtra(EXTRA_SHUFFLE, false)) mode = PlaybackOrder.SHUFFLE;
     if (state != null) mode = state.getInt("mode", mode);
     int index = state != null ? state.getInt(EXTRA_INDEX) : getIntent().getIntExtra(EXTRA_INDEX, 0);
-    order = new PlaybackOrder(queue.size(), index, mode);
+    playbackStats = PlaybackStatsStore.get(this);
+    playEntryRecorded = state != null && state.getBoolean("play_entry_recorded", false);
+    order =
+        new PlaybackOrder(
+            queue.size(),
+            index,
+            mode,
+            new Random(),
+            i -> WeightedShuffle.weight(playbackStats.playCount(queue.get(i))));
+    playbackStats.whenReady(
+        () -> {
+          if (!isFinishing() && !isDestroyed()) ensurePortraitWindow();
+        });
     sensitivity = getSharedPreferences("player", MODE_PRIVATE).getFloat("seek_sensitivity", 1f);
     if (state != null) {
       portraitMode = state.getBoolean("portrait_mode", false);
@@ -447,7 +464,7 @@ public final class PlayerActivity extends Activity {
     controls.addView(modeButton);
     space(controls);
     ImageButton previous = icon(PlayerIcons.PREVIOUS, "上一条", 48, TEXT);
-    previous.setOnClickListener(v -> changeVideo(order.previous()));
+    previous.setOnClickListener(v -> navigateRelative(false));
     controls.addView(previous);
     playButton = icon(PlayerIcons.PAUSE, "暂停", 56, TEXT);
     playButton.setPadding(dp(14), dp(14), dp(14), dp(14));
@@ -461,7 +478,7 @@ public final class PlayerActivity extends Activity {
     playParams.setMargins(dp(8), 0, dp(8), 0);
     controls.addView(playButton, playParams);
     ImageButton next = icon(PlayerIcons.NEXT, "下一条", 48, TEXT);
-    next.setOnClickListener(v -> changeVideo(order.next(false)));
+    next.setOnClickListener(v -> navigateRelative(true));
     controls.addView(next);
     space(controls);
     portraitButton = icon(PlayerIcons.PORTRAIT_MODE, "竖屏播放", 48, TEXT);
@@ -722,6 +739,8 @@ public final class PlayerActivity extends Activity {
   }
 
   private boolean canRevealPrevious() {
+    if (mutatingPageWindow || order.mode() == PlaybackOrder.SHUFFLE && !playbackStats.isReady())
+      return false;
     return queue.size() > 1
         && order.hasPrevious()
         && previousPage.index == order.peekPrevious()
@@ -729,6 +748,8 @@ public final class PlayerActivity extends Activity {
   }
 
   private boolean canRevealNext() {
+    if (mutatingPageWindow || order.mode() == PlaybackOrder.SHUFFLE && !playbackStats.isReady())
+      return false;
     return queue.size() > 1 && nextPage.index == order.peekNext() && pageReady(nextPage);
   }
 
@@ -781,47 +802,57 @@ public final class PlayerActivity extends Activity {
 
   /** Promote by rotating references. All three native video surfaces remain attached. */
   private void adoptPreparedPage(int direction) {
-    invalidateCompletion();
-    currentPage.setPlayback(false, false, false);
-    currentPage.rewindIfEnded();
-    if (direction > 0) {
-      VideoPage far = previousPage;
-      previousPage = currentPage;
-      currentPage = nextPage;
-      nextPage = far;
-    } else {
-      VideoPage far = nextPage;
-      nextPage = currentPage;
-      currentPage = previousPage;
-      previousPage = far;
+    boolean wasMutating = mutatingPageWindow;
+    mutatingPageWindow = true;
+    playEntryRecorded = false;
+    try {
+      invalidateCompletion();
+      currentPage.setPlayback(false, false, false);
+      currentPage.rewindIfEnded();
+      if (direction > 0) {
+        VideoPage far = previousPage;
+        previousPage = currentPage;
+        currentPage = nextPage;
+        nextPage = far;
+      } else {
+        VideoPage far = nextPage;
+        nextPage = currentPage;
+        currentPage = previousPage;
+        previousPage = far;
+      }
+      abandonVlcFocus();
+      pager.setPages(previousPage, currentPage, nextPage);
+      pageTransitioning = false;
+      pageSuspended = false;
+      handlingEnd = false;
+      shouldPlay = true;
+      restorePosition = currentPage.position();
+      syncCurrentPage();
+      refreshVideoLabels();
+      currentPage.setSpeed(playbackRate());
+      if (exo != null && exo.getPlaybackState() == Player.STATE_ENDED) currentPage.seekTo(0);
+      applyCurrentPlayback(true);
+      showLoading(currentPage.buffering, "");
+      showChrome();
+      if (currentPage.failed) playbackFailed();
+    } finally {
+      mutatingPageWindow = wasMutating;
     }
-    abandonVlcFocus();
-    pager.setPages(previousPage, currentPage, nextPage);
-    pageTransitioning = false;
-    pageSuspended = false;
-    handlingEnd = false;
-    shouldPlay = true;
-    restorePosition = currentPage.position();
-    syncCurrentPage();
-    refreshVideoLabels();
-    currentPage.setSpeed(playbackRate());
-    if (exo != null && exo.getPlaybackState() == Player.STATE_ENDED) currentPage.seekTo(0);
-    applyCurrentPlayback(true);
-    showLoading(currentPage.buffering, "");
-    showChrome();
-    if (currentPage.failed) playbackFailed();
+    recordStartedPlayback();
     // Only the far, now invisible window is recycled. The promoted page is never prepared again.
     ensurePortraitWindow();
   }
 
   private void ensurePortraitWindow() {
-    if (!started || !portraitMode) return;
+    if (!started || !portraitMode || mutatingPageWindow) return;
+    if (order.mode() == PlaybackOrder.SHUFFLE && !playbackStats.isReady()) return;
     if (queue.size() < 2) {
       previousPage.release();
       nextPage.release();
       return;
     }
     if (currentPage == null
+        || currentPage.index != order.current()
         || (!currentPage.failed && (!currentPage.firstFrameReady || currentPage.buffering))
         || scrubbingPage != null) return;
     // Prime one neighbor at a time after the visible frame, keeping decoder setup away from seeks.
@@ -1025,6 +1056,8 @@ public final class PlayerActivity extends Activity {
 
   @Override
   protected void onStop() {
+    navigationRequestGeneration++;
+    navigationPending = false;
     invalidateCompletion();
     cancelInteractions();
     if (order != null) {
@@ -1064,6 +1097,7 @@ public final class PlayerActivity extends Activity {
     state.putBoolean("vlc", useVlc);
     state.putFloat("speed", speed);
     state.putBoolean("portrait_mode", portraitMode);
+    state.putBoolean("play_entry_recorded", playEntryRecorded);
   }
 
   @Override
@@ -1085,7 +1119,7 @@ public final class PlayerActivity extends Activity {
         new VideoPage.Listener() {
           @Override
           public void onChanged(VideoPage page) {
-            if (!started) return;
+            if (!started || mutatingPageWindow) return;
             if (page != currentPage) {
               // A paused neighbor may render its first frame before it reaches STATE_READY.
               if (portraitMode && page.firstFrameReady && !page.buffering) ensurePortraitWindow();
@@ -1105,6 +1139,7 @@ public final class PlayerActivity extends Activity {
 
           @Override
           public void onFirstFrame(VideoPage page) {
+            if (mutatingPageWindow) return;
             if (page == currentPage && started) {
               syncCurrentPage();
               showLoading(page.buffering, "");
@@ -1115,7 +1150,7 @@ public final class PlayerActivity extends Activity {
 
           @Override
           public void onEnded(VideoPage page) {
-            if (page != currentPage || !started || handlingEnd) return;
+            if (page != currentPage || !started || mutatingPageWindow || handlingEnd) return;
             handlingEnd = true;
             final long generation = page.generation;
             final long completion = ++completionGeneration;
@@ -1238,7 +1273,7 @@ public final class PlayerActivity extends Activity {
         .setTitle("无法播放")
         .setMessage("文件可能尚未下载完成、已移动，或使用了设备无法解码的格式。可选择下一个视频继续观看。")
         .setNegativeButton("返回", (d, w) -> finish())
-        .setPositiveButton("下一条", (d, w) -> changeVideo(order.next(false)))
+        .setPositiveButton("下一条", (d, w) -> navigateRelative(true))
         .show();
   }
 
@@ -1293,26 +1328,64 @@ public final class PlayerActivity extends Activity {
     return Uri.fromFile(new File(item.path));
   }
 
-  private void changeVideo(int index) {
-    invalidateCompletion();
-    cancelInteractions();
-    if (portraitMode && currentPage.index != index) {
-      if (nextPage.index == index && pageReady(nextPage)) {
-        adoptPreparedPage(1);
-        return;
-      }
-      if (previousPage.index == index && pageReady(previousPage)) {
-        adoptPreparedPage(-1);
-        return;
-      }
+  private void navigateRelative(boolean forward) {
+    if (order.mode() == PlaybackOrder.SHUFFLE && !playbackStats.isReady()) {
+      if (navigationPending) return;
+      navigationPending = true;
+      final int request = ++navigationRequestGeneration;
+      final int index = order.current();
+      playbackStats.whenReady(
+          () -> {
+            if (request != navigationRequestGeneration) return;
+            navigationPending = false;
+            if (started && !isFinishing() && !isDestroyed() && order.current() == index)
+              navigateRelative(forward);
+          });
+      return;
     }
-    shouldPlay = true;
-    restorePosition = 0;
-    useVlc = false;
-    if (!portraitMode) orientationOverride = false;
-    adaptOrientation(currentItem().width, currentItem().height);
-    startCurrent(0);
-    showChrome();
+    changeVideo(forward ? order.next(false) : order.previous(), forward ? 1 : -1);
+  }
+
+  private void changeVideo(int index) {
+    changeVideo(index, 0);
+  }
+
+  private void changeVideo(int index, int direction) {
+    boolean wasMutating = mutatingPageWindow;
+    mutatingPageWindow = true;
+    if (currentPage == null || currentPage.index != index) playEntryRecorded = false;
+    try {
+      invalidateCompletion();
+      cancelInteractions();
+      if (portraitMode && currentPage.index != index) {
+        // Both neighbors may contain the same video. Keep the requested side so returning can
+        // reuse the page just left instead of replacing its decoder while rebuilding neighbors.
+        VideoPage preferred = direction < 0 ? previousPage : nextPage;
+        if (direction != 0 && preferred.index == index && pageReady(preferred)) {
+          adoptPreparedPage(direction);
+          return;
+        }
+        if (nextPage.index == index && pageReady(nextPage)) {
+          adoptPreparedPage(1);
+          return;
+        }
+        if (previousPage.index == index && pageReady(previousPage)) {
+          adoptPreparedPage(-1);
+          return;
+        }
+      }
+      shouldPlay = true;
+      restorePosition = 0;
+      useVlc = false;
+      if (!portraitMode) orientationOverride = false;
+      adaptOrientation(currentItem().width, currentItem().height);
+      startCurrent(0);
+      showChrome();
+    } finally {
+      mutatingPageWindow = wasMutating;
+      recordStartedPlayback();
+      ensurePortraitWindow();
+    }
   }
 
   private void invalidateCompletion() {
@@ -1343,8 +1416,7 @@ public final class PlayerActivity extends Activity {
       applyCurrentPlayback(shouldPlay);
       return;
     }
-    order.next(true);
-    changeVideo(order.current());
+    navigateRelative(true);
   }
 
   private boolean isPlaying() {
@@ -1394,6 +1466,7 @@ public final class PlayerActivity extends Activity {
   }
 
   private void updateProgress() {
+    recordStartedPlayback();
     if (order == null || seek == null) return;
     long duration = duration(), at = position();
     if (!scrubbing && !gestureSeeking) {
@@ -1403,6 +1476,26 @@ public final class PlayerActivity extends Activity {
     totalTime.setText(formatTime(duration));
     seek.setEnabled(duration > 0);
     updatePlayUi();
+  }
+
+  private void recordStartedPlayback() {
+    if (playEntryRecorded
+        || playbackStats == null
+        || order == null
+        || !started
+        || mutatingPageWindow
+        || pageSuspended
+        || pageTransitioning
+        || currentPage == null
+        || currentPage.index != order.current()
+        || !currentPage.active
+        || !currentPage.playRequested
+        || !currentPage.firstFrameReady
+        || currentPage.failed
+        || currentPage.buffering
+        || !currentPage.isPlaying()) return;
+    playEntryRecorded = true;
+    playbackStats.recordPlay(currentItem());
   }
 
   private void updatePlayUi() {

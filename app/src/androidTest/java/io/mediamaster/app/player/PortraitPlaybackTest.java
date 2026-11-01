@@ -31,9 +31,13 @@ import androidx.test.runner.lifecycle.ActivityLifecycleCallback;
 import androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry;
 import androidx.test.runner.lifecycle.Stage;
 import io.mediamaster.app.media.VideoItem;
+import java.io.File;
+import java.io.IOException;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -252,8 +256,7 @@ public final class PortraitPlaybackTest {
   }
 
   @Test
-  public void shuffleSwipesUseRandomDeckAndActualHistoryEvenAfterPresentationRoundTrip()
-      throws Exception {
+  public void shuffleSwipesPreserveVisitedOrderEvenAfterPresentationRoundTrip() throws Exception {
     cycleTo(PlaybackOrder.SHUFFLE);
     setPortrait(true);
     cycleTo(PlaybackOrder.SHUFFLE);
@@ -280,6 +283,44 @@ public final class PortraitPlaybackTest {
     page(true, randomVideo);
     assertEquals(
         PlaybackOrder.SHUFFLE, onMain(() -> ((PlaybackOrder) read("order")).mode()).intValue());
+  }
+
+  @Test
+  public void shuffleRoundsCoverEveryVideoAndRetraceAcrossTheirBoundary() throws Exception {
+    setPortrait(true);
+    cycleTo(PlaybackOrder.SHUFFLE);
+    ArrayList<Integer> visited = new ArrayList<>();
+    Set<Integer> round = new HashSet<>();
+    visited.add(currentIndex());
+    round.add(currentIndex());
+    // The current item starts round zero. Subsequent rounds may choose different permutations;
+    // only complete rounds, not arbitrary overlapping windows, must visit every item once.
+    for (int step = 1; step < fixtures.size() * 2; step++) {
+      int expected = onMain(() -> ((PlaybackOrder) read("order")).peekNext());
+      assertEquals(
+          "Repeated preloading keeps the pending candidate stable",
+          expected,
+          onMain(() -> ((PlaybackOrder) read("order")).peekNext()).intValue());
+      assertNotEquals(
+          "A new round cannot immediately repeat the previous round's final video",
+          visited.get(visited.size() - 1).intValue(),
+          expected);
+      page(true, expected);
+      if (step % fixtures.size() == 0) round.clear();
+      assertTrue("Every video occurs once within its shuffled round", round.add(currentIndex()));
+      visited.add(currentIndex());
+      if ((step + 1) % fixtures.size() == 0) assertEquals(fixtures.size(), round.size());
+    }
+    // Returning through recent rounds must follow actual visits, not create a new permutation.
+    for (int step = visited.size() - 2; step >= 0; step--) {
+      int expected = visited.get(step);
+      assertEquals(
+          "Previous points to the actual visited item across a round boundary",
+          expected,
+          onMain(() -> ((PlaybackOrder) read("order")).peekPrevious()).intValue());
+      page(false, expected);
+    }
+    assertEquals(visited.get(0).intValue(), currentIndex());
   }
 
   @Test
@@ -847,17 +888,25 @@ public final class PortraitPlaybackTest {
     pauseAndAwaitReady();
   }
 
-  private VideoItem findFixture(String name) {
+  private VideoItem findFixture(String name) throws IOException {
+    String root = InstrumentationRegistry.getArguments().getString("fixtureRoot", "").trim();
+    if (!root.isEmpty()) assertTrue("fixtureRoot must be absolute", new File(root).isAbsolute());
+    String selection = root.isEmpty() ? "_display_name=?" : "_display_name=? AND _data=?";
+    String[] arguments =
+        root.isEmpty()
+            ? new String[] {name}
+            : new String[] {name, new File(root, name).getCanonicalPath()};
     try (Cursor cursor =
         context
             .getContentResolver()
             .query(
                 MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
                 new String[] {"_id", "_size", "duration", "width", "height"},
-                "_display_name=?",
-                new String[] {name},
+                selection,
+                arguments,
                 null)) {
       assertNotNull("MediaStore available", cursor);
+      assertEquals("Generated fixture must be unique: " + name, 1, cursor.getCount());
       assertTrue("Generated fixture installed: " + name, cursor.moveToFirst());
       Uri uri =
           Uri.withAppendedPath(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, cursor.getString(0));
@@ -913,11 +962,13 @@ public final class PortraitPlaybackTest {
                   PlaybackOrder currentOrder = (PlaybackOrder) read("order");
                   VideoPage nextPage = (VideoPage) read("nextPage");
                   VideoPage previousPage = (VideoPage) read("previousPage");
-                  return nextPage.firstFrameReady
+                  return nextPage.index == currentOrder.peekNext()
+                      && nextPage.firstFrameReady
                       && (nextPage.exo == null
                           || nextPage.exo.getPlaybackState() == Player.STATE_READY)
                       && (!currentOrder.hasPrevious()
-                          || previousPage.firstFrameReady
+                          || previousPage.index == currentOrder.peekPrevious()
+                              && previousPage.firstFrameReady
                               && (previousPage.exo == null
                                   || previousPage.exo.getPlaybackState() == Player.STATE_READY));
                 }),

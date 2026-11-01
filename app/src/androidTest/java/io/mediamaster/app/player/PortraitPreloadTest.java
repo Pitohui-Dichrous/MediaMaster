@@ -28,6 +28,8 @@ import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
 import androidx.test.rule.ActivityTestRule;
 import io.mediamaster.app.media.VideoItem;
+import java.io.File;
+import java.io.IOException;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
@@ -435,15 +437,153 @@ public final class PortraitPreloadTest {
     onMain(
         () -> {
           assertEquals(
-              "One committed page consumes exactly one history entry",
-              2,
-              orderList("history").size());
+              "One committed page advances to its prepared candidate",
+              candidateIndex,
+              order().current());
+          assertEquals(
+              "Reverse returns to the page that was just left",
+              initial.index,
+              order().peekPrevious());
+          assertSame(initial, previous());
           assertEquals(
               "Exactly the original three native roots are reused",
               roots,
               new HashSet<>(Arrays.asList(previous(), current(), next())));
           return null;
         });
+    assertOnlyCurrentAudible();
+    assertThreeAttachedRoots();
+  }
+
+  @Test
+  public void shuffleOriginPreviousPromotesPreparedPriorRoundAndForwardReturnsToSamePage()
+      throws Exception {
+    onMain(
+        () -> {
+          invoke("setPlaybackMode", new Class<?>[] {int.class}, PlaybackOrder.SHUFFLE);
+          return null;
+        });
+    await(
+        () ->
+            onMain(
+                () ->
+                    order().hasPrevious()
+                        && previous().index == order().peekPrevious()
+                        && next().index == order().peekNext()
+                        && readyForPlayback(previous())
+                        && readyForPlayback(next())),
+        15000);
+    VideoPage origin = onMain(() -> current()), tail = onMain(() -> previous());
+    ExoPlayer originDecoder = onMain(() -> origin.exo), tailDecoder = onMain(() -> tail.exo);
+    int originIndex = onMain(() -> origin.index), tailIndex = onMain(() -> tail.index);
+    int originPrepares = onMain(() -> origin.prepareCount),
+        tailPrepares = onMain(() -> tail.prepareCount);
+    long originGeneration = onMain(() -> origin.generation),
+        tailGeneration = onMain(() -> tail.generation);
+    assertNotEquals(
+        "Shuffle origin must have a different reverse candidate", originIndex, tailIndex);
+    assertPausedSilent(tail);
+    assertNativeFirstFrame(tail, "shuffle-origin-previous-preloaded");
+    swipeDown();
+    await(() -> onMain(() -> current() == tail && !(Boolean) read("pageTransitioning")), 8000);
+    onMain(
+        () -> {
+          assertEquals(tailIndex, order().current());
+          assertSame(tailDecoder, current().exo);
+          assertEquals(tailPrepares, current().prepareCount);
+          assertEquals(tailGeneration, current().generation);
+          assertEquals(
+              "Forward retraces the prepared previous-round boundary",
+              originIndex,
+              order().peekNext());
+          assertSame("The origin remains the prepared forward page", origin, next());
+          return null;
+        });
+    await(() -> onMain(() -> tail.exo.isPlaying() && pagePosition(tail) > 120), 5000);
+    assertOnlyCurrentAudible();
+    assertPausedSilent(origin);
+    swipeUp();
+    await(() -> onMain(() -> current() == origin && !(Boolean) read("pageTransitioning")), 8000);
+    onMain(
+        () -> {
+          assertEquals(originIndex, order().current());
+          assertSame(originDecoder, current().exo);
+          assertEquals(originPrepares, current().prepareCount);
+          assertEquals(originGeneration, current().generation);
+          assertEquals(tailIndex, order().peekPrevious());
+          assertSame(tail, previous());
+          return null;
+        });
+    await(() -> onMain(() -> origin.exo.isPlaying() && pagePosition(origin) > 120), 5000);
+    assertOnlyCurrentAudible();
+    assertThreeAttachedRoots();
+  }
+
+  @Test
+  public void previousButtonWithIdenticalNeighborIndicesReusesItsPageAndReturnsWithoutPreparing()
+      throws Exception {
+    onMain(
+        () -> {
+          audioProbe.stop();
+          return null;
+        });
+    rule.finishActivity();
+    // Two real files guarantee identical previous/next indices without a probabilistic seed.
+    ArrayList<VideoItem> pair = new ArrayList<>(fixtures.subList(0, 2));
+    activity =
+        rule.launchActivity(
+            new Intent(context, PlayerActivity.class)
+                .putExtra("queue", QueueStore.put(context, pair))
+                .putExtra("index", 0));
+    await(() -> onMain(() -> readyForPlayback(current())), 15000);
+    onMain(
+        () -> {
+          invoke("setPlaying", new Class<?>[] {boolean.class}, false);
+          audioProbe.start();
+          return null;
+        });
+    enterPortrait();
+    onMain(
+        () -> {
+          invoke("setPlaybackMode", new Class<?>[] {int.class}, PlaybackOrder.SHUFFLE);
+          return null;
+        });
+    awaitNeighbors();
+    VideoPage origin = onMain(() -> current()), backward = onMain(() -> previous());
+    ExoPlayer originDecoder = onMain(() -> origin.exo),
+        backwardDecoder = onMain(() -> backward.exo);
+    int originPrepares = onMain(() -> origin.prepareCount),
+        backwardPrepares = onMain(() -> backward.prepareCount);
+    long originGeneration = onMain(() -> origin.generation),
+        backwardGeneration = onMain(() -> backward.generation);
+    onMain(
+        () -> {
+          assertEquals(order().peekPrevious(), order().peekNext());
+          assertEquals(previous().index, next().index);
+          assertNotSame(previous(), next());
+          assertNotSame(previous().exo, next().exo);
+          assertTrue(findAction((View) read("bottomBar"), "上一条").performClick());
+          assertSame("The previous button promotes the previous container", backward, current());
+          assertSame(backwardDecoder, current().exo);
+          assertEquals(backwardPrepares, current().prepareCount);
+          assertEquals(backwardGeneration, current().generation);
+          assertSame("The original page remains the ready forward neighbor", origin, next());
+          return null;
+        });
+    await(() -> onMain(() -> backward.exo.isPlaying() && pagePosition(backward) > 120), 5000);
+    assertOnlyCurrentAudible();
+    assertPausedSilent(origin);
+    onMain(
+        () -> {
+          assertTrue(findAction((View) read("bottomBar"), "下一条").performClick());
+          assertSame("Forward returns to the original container", origin, current());
+          assertSame(originDecoder, current().exo);
+          assertEquals(originPrepares, current().prepareCount);
+          assertEquals(originGeneration, current().generation);
+          assertEquals(0, order().current());
+          return null;
+        });
+    await(() -> onMain(() -> origin.exo.isPlaying() && pagePosition(origin) > 120), 5000);
     assertOnlyCurrentAudible();
     assertThreeAttachedRoots();
   }
@@ -794,13 +934,16 @@ public final class PortraitPreloadTest {
     return NativeFrameProbe.findVideoSurface(root);
   }
 
-  private VideoItem fixture(String name) {
+  private VideoItem fixture(String name) throws IOException {
     // Real-phone runs opt into their dedicated generated-fixture directory, avoiding a user's
     // unrelated video with an identical short name. Emulator fixtures retain the existing setup.
-    String root = InstrumentationRegistry.getArguments().getString("fixtureRoot", "");
+    String root = InstrumentationRegistry.getArguments().getString("fixtureRoot", "").trim();
+    if (!root.isEmpty()) assertTrue("fixtureRoot must be absolute", new File(root).isAbsolute());
     String selection = root.isEmpty() ? "_display_name=?" : "_display_name=? AND _data=?";
     String[] arguments =
-        root.isEmpty() ? new String[] {name} : new String[] {name, root + "/" + name};
+        root.isEmpty()
+            ? new String[] {name}
+            : new String[] {name, new File(root, name).getCanonicalPath()};
     try (Cursor cursor =
         context
             .getContentResolver()
@@ -811,6 +954,7 @@ public final class PortraitPreloadTest {
                 arguments,
                 null)) {
       assertNotNull(cursor);
+      assertEquals("Generated fixture must be unique: " + name, 1, cursor.getCount());
       assertTrue("Generated fixture is installed: " + name, cursor.moveToFirst());
       return new VideoItem(
           "native-" + name,
@@ -867,21 +1011,19 @@ public final class PortraitPreloadTest {
         + ":"
         + order.mode()
         + ":"
-        + orderField("cursor")
+        + order.fullScreenMode()
         + ":"
-        + orderList("history")
+        + order.portraitNavigationMode()
         + ":"
-        + orderList("deck");
-  }
-
-  private Object orderField(String name) throws Exception {
-    Field field = PlaybackOrder.class.getDeclaredField(name);
-    field.setAccessible(true);
-    return field.get(order());
-  }
-
-  private ArrayList<?> orderList(String name) throws Exception {
-    return new ArrayList<>((ArrayList<?>) orderField(name));
+        + order.portraitMode()
+        + ":"
+        + order.repeatsCurrent()
+        + ":"
+        + order.hasPrevious()
+        + ":"
+        + order.peekPrevious()
+        + ":"
+        + order.peekNext();
   }
 
   private PlaybackOrder order() throws Exception {

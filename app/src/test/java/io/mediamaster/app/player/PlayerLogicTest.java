@@ -637,6 +637,54 @@ public class PlayerLogicTest {
   }
 
   @Test
+  public void explicitWeightRefreshResamplesNeighborsWithoutChangingCurrentOrPlaybackMode() {
+    double[] weights = {1, 1.2, .2, .1};
+    int[] reads = new int[4];
+    Random matchedClocks =
+        new Random(23) {
+          @Override
+          public double nextDouble() {
+            return .5;
+          }
+        };
+    PlaybackOrder order =
+        new PlaybackOrder(
+            4,
+            0,
+            PlaybackOrder.SINGLE,
+            matchedClocks,
+            index -> {
+              reads[index]++;
+              return weights[index];
+            });
+    order.setPortraitNavigationMode(PlaybackOrder.SHUFFLE);
+    order.setPortraitMode(true);
+    assertEquals(1, order.peekNext());
+    order.peekPrevious(); // Also prepare the old reverse round before resetting.
+    assertEquals(1, order.next(false));
+    assertEquals(2, order.peekNext());
+    for (int count : reads) assertEquals(2, count);
+
+    weights[0] = .1;
+    weights[3] = 1.2;
+    assertEquals(
+        "A normal preference change keeps already prepared pages stable", 2, order.peekNext());
+    order.refreshWeights();
+    assertEquals(1, order.current());
+    assertTrue(order.portraitMode());
+    assertEquals(PlaybackOrder.SINGLE, order.fullScreenMode());
+    assertEquals(PlaybackOrder.SHUFFLE, order.mode());
+    assertEquals("Natural portrait looping must not navigate after reset", 1, order.next(true));
+    assertEquals("An explicit reset replaces the old prepared successor", 3, order.peekNext());
+    for (int count : reads) assertEquals(3, count);
+
+    HashSet<Integer> freshRound = new HashSet<>();
+    freshRound.add(order.current());
+    for (int step = 1; step < 4; step++) assertTrue(freshRound.add(order.next(false)));
+    assertEquals(new HashSet<>(Arrays.asList(0, 1, 2, 3)), freshRound);
+  }
+
+  @Test
   public void portraitRepeatAndManualCandidatesAreSafeForOneAndTwoVideosInEitherOrder() {
     for (int fullMode :
         new int[] {PlaybackOrder.SEQUENTIAL, PlaybackOrder.SINGLE, PlaybackOrder.SHUFFLE}) {

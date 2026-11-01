@@ -29,6 +29,30 @@ public class WeightedShuffleTest {
   }
 
   @Test
+  public void feedbackWeightsKeepTheirFullRangeInSamplerAndWeightedRounds() {
+    double[] weights = {1.5, .5, .0625};
+    int[] selected = new int[3];
+    // Exact midpoint cells cover 1.5 : .5 : .0625, detecting either old clamp.
+    for (int i = 0; i < 33; i++)
+      selected[WeightedShuffle.choose(3, n -> weights[n], constant((i + .5) / 33))]++;
+    assertArrayEquals(new int[] {24, 8, 1}, selected);
+    assertEquals(
+        Arrays.asList(0, 1, 2), WeightedShuffle.initialRound(3, 0, n -> weights[n], constant(.5)));
+  }
+
+  @Test
+  public void leastFavoredCandidateStillHasAtLeastOneTwentyFourthOfUniformProbability() {
+    int count = 50_000;
+    double min = FeedbackWeightPolicy.MIN_WEIGHT, max = FeedbackWeightPolicy.MAX_WEIGHT;
+    double probability = min / ((count - 1) * max + min);
+    assertTrue(probability >= 1.0 / (24 * count));
+    assertEquals(
+        0, WeightedShuffle.choose(count, n -> n == 0 ? min : max, constant(probability * .5)));
+    assertEquals(
+        1, WeightedShuffle.choose(count, n -> n == 0 ? min : max, constant(probability * 1.01)));
+  }
+
+  @Test
   public void homeChoiceUsesTheExactWeightIntervals() {
     // Deterministic midpoint quadrature: weights 1 : .5 : .125 occupy 8 : 4 : 1 of 13 cells.
     long[] plays = {0, 3, 99};

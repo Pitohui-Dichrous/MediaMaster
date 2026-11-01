@@ -15,6 +15,7 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
+import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
 import android.net.Uri;
@@ -23,6 +24,8 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
 import android.provider.OpenableColumns;
 import android.provider.Settings;
 import android.text.TextUtils;
@@ -50,6 +53,7 @@ import androidx.media3.common.Player;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.ui.PlayerView;
+import io.mediamaster.app.R;
 import io.mediamaster.app.TaskIdentity;
 import io.mediamaster.app.Ui;
 import io.mediamaster.app.media.VideoItem;
@@ -72,6 +76,11 @@ public final class PlayerActivity extends Activity {
   private ArrayList<VideoItem> queue = new ArrayList<>();
   private PlaybackOrder order;
   private PlaybackStatsStore playbackStats;
+  private PlaybackVoteSession voteSession;
+  private Object appliedWeightGeneration;
+  private PlaybackStatsStore.PreparedWeights queueWeights;
+  private boolean weightsLoading;
+  private final ArrayList<Runnable> weightWaiters = new ArrayList<>();
   private final PlaybackWatchTracker watchTracker = new PlaybackWatchTracker();
   private boolean mutatingPageWindow, resumed, watchStateSaved;
   private boolean navigationPending;
@@ -114,7 +123,7 @@ public final class PlayerActivity extends Activity {
       GESTURE_BOOST = 4,
       GESTURE_PAGE = 5;
   private int gestureKind;
-  private boolean touchDown, boosting, boostWasPlaying;
+  private boolean touchDown, boosting, boostWasPlaying, tapCanceled;
   private float gestureStartBrightness;
   private int gestureStartVolume;
   private final Runnable hideHud =
@@ -128,7 +137,13 @@ public final class PlayerActivity extends Activity {
         cancelTapRecognition();
         beginBoost();
       };
-  private ImageButton playButton, modeButton, rotateButton, portraitButton;
+  private ImageButton playButton,
+      modeButton,
+      rotateButton,
+      portraitButton,
+      likeButton,
+      dislikeButton;
+  private LikeEffectView likeEffect;
   private boolean portraitMode, pageTransitioning, pageSuspended;
   private int pageGeneration;
   private long completionGeneration, pendingCompletionGeneration = -1;
@@ -172,6 +187,7 @@ public final class PlayerActivity extends Activity {
         @Override
         public void run() {
           if (!started) return;
+          syncWeightReset();
           updateProgress();
           handler.postDelayed(this, 250);
         }
@@ -228,20 +244,17 @@ public final class PlayerActivity extends Activity {
     if (state != null) mode = state.getInt("mode", mode);
     int index = state != null ? state.getInt(EXTRA_INDEX) : getIntent().getIntExtra(EXTRA_INDEX, 0);
     playbackStats = PlaybackStatsStore.get(this);
+    appliedWeightGeneration = playbackStats.voteGeneration();
+    Object retained = getLastNonConfigurationInstance();
+    voteSession =
+        retained instanceof PlaybackVoteSession
+            ? (PlaybackVoteSession) retained
+            : new PlaybackVoteSession(playbackStats);
     watchTracker.restore(
         state != null ? state.getLong("play_entry_watched_ms", 0) : 0,
         state != null && state.getBoolean("play_entry_recorded", false));
-    order =
-        new PlaybackOrder(
-            queue.size(),
-            index,
-            mode,
-            new Random(),
-            i -> WeightedShuffle.weight(playbackStats.recentScore(queue.get(i))));
-    playbackStats.whenReady(
-        () -> {
-          if (!isFinishing() && !isDestroyed()) ensurePortraitWindow();
-        });
+    order = new PlaybackOrder(queue.size(), index, mode, new Random(), i -> queueWeights.weight(i));
+    ensureQueueWeights(null);
     sensitivity = getSharedPreferences("player", MODE_PRIVATE).getFloat("seek_sensitivity", 1f);
     if (state != null) {
       portraitMode = state.getBoolean("portrait_mode", false);
@@ -328,6 +341,8 @@ public final class PlayerActivity extends Activity {
     touchLayer.setContentDescription("视频画面，点按显示控制，双击播放暂停，长按临时两倍速");
     touchLayer.setOnTouchListener(this::onVideoTouch);
     root.addView(touchLayer, new FrameLayout.LayoutParams(-1, -1));
+    likeEffect = new LikeEffectView(this);
+    root.addView(likeEffect, new FrameLayout.LayoutParams(-1, -1));
 
     topBar = new LinearLayout(this);
     topBar.setGravity(Gravity.CENTER_VERTICAL);
@@ -343,8 +358,16 @@ public final class PlayerActivity extends Activity {
     topBar.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
     subtitle = text(12, MUTED);
     subtitle.setSingleLine(true);
+    subtitle.setMaxWidth(dp(64));
+    subtitle.setEllipsize(TextUtils.TruncateAt.MIDDLE);
     subtitle.setPadding(dp(4), 0, dp(8), 0);
     topBar.addView(subtitle);
+    likeButton = feedbackButton("点赞");
+    likeButton.setOnClickListener(v -> toggleFeedback(1));
+    topBar.addView(likeButton);
+    dislikeButton = feedbackButton("点踩");
+    dislikeButton.setOnClickListener(v -> toggleFeedback(-1));
+    topBar.addView(dislikeButton);
     rotateButton = icon(PlayerIcons.ROTATE, "旋转", 48, TEXT);
     rotateButton.setContentDescription("旋转画面，长按恢复自动方向");
     rotateButton.setOnClickListener(v -> toggleOrientation());
@@ -560,8 +583,11 @@ public final class PlayerActivity extends Activity {
 
         @Override
         public boolean onSingleTapConfirmed(MotionEvent e) {
-          if (!gestureSeeking && gestureKind == GESTURE_NONE) {
-            if (chromeVisible) setChrome(false);
+          if (started && resumed && !gestureSeeking && gestureKind == GESTURE_NONE) {
+            if (portraitMode) {
+              setPlaying(!playRequested());
+              showChrome();
+            } else if (chromeVisible) setChrome(false);
             else showChrome();
           }
           return true;
@@ -569,8 +595,32 @@ public final class PlayerActivity extends Activity {
 
         @Override
         public boolean onDoubleTap(MotionEvent e) {
-          setPlaying(!playRequested());
-          showChrome();
+          if (!portraitMode) {
+            setPlaying(!playRequested());
+            showChrome();
+          }
+          return true;
+        }
+
+        @Override
+        public boolean onDoubleTapEvent(MotionEvent e) {
+          // Commit on the second release, so a drag/long press cannot accidentally add a vote.
+          if (e.getActionMasked() == MotionEvent.ACTION_UP
+              && portraitMode
+              && started
+              && resumed
+              && !tapCanceled
+              && !gestureSeeking
+              && gestureKind == GESTURE_NONE
+              && !pageTransitioning) {
+            if (!voteSession.setVote(currentItem(), 1)) {
+              toast("记录未就绪，请稍后重试");
+              return true;
+            }
+            refreshFeedbackUi();
+            likeEffect.showAt(e.getX(), e.getY());
+            feedbackHaptic();
+          }
           return true;
         }
       };
@@ -587,6 +637,7 @@ public final class PlayerActivity extends Activity {
     switch (event.getActionMasked()) {
       case MotionEvent.ACTION_DOWN:
         touchDown = true;
+        tapCanceled = false;
         touchX = event.getX();
         touchY = event.getY();
         gestureOrigin = position();
@@ -606,7 +657,10 @@ public final class PlayerActivity extends Activity {
       case MotionEvent.ACTION_MOVE:
         if (!touchDown) return true;
         float dx = event.getX() - touchX, dy = event.getY() - touchY;
-        if (Math.hypot(dx, dy) > dp(8)) handler.removeCallbacks(longPress);
+        if (Math.hypot(dx, dy) > ViewConfiguration.get(this).getScaledTouchSlop()) {
+          handler.removeCallbacks(longPress);
+          if (!tapCanceled) cancelTapRecognition();
+        }
         if (gestureKind == GESTURE_NONE && touchX > dp(20) && touchX < view.getWidth() - dp(20)) {
           if (Math.abs(dx) > dp(14) && Math.abs(dx) > Math.abs(dy) * 1.3f && duration() > 0) {
             gestureKind = GESTURE_SEEK;
@@ -636,12 +690,16 @@ public final class PlayerActivity extends Activity {
           updateVerticalGesture(dy, Math.max(1, view.getHeight()));
         } else if (gestureKind == GESTURE_PAGE) {
           pager.dragTo(dy, canRevealPrevious(), canRevealNext());
-        } else if (gestureKind == GESTURE_NONE) taps.onTouchEvent(event);
+        } else if (gestureKind == GESTURE_NONE && !tapCanceled) taps.onTouchEvent(event);
         return true;
       case MotionEvent.ACTION_UP:
         if (!touchDown) return true;
         touchDown = false;
         handler.removeCallbacks(longPress);
+        // Some input sources coalesce movement into UP without a final MOVE event.
+        if (!tapCanceled
+            && Math.hypot(event.getX() - touchX, event.getY() - touchY)
+                > ViewConfiguration.get(this).getScaledTouchSlop()) cancelTapRecognition();
         int finished = gestureKind;
         if (finished == GESTURE_SEEK) {
           hideSeekPreview();
@@ -664,7 +722,7 @@ public final class PlayerActivity extends Activity {
         } else if (finished == GESTURE_BRIGHTNESS || finished == GESTURE_VOLUME) {
           handler.postDelayed(hideHud, 400);
         } else {
-          taps.onTouchEvent(event);
+          if (!tapCanceled) taps.onTouchEvent(event);
           scheduleHide();
         }
         gestureKind = GESTURE_NONE;
@@ -681,6 +739,7 @@ public final class PlayerActivity extends Activity {
   }
 
   private void cancelTapRecognition() {
+    tapCanceled = true;
     if (taps == null) return;
     long now = SystemClock.uptimeMillis();
     MotionEvent cancel = MotionEvent.obtain(now, now, MotionEvent.ACTION_CANCEL, touchX, touchY, 0);
@@ -720,7 +779,7 @@ public final class PlayerActivity extends Activity {
     rotateButton.setVisibility(portraitMode ? View.GONE : View.VISIBLE);
     touchLayer.setContentDescription(
         portraitMode
-            ? "竖屏视频，左右滑动调进度，上滑下一条，下滑上一条，双击播放暂停，长按两倍速"
+            ? "竖屏视频，单击播放暂停，双击点赞，左右滑动调进度，上滑下一条，下滑上一条，长按两倍速"
             : "视频画面，左右滑动调进度，左侧上下调亮度，右侧上下调音量，双击播放暂停，长按两倍速");
   }
 
@@ -742,7 +801,7 @@ public final class PlayerActivity extends Activity {
   }
 
   private boolean canRevealPrevious() {
-    if (mutatingPageWindow || order.mode() == PlaybackOrder.SHUFFLE && !playbackStats.isReady())
+    if (mutatingPageWindow || order.mode() == PlaybackOrder.SHUFFLE && queueWeights == null)
       return false;
     return queue.size() > 1
         && order.hasPrevious()
@@ -751,7 +810,7 @@ public final class PlayerActivity extends Activity {
   }
 
   private boolean canRevealNext() {
-    if (mutatingPageWindow || order.mode() == PlaybackOrder.SHUFFLE && !playbackStats.isReady())
+    if (mutatingPageWindow || order.mode() == PlaybackOrder.SHUFFLE && queueWeights == null)
       return false;
     return queue.size() > 1 && nextPage.index == order.peekNext() && pageReady(nextPage);
   }
@@ -851,7 +910,7 @@ public final class PlayerActivity extends Activity {
 
   private void ensurePortraitWindow() {
     if (!started || !portraitMode || mutatingPageWindow) return;
-    if (order.mode() == PlaybackOrder.SHUFFLE && !playbackStats.isReady()) return;
+    if (order.mode() == PlaybackOrder.SHUFFLE && queueWeights == null) return;
     if (queue.size() < 2) {
       previousPage.release();
       nextPage.release();
@@ -1020,6 +1079,8 @@ public final class PlayerActivity extends Activity {
   }
 
   private void cancelInteractions() {
+    cancelTapRecognition();
+    if (likeEffect != null) likeEffect.clear();
     boolean cancelScreenSeek = gestureSeeking || gestureKind == GESTURE_SEEK;
     if (scrubbingPage != null) endPlayerScrub(gestureOrigin, false);
     touchDown = false;
@@ -1061,12 +1122,16 @@ public final class PlayerActivity extends Activity {
     resumed = true;
     watchStateSaved = false;
     TaskIdentity.update(this);
+    syncWeightReset();
+    refreshFeedbackUi();
     recordStartedPlayback();
   }
 
   @Override
   protected void onPause() {
     stopWatching();
+    cancelTapRecognition();
+    if (likeEffect != null) likeEffect.clear();
     resumed = false;
     super.onPause();
   }
@@ -1098,6 +1163,12 @@ public final class PlayerActivity extends Activity {
     if (previewLoader != null) previewLoader.close();
     if (isFinishing()) QueueStore.forget(queueToken);
     super.onDestroy();
+  }
+
+  @Override
+  public Object onRetainNonConfigurationInstance() {
+    // Rotation/recreation is the same window. A fresh launch starts a new voting session.
+    return voteSession;
   }
 
   @Override
@@ -1363,12 +1434,12 @@ public final class PlayerActivity extends Activity {
   }
 
   private void navigateRelative(boolean forward, boolean automatic) {
-    if (order.mode() == PlaybackOrder.SHUFFLE && !playbackStats.isReady()) {
+    if (order.mode() == PlaybackOrder.SHUFFLE && queueWeights == null) {
       if (navigationPending) return;
       navigationPending = true;
       final int request = ++navigationRequestGeneration;
       final int index = order.current();
-      playbackStats.whenReady(
+      ensureQueueWeights(
           () -> {
             if (request != navigationRequestGeneration) return;
             navigationPending = false;
@@ -1380,6 +1451,34 @@ public final class PlayerActivity extends Activity {
     stopWatching();
     if (!automatic && queue.size() == 1) watchTracker.reset();
     changeVideo(forward ? order.next(false) : order.previous(), forward ? 1 : -1);
+  }
+
+  /** One queue-sized snapshot keeps historical cache misses away from the render thread. */
+  private void ensureQueueWeights(Runnable afterReady) {
+    if (queueWeights != null) {
+      if (afterReady != null) afterReady.run();
+      return;
+    }
+    if (afterReady != null) weightWaiters.add(afterReady);
+    if (weightsLoading) return;
+    weightsLoading = true;
+    playbackStats.prepareWeights(
+        queue,
+        prepared -> {
+          weightsLoading = false;
+          ArrayList<Runnable> callbacks = new ArrayList<>(weightWaiters);
+          weightWaiters.clear();
+          if (isFinishing() || isDestroyed()) return;
+          queueWeights = prepared;
+          if (prepared == null) {
+            navigationPending = false;
+            toast("无法读取播放记录，请重试");
+            return;
+          }
+          refreshFeedbackUi();
+          ensurePortraitWindow();
+          for (Runnable callback : callbacks) callback.run();
+        });
   }
 
   private void changeVideo(int index) {
@@ -1574,10 +1673,106 @@ public final class PlayerActivity extends Activity {
 
   private void refreshVideoLabels() {
     if (title == null) return;
+    cancelTapRecognition();
+    if (likeEffect != null) likeEffect.clear();
     if (seekThumb != null) seekThumb.setDirection(true);
     title.setText(currentItem().name);
     subtitle.setText(String.format(Locale.CHINA, "%d / %d", order.current() + 1, queue.size()));
+    subtitle.setContentDescription("视频 " + subtitle.getText());
+    refreshFeedbackUi();
     updateModeUi();
+  }
+
+  private void toggleFeedback(int requested) {
+    if (pageTransitioning || currentPage == null || currentPage.index != order.current()) return;
+    int current = voteSession.vote(currentItem());
+    if (!voteSession.setVote(currentItem(), current == requested ? 0 : requested)) {
+      toast("记录未就绪，请稍后重试");
+      return;
+    }
+    if (voteSession.vote(currentItem()) != 1) likeEffect.clear();
+    refreshFeedbackUi();
+    feedbackHaptic();
+    showChrome();
+  }
+
+  private void refreshFeedbackUi() {
+    if (likeButton == null || order == null) return;
+    int feedback = voteSession.vote(currentItem());
+    updateFeedbackButton(
+        likeButton, feedback == 1, "点赞", R.drawable.ic_thumb_up, R.drawable.ic_thumb_up_outline);
+    updateFeedbackButton(
+        dislikeButton,
+        feedback == -1,
+        "点踩",
+        R.drawable.ic_thumb_down,
+        R.drawable.ic_thumb_down_outline);
+  }
+
+  private void updateFeedbackButton(
+      ImageButton button, boolean selected, String action, int filled, int outline) {
+    button.setImageResource(selected ? filled : outline);
+    button.setImageTintList(ColorStateList.valueOf(TEXT));
+    button.setSelected(selected);
+    button.setContentDescription(selected ? "取消" + action : action);
+    button.setTooltipText(selected ? "取消" + action : action);
+    if (Build.VERSION.SDK_INT >= 30)
+      button.setStateDescription(selected ? "已" + action : "未" + action);
+  }
+
+  private void feedbackHaptic() {
+    if (!touchLayer.isHapticFeedbackEnabled()
+        || !touchLayer.hasWindowFocus()
+        || Settings.System.getInt(getContentResolver(), Settings.System.HAPTIC_FEEDBACK_ENABLED, 1)
+            == 0) return;
+    Vibrator vibrator = (Vibrator) getSystemService(VIBRATOR_SERVICE);
+    try {
+      if (vibrator != null && vibrator.hasVibrator()) {
+        vibrator.vibrate(
+            VibrationEffect.createOneShot(20, VibrationEffect.DEFAULT_AMPLITUDE),
+            new AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+                .build());
+        return;
+      }
+    } catch (SecurityException unavailable) {
+      // Keep Android's native feedback available to restricted installations.
+    }
+    touchLayer.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
+  }
+
+  private void resetWeights() {
+    RandomWeightsDialog.show(this, playbackStats, this::syncWeightReset);
+  }
+
+  /** Reconcile a completed reset even if its original dialog's Activity was recreated. */
+  private void syncWeightReset() {
+    if (!started
+        || !resumed
+        || playbackStats == null
+        || order == null
+        || currentPage == null
+        || mutatingPageWindow
+        || pageTransitioning
+        || touchDown
+        || scrubbing
+        || gestureSeeking
+        || pageSuspended) return;
+    Object generation = playbackStats.voteGeneration();
+    if (generation == appliedWeightGeneration) return;
+    appliedWeightGeneration = generation;
+    cancelInteractions();
+    order.refreshWeights();
+    boolean wasMutating = mutatingPageWindow;
+    mutatingPageWindow = true;
+    try {
+      previousPage.release();
+      nextPage.release();
+    } finally {
+      mutatingPageWindow = wasMutating;
+    }
+    refreshFeedbackUi();
+    ensurePortraitWindow();
   }
 
   private void cycleMode() {
@@ -1669,6 +1864,7 @@ public final class PlayerActivity extends Activity {
   }
 
   private void showSettings() {
+    cancelTapRecognition();
     handler.removeCallbacks(hideChrome);
     ArrayList<String> labels = new ArrayList<>();
     ArrayList<Runnable> actions = new ArrayList<>();
@@ -1691,6 +1887,8 @@ public final class PlayerActivity extends Activity {
     }
     labels.add("手势说明");
     actions.add(this::showGestureHelp);
+    labels.add("重置权重");
+    actions.add(this::resetWeights);
     new AlertDialog.Builder(this, Ui.dialogTheme(this))
         .setTitle("设置")
         .setItems(labels.toArray(new String[0]), (d, item) -> actions.get(item).run())
@@ -1705,7 +1903,9 @@ public final class PlayerActivity extends Activity {
             "横滑调进度，短滑微调、长滑加速；松手定位。长按临时两倍速。\n\n"
                 + "全屏：左侧上下调亮度，右侧调音量。\n\n"
                 + "竖屏：当前视频循环，上滑下一条、下滑上一条；切集可选顺序或随机。\n\n"
-                + "单击显示控件，双击播放或暂停。手机与展开图标切换模式；旋转键切换方向，长按恢复自动适配。")
+                + "全屏单击显示控件，双击播放或暂停；竖屏单击播放或暂停，双击点赞。\n\n"
+                + "同一播放窗口中，每个视频只计一次赞或踩；再次点按取消，重新打开可再次计入。近期赞踩与观看的比例影响随机权重，并以7天为半衰期减弱。\n\n"
+                + "手机与展开图标切换模式；旋转键切换方向，长按恢复自动适配。")
         .setPositiveButton("关闭", (dialog, which) -> showChrome())
         .show();
   }
@@ -1843,6 +2043,7 @@ public final class PlayerActivity extends Activity {
   @Override
   public void onWindowFocusChanged(boolean focus) {
     super.onWindowFocusChanged(focus);
+    if (!focus) cancelTapRecognition();
     if (!focus && touchDown) cancelInteractions();
     if (focus && root != null) immersive();
   }
@@ -1856,6 +2057,12 @@ public final class PlayerActivity extends Activity {
     button.setPadding(dp(12), dp(12), dp(12), dp(12));
     button.setBackground(ripple(Color.TRANSPARENT));
     button.setLayoutParams(new LinearLayout.LayoutParams(dp(size), dp(size)));
+    return button;
+  }
+
+  private ImageButton feedbackButton(String label) {
+    ImageButton button = icon(PlayerIcons.PLAY, label, 48, TEXT);
+    button.setPadding(dp(12), dp(12), dp(12), dp(12));
     return button;
   }
 

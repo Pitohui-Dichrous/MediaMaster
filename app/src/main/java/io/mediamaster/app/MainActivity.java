@@ -17,6 +17,7 @@ import io.mediamaster.app.library.*;
 import io.mediamaster.app.media.*;
 import io.mediamaster.app.player.PlaybackStatsStore;
 import io.mediamaster.app.player.PlayerActivity;
+import io.mediamaster.app.player.RandomWeightsDialog;
 import io.mediamaster.app.player.WeightedShuffle;
 import java.text.*;
 import java.util.*;
@@ -811,18 +812,25 @@ public class MainActivity extends Activity {
     if (randomPending) return;
     randomPending = true;
     int request = ++randomRequest;
-    playbackStats.whenReady(
-        () -> {
+    ArrayList<VideoItem> candidates = new ArrayList<>(visible);
+    playbackStats.prepareWeights(
+        candidates,
+        weights -> {
           if (request != randomRequest || destroyed || !active) return;
           randomPending = false;
+          if (weights == null) {
+            toast("无法读取播放记录，请重试");
+            return;
+          }
           if (visible.isEmpty()) {
             toast("暂无视频");
             return;
           }
-          double[] scores = playbackStats.recentSnapshot(visible);
-          int index =
-              WeightedShuffle.choose(
-                  scores.length, i -> WeightedShuffle.weight(scores[i]), new Random());
+          if (!visible.equals(candidates)) {
+            playRandom();
+            return;
+          }
+          int index = WeightedShuffle.choose(weights.size(), weights::weight, new Random());
           open(index, true);
         });
   }
@@ -983,7 +991,10 @@ public class MainActivity extends Activity {
   }
 
   private void settings() {
-    String[] choices = {"外观", "灵敏度", "解码", "扫描设置", "使用说明", "关于映序"};
+    // A new user action supersedes a random draw still waiting for cold records.
+    randomRequest++;
+    randomPending = false;
+    String[] choices = {"外观", "灵敏度", "解码", "扫描设置", "重置权重", "使用说明", "关于映序"};
     new AlertDialog.Builder(this)
         .setTitle("设置")
         .setItems(
@@ -1010,12 +1021,14 @@ public class MainActivity extends Activity {
                     .show();
               } else if (b == 2) decoder();
               else if (b == 3) sources();
-              else if (b == 4)
+              else if (b == 4) resetWeights();
+              else if (b == 5)
                 new AlertDialog.Builder(this)
                     .setTitle("使用说明")
                     .setMessage(
-                        "点按：显示或隐藏控制\n"
-                            + "双击：播放或暂停\n"
+                        "全屏单击：显示或隐藏控制\n"
+                            + "全屏双击：播放或暂停\n"
+                            + "竖屏单击：播放或暂停；双击：点赞\n"
                             + "左右滑动：调整进度\n"
                             + "长按：临时倍速\n"
                             + "全屏左侧上下滑动：亮度\n"
@@ -1051,6 +1064,19 @@ public class MainActivity extends Activity {
             })
         .setNegativeButton("关闭", null)
         .show();
+  }
+
+  private void resetWeights() {
+    randomRequest++;
+    randomPending = false;
+    RandomWeightsDialog.show(
+        this,
+        playbackStats,
+        () -> {
+          // Discard a pending draw so it cannot open using the pre-reset snapshot.
+          randomRequest++;
+          randomPending = false;
+        });
   }
 
   private void decoder() {

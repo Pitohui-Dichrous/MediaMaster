@@ -7,7 +7,9 @@ import java.util.function.IntToDoubleFunction;
 
 /** Shared, in-memory sampling policy for the library button and shuffled playback rounds. */
 public final class WeightedShuffle {
-  private static final double MIN_WEIGHT = .125;
+  private static final double MIN_BASE_WEIGHT = .125;
+  private static final double MIN_WEIGHT = FeedbackWeightPolicy.MIN_WEIGHT,
+      MAX_WEIGHT = FeedbackWeightPolicy.MAX_WEIGHT;
 
   private WeightedShuffle() {}
 
@@ -16,10 +18,10 @@ public final class WeightedShuffle {
     return weight((double) plays);
   }
 
-  /** Each eligible item's chance stays at least one eighth of the same pool's uniform chance. */
+  /** Unrated viewing weight; recent feedback is layered on by FeedbackWeightPolicy. */
   public static double weight(double recentScore) {
     return Math.max(
-        MIN_WEIGHT, 1 / Math.sqrt(1.0 + RecentPlaybackPolicy.sanitizeScore(recentScore)));
+        MIN_BASE_WEIGHT, 1 / Math.sqrt(1.0 + RecentPlaybackPolicy.sanitizeScore(recentScore)));
   }
 
   /** Returns -1 for an empty library; otherwise every item retains a positive chance. */
@@ -52,7 +54,8 @@ public final class WeightedShuffle {
     for (int i = 0; i < count; i++) {
       double value = provider.applyAsDouble(i);
       // Normal callers use weight(). Keep malformed persisted input from excluding an item.
-      values[i] = Double.isNaN(value) ? MIN_WEIGHT : Math.max(MIN_WEIGHT, Math.min(1.0, value));
+      values[i] =
+          Double.isNaN(value) ? MIN_WEIGHT : Math.max(MIN_WEIGHT, Math.min(MAX_WEIGHT, value));
     }
     return values;
   }

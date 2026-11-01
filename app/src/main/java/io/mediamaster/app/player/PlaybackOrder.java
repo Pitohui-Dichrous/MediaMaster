@@ -109,6 +109,11 @@ public final class PlaybackOrder {
     cursor = 0;
   }
 
+  /** Explicit weight reset starts a fresh round while retaining the currently playing item. */
+  public void refreshWeights() {
+    resetShuffleOrder();
+  }
+
   /**
    * Returns a stable manual-navigation candidate without advancing. Single-repeat affects natural
    * completion only, so it still has a manual next candidate.

@@ -34,10 +34,18 @@ Canonical, unmodified SVG path geometry from materialiconsround/24px.svg:
       shuffle, volume_up, volume_off, fast_forward, video_library
   device: screen_rotation
   image: brightness_6
-  action: search, settings
+  action: search, settings, thumb_up, thumb_down, thumb_down_off_alt
   file: folder_open
   content: sort
 SVG paths are rendered with Android PathParser in PlayerIcons.java and Ui.java.
+The thumb_up and thumb_down paths are also packaged as native Android VectorDrawables;
+their canonical geometry is unchanged, and Android applies the current button tint.
+Source: https://github.com/google/material-design-icons/blob/master/src/action/thumb_up/materialiconsround/24px.svg
+Source: https://github.com/google/material-design-icons/blob/master/src/action/thumb_down/materialiconsround/24px.svg
+The unselected thumb icons use thumb_down_off_alt Round geometry, rotated 180
+degrees in the up variant; the upstream Round thumb_up_off_alt duplicates the
+filled icon, so the rotation provides a consistent genuine outline state.
+Source: https://github.com/google/material-design-icons/blob/master/src/action/thumb_down_off_alt/materialiconsround/24px.svg
 
 Launcher icon
 The launcher foreground now uses the same Google Material Icons Round play_arrow
@@ -53,5 +61,13 @@ Bundled as drawable-nodpi/scrubber_forward.png and scrubber_backward.png.
 The original PNG file bytes and transparent, irregular outlines are preserved.
 Android Canvas trims transparent margins, normalizes visual area, and mirrors
 2.png only at render time. No reconstructed or AI-generated character art is used.
+These user-provided images are included for the user's personal application;
+the application makes no independent claim to their artwork rights.
+
+Double-tap like artwork supplied by the user
+Original name: like.png (1086 x 1448, RGBA PNG)
+Bundled as drawable-nodpi/like_effect.png, byte-for-byte unchanged.
+The original transparent margins, pixel geometry, colors and 3:4 proportions are
+preserved. Android samples the bitmap for display and animates its view transform.
 These user-provided images are included for the user's personal application;
 the application makes no independent claim to their artwork rights.

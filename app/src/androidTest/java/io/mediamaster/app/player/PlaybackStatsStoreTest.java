@@ -14,6 +14,7 @@ import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
@@ -114,10 +115,11 @@ public final class PlaybackStatsStoreTest {
     store.recordPlay(before);
     store.recordPlay(before);
     store.recordPlay(after);
+    PlaybackStatsStore.PreparedWeights existingQueue = prepare(store, Arrays.asList(before, after));
     store.migrate(before, after);
     store.awaitIdle();
-    assertEquals(0, store.playCount(before));
     assertEquals(3, store.playCount(after));
+    assertEquals(existingQueue.weight(0), existingQueue.weight(1), 1e-6);
     assertEquals(0, rowsFor(before));
     assertEquals(1, rowsFor(after));
     // A MediaStore rename keeps the stable identity and must not merge the row into itself.
@@ -143,7 +145,6 @@ public final class PlaybackStatsStoreTest {
     store.recordPlay(after);
     gate.countDown();
     store.awaitIdle();
-    assertEquals(0, store.playCount(before));
     assertEquals(7, store.playCount(after));
     assertEquals(0, rowsFor(before));
     close(store);
@@ -153,7 +154,7 @@ public final class PlaybackStatsStoreTest {
   }
 
   @Test
-  public void boundedStoreEvictsOldestAndKeepsRecentlyPlayedRecords() throws Exception {
+  public void boundedMemoryCacheKeepsEveryPersistedRecord() throws Exception {
     VideoItem a = item("a"), b = item("b"), c = item("c"), d = item("d");
     PlaybackStatsStore store = open(3);
     store.awaitIdle();
@@ -163,13 +164,43 @@ public final class PlaybackStatsStoreTest {
     store.recordPlay(a);
     store.recordPlay(d);
     store.awaitIdle();
-    assertArrayEquals(new long[] {2, 0, 1, 1}, store.snapshot(Arrays.asList(a, b, c, d)));
-    assertEquals(3, rowCount());
+    PlaybackStatsStore.PreparedWeights prepared = prepare(store, Arrays.asList(a, b, c, d));
+    assertEquals(4, prepared.size());
+    assertArrayEquals(new long[] {2, 1, 1, 1}, store.snapshot(Arrays.asList(a, b, c, d)));
+    assertEquals(3, store.cachedRecordCount());
+    assertEquals(4, rowCount());
     close(store);
     PlaybackStatsStore restarted = open(3);
     restarted.awaitIdle();
-    assertArrayEquals(new long[] {2, 0, 1, 1}, restarted.snapshot(Arrays.asList(a, b, c, d)));
-    assertEquals(3, rowCount());
+    PlaybackStatsStore.PreparedWeights reloaded = prepare(restarted, Arrays.asList(a, b, c, d));
+    assertEquals(4, reloaded.size());
+    assertArrayEquals(new long[] {2, 1, 1, 1}, restarted.snapshot(Arrays.asList(a, b, c, d)));
+    assertEquals(3, restarted.cachedRecordCount());
+    assertEquals(4, rowCount());
+  }
+
+  @Test
+  public void pendingColdViewingBurstPreservesCappedScoreDecayAndAllExposure() throws Exception {
+    VideoItem video = item("pending-burst");
+    seedFeedback(video, 5, 60, 60, 0, 0, START);
+    AtomicLong clock = new AtomicLong(START);
+    ExecutorService worker = executor();
+    CountDownLatch gate = block(worker);
+    PlaybackStatsStore store = open(50, worker, clock::get);
+    for (int i = 0; i < 100; i++) store.recordPlay(video);
+    clock.addAndGet(HALF_LIFE);
+    store.recordPlay(video);
+    gate.countDown();
+    store.awaitIdle();
+    assertEquals(106, store.playCount(video));
+    assertEquals(32.5, store.recentScore(video), 1e-12);
+    assertEquals(81, masses(video)[0], 1e-12);
+    close(store);
+    PlaybackStatsStore reloaded = open(50, executor(), clock::get);
+    reloaded.awaitIdle();
+    assertEquals(106, reloaded.playCount(video));
+    assertEquals(32.5, reloaded.recentScore(video), 1e-12);
+    assertEquals(81, masses(video)[0], 1e-12);
   }
 
   @Test
@@ -200,7 +231,16 @@ public final class PlaybackStatsStoreTest {
       assertEquals(
           new HashSet<>(
               Arrays.asList(
-                  "media_key", "play_count", "last_played", "recent_score", "score_updated")),
+                  "media_key",
+                  "play_count",
+                  "last_played",
+                  "recent_score",
+                  "score_updated",
+                  "exposure",
+                  "likes",
+                  "dislikes",
+                  "preference_updated",
+                  "mass_exponent")),
           names);
       try (Cursor row = db.rawQuery("SELECT media_key,play_count,last_played FROM plays", null)) {
         assertTrue(row.moveToFirst());
@@ -276,6 +316,17 @@ public final class PlaybackStatsStoreTest {
     renameTable("held_plays", "plays");
     store.recordPlay(a);
     store.awaitIdle();
+    // Recovery hydrates touched records only. The untouched cold row must remain intact.
+    try (SQLiteDatabase db = database();
+        Cursor row =
+            db.rawQuery(
+                "SELECT play_count FROM plays WHERE media_key=?",
+                new String[] {PlaybackStatsStore.key(b)})) {
+      assertTrue(row.moveToFirst());
+      assertEquals(4, row.getLong(0));
+    }
+    PlaybackStatsStore.PreparedWeights recovered = prepare(store, Arrays.asList(a, b, c));
+    assertEquals(3, recovered.size());
     assertArrayEquals(new long[] {11, 4, 1}, store.snapshot(Arrays.asList(a, b, c)));
     close(store);
     PlaybackStatsStore restarted = open(50);
@@ -367,7 +418,6 @@ public final class PlaybackStatsStoreTest {
     store.awaitIdle();
     store.migrate(before, after);
     store.awaitIdle();
-    assertEquals(0, store.recentScore(before), 0);
     assertEquals(5, store.recentScore(after), 1e-9);
     assertEquals(12, store.playCount(after));
     close(store);
@@ -392,7 +442,7 @@ public final class PlaybackStatsStoreTest {
     assertEquals(31.5, store.recentScore(video), 1e-9);
     assertEquals(.75, store.recentScore(other), 1e-9);
     try (SQLiteDatabase db = database()) {
-      assertEquals(2, db.getVersion());
+      assertEquals(5, db.getVersion());
     }
     close(store);
     clock.addAndGet(HALF_LIFE);
@@ -499,6 +549,551 @@ public final class PlaybackStatsStoreTest {
         names.add(columns.getString(columns.getColumnIndexOrThrow("name")));
       assertFalse("The first ALTER must be rolled back too", names.contains("recent_score"));
       assertTrue(names.contains("score_updated"));
+    }
+  }
+
+  @Test
+  public void oneWindowVoteIsIdempotentNewWindowsAccumulateAndOnlyTheirOwnVoteCanBeUndone()
+      throws Exception {
+    VideoItem video = item("window-vote");
+    AtomicLong clock = new AtomicLong(START);
+    PlaybackStatsStore store = open(50, executor(), clock::get);
+    store.awaitIdle();
+    PlaybackVoteSession first = new PlaybackVoteSession(store);
+    assertTrue(first.setVote(video, 1));
+    store.awaitIdle();
+    assertEquals(1, first.vote(video));
+    double firstWeight = store.weight(video);
+    double changed = masses(video)[3];
+    clock.addAndGet(1000);
+    assertTrue(first.setVote(video, 1));
+    store.awaitIdle();
+    assertEquals(changed, masses(video)[3], 0); // Identical votes do not even write a timestamp.
+    clock.set(START);
+    PlaybackVoteSession second = new PlaybackVoteSession(store);
+    assertEquals(0, second.vote(video));
+    assertTrue(second.setVote(video, 1));
+    assertTrue(store.weight(video) > firstWeight);
+    assertTrue(second.setVote(video, 0));
+    assertEquals(firstWeight, store.weight(video), 1e-12);
+    assertEquals(1, first.vote(video));
+    assertTrue(second.setVote(video, -1));
+    assertEquals(1, store.weight(video), 1e-12); // Equal like/dislike mass cancels its effect.
+    assertTrue(second.setVote(video, 0));
+    store.awaitIdle();
+    assertEquals(0, store.playCount(video));
+    assertEquals(0, store.recentScore(video), 0);
+    assertArrayEquals(new double[] {0, 1, 0, START}, masses(video), 1e-12);
+    close(store);
+    PlaybackStatsStore restarted = open(50, executor(), () -> START);
+    restarted.awaitIdle();
+    PlaybackVoteSession third = new PlaybackVoteSession(restarted);
+    assertEquals("Selections belong to the old window, not the database", 0, third.vote(video));
+    assertEquals(firstWeight, restarted.weight(video), 1e-12);
+    assertTrue(third.setVote(video, 1));
+    assertTrue(restarted.weight(video) > firstWeight);
+  }
+
+  @Test
+  public void votesWaitForKnownHistoryAndExplicitActionsRetryFailedReadsSafely() throws Exception {
+    VideoItem video = item("unavailable-vote");
+    seedFeedback(video, 7, 4, 7, 3, 1, START);
+    renameTable("plays", "held_plays");
+    PlaybackStatsStore store = open(50, executor(), () -> START);
+    store.awaitIdle();
+    PlaybackVoteSession session = new PlaybackVoteSession(store);
+    assertFalse(session.setVote(video, 1));
+    store.awaitIdle();
+    assertEquals(0, session.vote(video));
+    renameTable("held_plays", "plays");
+    assertFalse(session.setVote(video, 1)); // This explicit attempt schedules one safe retry.
+    store.awaitIdle();
+    assertTrue(session.setVote(video, 1));
+    store.awaitIdle();
+    assertEquals(7, store.playCount(video));
+    assertArrayEquals(new double[] {7, 4, 1, START}, masses(video), 1e-12);
+  }
+
+  @Test
+  public void pendingInitialViewingMergesExposureWithoutLosingHistoricalVotes() throws Exception {
+    VideoItem video = item("pending-mass");
+    seedFeedback(video, 9, 4, 9, 3, 1, START);
+    ExecutorService worker = executor();
+    CountDownLatch gate = block(worker);
+    PlaybackStatsStore store = open(50, worker, () -> START);
+    PlaybackVoteSession session = new PlaybackVoteSession(store);
+    assertFalse(session.setVote(video, 1));
+    store.recordPlay(video);
+    gate.countDown();
+    store.awaitIdle();
+    assertTrue(session.setVote(video, 1));
+    store.awaitIdle();
+    assertEquals(10, store.playCount(video));
+    assertEquals(5, store.recentScore(video), 0);
+    assertArrayEquals(new double[] {10, 4, 1, START}, masses(video), 1e-12);
+  }
+
+  @Test
+  public void versionTwoUpgradeUsesOnlyAnExposureEstimateAndPreservesRecentScore()
+      throws Exception {
+    VideoItem video = item("version-two");
+    try (SQLiteDatabase db = database()) {
+      db.execSQL(
+          "CREATE TABLE plays(media_key TEXT PRIMARY KEY NOT NULL,play_count INTEGER NOT"
+              + " NULL,last_played INTEGER NOT NULL,recent_score REAL NOT NULL,score_updated"
+              + " INTEGER NOT NULL) WITHOUT ROWID");
+      db.execSQL("CREATE INDEX plays_recent ON plays(last_played,media_key)");
+      db.execSQL(
+          "INSERT INTO plays VALUES(?,?,?,?,?)",
+          new Object[] {PlaybackStatsStore.key(video), Long.MAX_VALUE, START, 4, START});
+      db.setVersion(2);
+    }
+    PlaybackStatsStore store = open(50, executor(), () -> START + HALF_LIFE);
+    store.awaitIdle();
+    assertEquals(Long.MAX_VALUE, store.playCount(video));
+    assertEquals(2, store.recentScore(video), 0);
+    assertEquals(WeightedShuffle.weight(2), store.weight(video), 0);
+    assertArrayEquals(new double[] {4, 0, 0, START}, masses(video), 0);
+    try (SQLiteDatabase db = database()) {
+      assertEquals(5, db.getVersion());
+    }
+  }
+
+  @Test
+  public void unpublishedEnumSchemaUpgradesNeutrallyInsteadOfInventingVoteHistory()
+      throws Exception {
+    VideoItem video = item("development-enum");
+    try (SQLiteDatabase db = database()) {
+      db.execSQL(
+          "CREATE TABLE plays(media_key TEXT PRIMARY KEY NOT NULL,play_count INTEGER NOT"
+              + " NULL,last_played INTEGER NOT NULL,recent_score REAL NOT NULL,score_updated"
+              + " INTEGER NOT NULL,feedback INTEGER NOT NULL,feedback_updated INTEGER NOT NULL)"
+              + " WITHOUT ROWID");
+      db.execSQL("CREATE INDEX plays_recent ON plays(last_played,media_key)");
+      db.execSQL(
+          "INSERT INTO plays VALUES(?,?,?,?,?,?,?)",
+          new Object[] {PlaybackStatsStore.key(video), 8, START, 4, START, 1, START});
+      db.setVersion(3);
+    }
+    PlaybackStatsStore store = open(50, executor(), () -> START);
+    store.awaitIdle();
+    assertEquals(8, store.playCount(video));
+    assertEquals(WeightedShuffle.weight(4), store.weight(video), 0);
+    assertEquals(0, new PlaybackVoteSession(store).vote(video));
+    assertArrayEquals(new double[] {4, 0, 0, START}, masses(video), 0);
+    try (SQLiteDatabase db = database();
+        Cursor cols = db.rawQuery("PRAGMA table_info(plays)", null)) {
+      assertEquals(5, db.getVersion());
+      while (cols.moveToNext()) assertFalse(cols.getString(1).startsWith("feedback"));
+    }
+  }
+
+  @Test
+  public void renamedIdentifiersMergeAllDecayedMassAndStableRenamesKeepTheWindowVote()
+      throws Exception {
+    VideoItem before = item("mass-before"), after = item("mass-after");
+    seedFeedback(before, 3, 3, 4, 2, 0, START - HALF_LIFE);
+    seedFeedback(after, 2, 2, 3, 0, 1, START);
+    PlaybackStatsStore store = open(50, executor(), () -> START);
+    store.awaitIdle();
+    store.migrate(before, after);
+    store.awaitIdle();
+    assertEquals(5, store.playCount(after));
+    assertEquals(3.5, store.recentScore(after), 0);
+    assertArrayEquals(new double[] {5, 1, 1, START}, masses(after), 0);
+    assertEquals(0, rowsFor(before));
+    PlaybackVoteSession session = new PlaybackVoteSession(store);
+    assertTrue(session.setVote(after, 1));
+    store.migrate(after, after.withName("display-only.mp4"));
+    store.awaitIdle();
+    assertEquals(1, session.vote(after));
+    close(store);
+    PlaybackStatsStore restarted = open(50, executor(), () -> START);
+    restarted.awaitIdle();
+    assertEquals(5, restarted.playCount(after));
+    assertArrayEquals(new double[] {5, 2, 1, START}, masses(after), 0);
+  }
+
+  @Test
+  public void resetClearsEveryWeightMassAndWindowSelectionButRetainsLifetimeCounts()
+      throws Exception {
+    VideoItem a = item("reset-a"), b = item("reset-b");
+    PlaybackStatsStore store = open(50, executor(), () -> START);
+    store.awaitIdle();
+    PlaybackVoteSession session = new PlaybackVoteSession(store);
+    store.recordPlay(a);
+    store.recordPlay(a);
+    assertTrue(session.setVote(a, 1));
+    assertTrue(session.setVote(b, -1));
+    assertTrue(reset(store));
+    assertArrayEquals(new double[] {1, 1}, store.weightSnapshot(Arrays.asList(a, b)), 0);
+    assertEquals(2, store.playCount(a));
+    assertEquals(0, session.vote(a));
+    assertEquals(0, session.vote(b));
+    assertArrayEquals(new double[] {0, 0, 0, START}, masses(a), 0);
+    close(store);
+    PlaybackStatsStore restarted = open(50, executor(), () -> START + HALF_LIFE);
+    restarted.awaitIdle();
+    assertArrayEquals(new double[] {1, 1}, restarted.weightSnapshot(Arrays.asList(a, b)), 0);
+    assertEquals(2, restarted.playCount(a));
+  }
+
+  @Test
+  public void resetDuringInitialLoadPreservesNewViewingAndRenameWithoutAcceptingAnAmbiguousVote()
+      throws Exception {
+    VideoItem before = item("reset-pending-before"), after = item("reset-pending-after");
+    seedFeedback(before, 5, 5, 5, 2, 1, START);
+    ExecutorService worker = executor();
+    CountDownLatch gate = block(worker);
+    PlaybackStatsStore store = open(50, worker, () -> START);
+    PlaybackVoteSession session = new PlaybackVoteSession(store);
+    store.recordPlay(before);
+    CountDownLatch resetDone = new CountDownLatch(1);
+    AtomicBoolean success = new AtomicBoolean();
+    store.resetWeights(
+        ok -> {
+          success.set(ok);
+          resetDone.countDown();
+        });
+    store.recordPlay(before);
+    assertFalse(session.setVote(before, 1));
+    store.migrate(before, after);
+    gate.countDown();
+    assertTrue(resetDone.await(10, TimeUnit.SECONDS));
+    assertTrue(success.get());
+    store.awaitIdle();
+    assertEquals(7, store.playCount(after));
+    assertEquals(1, store.recentScore(after), 0);
+    assertArrayEquals(new double[] {1, 0, 0, START}, masses(after), 0);
+    assertEquals(0, rowsFor(before));
+    assertTrue(session.setVote(after, 1));
+    store.awaitIdle();
+    close(store);
+    PlaybackStatsStore restarted = open(50, executor(), () -> START);
+    restarted.awaitIdle();
+    assertEquals(7, restarted.playCount(after));
+    assertArrayEquals(new double[] {1, 1, 0, START}, masses(after), 0);
+  }
+
+  @Test
+  public void resetFailurePreservesWeightsAndActiveSelectionsUntilStorageRecovers()
+      throws Exception {
+    VideoItem video = item("reset-failure");
+    PlaybackStatsStore store = open(50, executor(), () -> START);
+    store.awaitIdle();
+    store.recordPlay(video);
+    PlaybackVoteSession session = new PlaybackVoteSession(store);
+    assertTrue(session.setVote(video, -1));
+    store.awaitIdle();
+    double original = store.weight(video);
+    renameTable("plays", "held_plays");
+    assertFalse(reset(store));
+    assertEquals(original, store.weight(video), 0);
+    assertEquals(-1, session.vote(video));
+    renameTable("held_plays", "plays");
+    assertTrue(reset(store));
+    assertEquals(1, store.weight(video), 0);
+    assertEquals(1, store.playCount(video));
+    assertEquals(0, session.vote(video));
+  }
+
+  @Test
+  public void switchingOrCancelingAfterDecayOnlyRemovesThisWindowsDecayedContribution()
+      throws Exception {
+    VideoItem video = item("reversible-mass");
+    seedFeedback(video, 0, 0, 0, 2, 1, START);
+    AtomicLong clock = new AtomicLong(START);
+    PlaybackStatsStore store = open(50, executor(), clock::get);
+    store.awaitIdle();
+    PlaybackVoteSession session = new PlaybackVoteSession(store);
+    assertTrue(session.setVote(video, 1));
+    clock.addAndGet(HALF_LIFE);
+    assertTrue(session.setVote(video, -1));
+    store.awaitIdle();
+    assertArrayEquals(new double[] {0, 1, 1.5, START + HALF_LIFE}, masses(video), 1e-12);
+    assertTrue(session.setVote(video, 0));
+    store.awaitIdle();
+    assertArrayEquals(new double[] {0, 1, .5, START + HALF_LIFE}, masses(video), 1e-12);
+    assertEquals(0, session.vote(video));
+  }
+
+  @Test
+  public void rescaledVotesContinueAddingAndOnlyUndoTheirOwnContribution() throws Exception {
+    VideoItem video = item("capped-vote");
+    seedFeedback(video, Long.MAX_VALUE, 63, 1_000_000, 999_999.75, 0, START);
+    AtomicLong clock = new AtomicLong(START);
+    PlaybackStatsStore store = open(50, executor(), clock::get);
+    store.awaitIdle();
+    PlaybackVoteSession partial = new PlaybackVoteSession(store),
+        capped = new PlaybackVoteSession(store);
+    assertTrue(partial.setVote(video, 1));
+    assertTrue(capped.setVote(video, 1));
+    store.awaitIdle();
+    assertEquals(1_000_001.75, masses(video)[1], 0);
+    assertTrue(capped.setVote(video, 0));
+    store.awaitIdle();
+    assertEquals(1_000_000.75, masses(video)[1], 0);
+    clock.addAndGet(HALF_LIFE);
+    assertTrue(partial.setVote(video, 0));
+    store.awaitIdle();
+    assertEquals(999_999.75 / 2, masses(video)[1], 1e-9);
+    store.recordPlay(video);
+    store.awaitIdle();
+    assertEquals(Long.MAX_VALUE, store.playCount(video));
+    assertTrue(Double.isFinite(store.weight(video)));
+    double weight = store.weight(video);
+    close(store);
+    PlaybackStatsStore reloaded = open(50, executor(), clock::get);
+    reloaded.awaitIdle();
+    assertEquals(weight, reloaded.weight(video), 1e-12);
+    assertEquals(999_999.75 / 2, masses(video)[1], 1e-9);
+  }
+
+  @Test
+  public void rollbackReanchorsContributionWithItsAggregateBeforeFurtherDecayAndCancellation()
+      throws Exception {
+    VideoItem video = item("clock-vote");
+    seedFeedback(video, 0, 0, 0, 4, 0, START);
+    AtomicLong clock = new AtomicLong(START + HALF_LIFE);
+    PlaybackStatsStore store = open(50, executor(), clock::get);
+    store.awaitIdle();
+    PlaybackVoteSession session = new PlaybackVoteSession(store);
+    assertTrue(session.setVote(video, 1)); // Historical mass 2 plus current mass 1.
+    clock.addAndGet(HALF_LIFE);
+    store.recordPlay(video); // Historical 1 plus current .5, re-anchored together.
+    store.awaitIdle();
+    clock.set(START);
+    store.weight(video); // Backward-clock repair must also re-anchor the live token.
+    clock.addAndGet(HALF_LIFE);
+    assertTrue(session.setVote(video, 0));
+    store.awaitIdle();
+    assertEquals(.5, masses(video)[1], 1e-12); // Only old historical mass remains.
+    assertEquals(0, session.vote(video));
+    try {
+      session.setVote(video, 2);
+      fail("Invalid vote must be rejected");
+    } catch (IllegalArgumentException expected) {
+    }
+  }
+
+  @Test
+  public void exposureKeepsGrowingBeyondWatchingScoreCapSoSparseLikesStaySparse() throws Exception {
+    VideoItem video = item("large-exposure");
+    PlaybackStatsStore store = open(50, executor(), () -> START);
+    store.awaitIdle();
+    for (int i = 0; i < 128; i++) store.recordPlay(video);
+    PlaybackVoteSession session = new PlaybackVoteSession(store);
+    assertTrue(session.setVote(video, 1));
+    store.awaitIdle();
+    assertEquals(63, store.recentScore(video), 0);
+    assertEquals(128, masses(video)[0], 0);
+    assertEquals(.125 + 1.375 / 144, store.weight(video), 1e-12);
+  }
+
+  @Test
+  public void ownedRenameKeepsTheSameWindowVoteAndItsDecayedUndo() throws Exception {
+    VideoItem before = item("live-rename-before"), after = item("live-rename-after");
+    seedFeedback(before, 0, 0, 0, 2, 0, START);
+    AtomicLong clock = new AtomicLong(START);
+    PlaybackStatsStore store = open(50, executor(), clock::get);
+    store.awaitIdle();
+    PlaybackVoteSession session = new PlaybackVoteSession(store);
+    assertTrue(session.setVote(before, 1));
+    clock.addAndGet(HALF_LIFE);
+    store.migrate(before, after);
+    store.awaitIdle();
+    assertEquals(1, session.vote(after));
+    assertTrue(session.setVote(after, 1)); // A renamed item cannot gain a second window vote.
+    store.awaitIdle();
+    assertEquals(1.5, masses(after)[1], 1e-12);
+    assertTrue(session.setVote(after, 0));
+    store.awaitIdle();
+    assertEquals(1, masses(after)[1], 1e-12);
+    assertEquals(0, rowsFor(before));
+  }
+
+  @Test
+  public void oldQueueReferencesResolveToTheRenamedAggregateEvenAfterCancelAndAnotherRename()
+      throws Exception {
+    VideoItem original = item("queue-old-reference"),
+        renamed = item("queue-renamed"),
+        newest = item("queue-renamed-again");
+    PlaybackStatsStore store = open(50, executor(), () -> START);
+    store.awaitIdle();
+    PlaybackVoteSession session = new PlaybackVoteSession(store);
+    assertTrue(session.setVote(original, 1));
+    store.migrate(original, renamed);
+    store.awaitIdle();
+    assertEquals(1, session.vote(original));
+    assertEquals(1, session.vote(renamed));
+    assertTrue(session.setVote(original, 1));
+    assertTrue(session.setVote(original, 0));
+    store.awaitIdle();
+    assertEquals(0, masses(renamed)[1], 0);
+    store.migrate(renamed, newest);
+    store.awaitIdle();
+    assertTrue(session.setVote(original, -1));
+    assertEquals(-1, session.vote(newest));
+    assertEquals(-1, session.vote(renamed));
+    store.awaitIdle();
+    assertEquals(0, rowsFor(original));
+    assertEquals(0, rowsFor(renamed));
+    assertArrayEquals(new double[] {0, 0, 1, START}, masses(newest), 0);
+  }
+
+  @Test
+  public void renameCollisionsKeepOnlyNewestWindowVoteWithoutUndoingOtherWindows()
+      throws Exception {
+    VideoItem before = item("collision-before"), after = item("collision-after");
+    PlaybackStatsStore store = open(50, executor(), () -> START);
+    store.awaitIdle();
+    PlaybackVoteSession other = new PlaybackVoteSession(store),
+        current = new PlaybackVoteSession(store);
+    assertTrue(other.setVote(before, 1));
+    assertTrue(current.setVote(before, 1));
+    assertTrue(current.setVote(after, -1));
+    store.migrate(before, after);
+    store.awaitIdle();
+    assertEquals(-1, current.vote(after));
+    assertEquals(1, other.vote(after));
+    store.awaitIdle();
+    assertArrayEquals(new double[] {0, 1, 1, START}, masses(after), 1e-12);
+    assertTrue(current.setVote(after, 0));
+    store.awaitIdle();
+    assertEquals(1, masses(after)[1], 1e-12);
+    assertEquals(0, masses(after)[2], 1e-12);
+    assertTrue(other.setVote(after, 0));
+    store.awaitIdle();
+    assertEquals(0, masses(after)[1], 1e-12);
+  }
+
+  @Test
+  public void renamedMassesShareScaleAndKeepAllActiveContributionsReversible() throws Exception {
+    VideoItem before = item("merge-cap-before"), after = item("merge-cap-after");
+    seedFeedback(before, 0, 0, 0, 999_999, 0, START);
+    seedFeedback(after, 0, 0, 0, 999_999, 0, START);
+    PlaybackStatsStore store = open(50, executor(), () -> START);
+    store.awaitIdle();
+    PlaybackVoteSession first = new PlaybackVoteSession(store),
+        second = new PlaybackVoteSession(store);
+    assertTrue(first.setVote(before, 1));
+    assertTrue(second.setVote(after, 1));
+    store.migrate(before, after);
+    store.awaitIdle();
+    assertEquals(2_000_000, masses(after)[1], 1e-9);
+    assertEquals(1, first.vote(after));
+    assertTrue(first.setVote(after, 0));
+    store.awaitIdle();
+    assertEquals(1_999_999, masses(after)[1], 1e-9);
+    assertTrue(second.setVote(after, 0));
+    store.awaitIdle();
+    assertEquals(1_999_998, masses(after)[1], 1e-9);
+  }
+
+  @Test
+  public void saturatedRecencyNeverDropsVotesWhenTheMemoryCacheEvictsAnotherRow() throws Exception {
+    VideoItem a = item("saturated-key-a"), b = item("saturated-key-b");
+    VideoItem retained = PlaybackStatsStore.key(a).compareTo(PlaybackStatsStore.key(b)) > 0 ? a : b;
+    VideoItem pruned = retained == a ? b : a;
+    seedFeedback(retained, 1, 1, 1, 0, 0, Long.MAX_VALUE);
+    PlaybackStatsStore store = open(1, executor(), () -> Long.MAX_VALUE);
+    store.awaitIdle();
+    PlaybackVoteSession session = new PlaybackVoteSession(store);
+    assertTrue(session.setVote(pruned, 1));
+    assertEquals(1, session.vote(pruned));
+    store.awaitIdle();
+    assertEquals(1, rowsFor(pruned));
+    assertEquals(1, rowsFor(retained));
+    assertEquals(1, store.cachedRecordCount());
+  }
+
+  @Test
+  public void unresolvedResetRejectsEvenAnIdenticalVoteWithoutPretendingItWasAccepted()
+      throws Exception {
+    VideoItem video = item("reset-same-vote");
+    ExecutorService worker = executor();
+    PlaybackStatsStore store = open(50, worker, () -> START);
+    store.awaitIdle();
+    PlaybackVoteSession session = new PlaybackVoteSession(store);
+    assertTrue(session.setVote(video, 1));
+    store.awaitIdle();
+    CountDownLatch gate = block(worker), done = new CountDownLatch(1);
+    AtomicBoolean success = new AtomicBoolean();
+    store.resetWeights(
+        ok -> {
+          success.set(ok);
+          done.countDown();
+        });
+    assertFalse(session.setVote(video, 1));
+    assertEquals(1, session.vote(video));
+    gate.countDown();
+    assertTrue(done.await(10, TimeUnit.SECONDS));
+    assertTrue(success.get());
+    assertEquals(0, session.vote(video));
+  }
+
+  private boolean reset(PlaybackStatsStore store) throws Exception {
+    CountDownLatch done = new CountDownLatch(1);
+    AtomicBoolean success = new AtomicBoolean(), mainThread = new AtomicBoolean();
+    store.resetWeights(
+        ok -> {
+          success.set(ok);
+          mainThread.set(Looper.myLooper() == Looper.getMainLooper());
+          done.countDown();
+        });
+    assertTrue(done.await(10, TimeUnit.SECONDS));
+    assertTrue(mainThread.get());
+    store.awaitIdle();
+    return success.get();
+  }
+
+  private PlaybackStatsStore.PreparedWeights prepare(
+      PlaybackStatsStore store, List<VideoItem> videos) throws Exception {
+    CountDownLatch done = new CountDownLatch(1);
+    PlaybackStatsStore.PreparedWeights[] result = new PlaybackStatsStore.PreparedWeights[1];
+    store.prepareWeights(
+        videos,
+        weights -> {
+          result[0] = weights;
+          done.countDown();
+        });
+    assertTrue(done.await(10, TimeUnit.SECONDS));
+    assertNotNull(result[0]);
+    return result[0];
+  }
+
+  private void seedFeedback(
+      VideoItem item,
+      long count,
+      double score,
+      double exposure,
+      double likes,
+      double dislikes,
+      long updated)
+      throws Exception {
+    seedRecent(item, count, score, updated);
+    try (SQLiteDatabase db = database()) {
+      db.execSQL(
+          "UPDATE plays SET exposure=?,likes=?,dislikes=?,preference_updated=? WHERE media_key=?",
+          new Object[] {exposure, likes, dislikes, updated, PlaybackStatsStore.key(item)});
+    }
+  }
+
+  private double[] masses(VideoItem item) {
+    try (SQLiteDatabase db = database();
+        Cursor row =
+            db.rawQuery(
+                "SELECT exposure,likes,dislikes,preference_updated,mass_exponent FROM plays WHERE"
+                    + " media_key=?",
+                new String[] {PlaybackStatsStore.key(item)})) {
+      assertTrue(row.moveToFirst());
+      int exponent = row.getInt(4);
+      return new double[] {
+        Math.scalb(row.getDouble(0), exponent),
+        Math.scalb(row.getDouble(1), exponent),
+        Math.scalb(row.getDouble(2), exponent),
+        row.getLong(3)
+      };
     }
   }
 

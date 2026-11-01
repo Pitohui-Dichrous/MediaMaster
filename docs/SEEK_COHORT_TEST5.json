@@ -1,0 +1,972 @@
+{
+  "schema": "anonymous-seek-cohorts-v1",
+  "protocol": {
+    "protocol": "sustained-surface-v4",
+    "state": "paused",
+    "input": "physical",
+    "scheduledHz": 4,
+    "scheduledSeconds": 8,
+    "scheduledPressMs": 20,
+    "engineChoice": 0,
+    "nativeDecoderChoice": 0,
+    "barcodeFps": 0
+  },
+  "interpretation": [
+    "Selected, disjoint media cohorts; not a random sample or a claim about the whole library.",
+    "A and B use different media and different APKs; this is not a paired before/after comparison.",
+    "100/150/200 ms thresholds are descriptive only, not perceived-zero-delay acceptance criteria.",
+    "lastUpRecoveryMs measures recovery after the final UP, not average latency of every tap.",
+    "longestUnchangedMs measures unchanged observed pictures during the burst; content can affect it.",
+    "Picture recovery uses a same-surface isolated reference, not independent native frame PTS.",
+    "All aggregate denominators retain failed and unmeasured runs; metric summaries use passed runs only.",
+    "Exact 1080p60 uses either orientation and 59.5-60.5 fps; unknown fps is never assumed to be 60.",
+    "Native hardware-preferred configuration does not prove hardware execution; native fallback is possible.",
+    "APK SHA256 verifies supplied local artifacts against recorded tested digests, not installed-device identity."
+  ],
+  "cohorts": [
+    {
+      "cohort": "A",
+      "buildRole": "earlier_candidate",
+      "apkSha256": "4751de39f56f743bf26375be344500dae2583e2e54420c80880974e90586239d",
+      "runs": [
+        {
+          "technical": {
+            "codec": "H264",
+            "profile": 8,
+            "width": 1920,
+            "height": 1080,
+            "fps": 60,
+            "hdr": false,
+            "syncGapMs": 2000
+          },
+          "status": "passed",
+          "initial": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "final": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "lastUpRecoveryMs": 97,
+          "longestUnchangedMs": 297,
+          "engineHistoryIsolated": true,
+          "engineHistoryRestored": true,
+          "preferencesRestored": true,
+          "cadenceValid": true
+        },
+        {
+          "technical": {
+            "codec": "H264",
+            "profile": 8,
+            "width": 1920,
+            "height": 1080,
+            "fps": 60,
+            "hdr": false,
+            "syncGapMs": 9983
+          },
+          "status": "passed",
+          "initial": {
+            "engine": "Media3",
+            "decoderConfiguration": "media3_hardware_configured"
+          },
+          "final": {
+            "engine": "Media3",
+            "decoderConfiguration": "media3_hardware_configured"
+          },
+          "lastUpRecoveryMs": 506,
+          "longestUnchangedMs": 749,
+          "engineHistoryIsolated": true,
+          "engineHistoryRestored": true,
+          "preferencesRestored": true,
+          "cadenceValid": true
+        },
+        {
+          "technical": {
+            "codec": "H264",
+            "profile": 8,
+            "width": 1920,
+            "height": 1080,
+            "fps": 60,
+            "hdr": false,
+            "syncGapMs": 2000
+          },
+          "status": "passed",
+          "initial": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "final": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "lastUpRecoveryMs": 133,
+          "longestUnchangedMs": 341,
+          "engineHistoryIsolated": true,
+          "engineHistoryRestored": true,
+          "preferencesRestored": true,
+          "cadenceValid": true
+        },
+        {
+          "technical": {
+            "codec": "H264",
+            "profile": 8,
+            "width": 1920,
+            "height": 1080,
+            "fps": 60,
+            "hdr": false,
+            "syncGapMs": 500
+          },
+          "status": "passed",
+          "initial": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "final": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "lastUpRecoveryMs": 51,
+          "longestUnchangedMs": 304,
+          "engineHistoryIsolated": true,
+          "engineHistoryRestored": true,
+          "preferencesRestored": true,
+          "cadenceValid": true
+        },
+        {
+          "technical": {
+            "codec": "H264",
+            "profile": 8,
+            "width": 1920,
+            "height": 1080,
+            "fps": 60,
+            "hdr": false,
+            "syncGapMs": 1000
+          },
+          "status": "passed",
+          "initial": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "final": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "lastUpRecoveryMs": 67,
+          "longestUnchangedMs": 337,
+          "engineHistoryIsolated": true,
+          "engineHistoryRestored": true,
+          "preferencesRestored": true,
+          "cadenceValid": true
+        },
+        {
+          "technical": {
+            "codec": "H264",
+            "profile": 8,
+            "width": 1920,
+            "height": 1080,
+            "fps": 60,
+            "hdr": false,
+            "syncGapMs": 833
+          },
+          "status": "passed",
+          "initial": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "final": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "lastUpRecoveryMs": 104,
+          "longestUnchangedMs": 325,
+          "engineHistoryIsolated": true,
+          "engineHistoryRestored": true,
+          "preferencesRestored": true,
+          "cadenceValid": true
+        },
+        {
+          "technical": {
+            "codec": "H264",
+            "profile": 8,
+            "width": 1920,
+            "height": 1080,
+            "fps": 60,
+            "hdr": false,
+            "syncGapMs": 500
+          },
+          "status": "passed",
+          "initial": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "final": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "lastUpRecoveryMs": 104,
+          "longestUnchangedMs": 327,
+          "engineHistoryIsolated": true,
+          "engineHistoryRestored": true,
+          "preferencesRestored": true,
+          "cadenceValid": true
+        },
+        {
+          "technical": {
+            "codec": "H264",
+            "profile": 8,
+            "width": 1920,
+            "height": 1080,
+            "fps": 60,
+            "hdr": false,
+            "syncGapMs": 4166
+          },
+          "status": "passed",
+          "initial": {
+            "engine": "Media3",
+            "decoderConfiguration": "media3_hardware_configured"
+          },
+          "final": {
+            "engine": "Media3",
+            "decoderConfiguration": "media3_hardware_configured"
+          },
+          "lastUpRecoveryMs": 153,
+          "longestUnchangedMs": 384,
+          "engineHistoryIsolated": true,
+          "engineHistoryRestored": true,
+          "preferencesRestored": true,
+          "cadenceValid": true
+        },
+        {
+          "technical": {
+            "codec": "H264",
+            "profile": 8,
+            "width": 1920,
+            "height": 1080,
+            "fps": 60,
+            "hdr": false,
+            "syncGapMs": 500
+          },
+          "status": "passed",
+          "initial": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "final": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "lastUpRecoveryMs": 44,
+          "longestUnchangedMs": 307,
+          "engineHistoryIsolated": true,
+          "engineHistoryRestored": true,
+          "preferencesRestored": true,
+          "cadenceValid": true
+        },
+        {
+          "technical": {
+            "codec": "H264",
+            "profile": 8,
+            "width": 1920,
+            "height": 1080,
+            "fps": 60,
+            "hdr": false,
+            "syncGapMs": 10166
+          },
+          "status": "passed",
+          "initial": {
+            "engine": "Media3",
+            "decoderConfiguration": "media3_hardware_configured"
+          },
+          "final": {
+            "engine": "Media3",
+            "decoderConfiguration": "media3_hardware_configured"
+          },
+          "lastUpRecoveryMs": 486,
+          "longestUnchangedMs": 841,
+          "engineHistoryIsolated": true,
+          "engineHistoryRestored": true,
+          "preferencesRestored": true,
+          "cadenceValid": true
+        },
+        {
+          "technical": {
+            "codec": "H264",
+            "profile": 8,
+            "width": 1126,
+            "height": 1080,
+            "fps": 60,
+            "hdr": false,
+            "syncGapMs": 10000
+          },
+          "status": "passed",
+          "initial": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "final": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "lastUpRecoveryMs": 178,
+          "longestUnchangedMs": 497,
+          "engineHistoryIsolated": true,
+          "engineHistoryRestored": true,
+          "preferencesRestored": true,
+          "cadenceValid": true
+        },
+        {
+          "technical": {
+            "codec": "H264",
+            "profile": 8,
+            "width": 1920,
+            "height": 1080,
+            "fps": 24,
+            "hdr": false,
+            "syncGapMs": 10010
+          },
+          "status": "passed",
+          "initial": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "final": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "lastUpRecoveryMs": 201,
+          "longestUnchangedMs": 481,
+          "engineHistoryIsolated": true,
+          "engineHistoryRestored": true,
+          "preferencesRestored": true,
+          "cadenceValid": true
+        }
+      ],
+      "statistics": {
+        "all": {
+          "total": 12,
+          "passed": 12,
+          "failed": 0,
+          "passedWithRecovery": 12,
+          "recoveryAtOrBelowMs": {
+            "100": 4,
+            "150": 7,
+            "200": 9
+          },
+          "lastUpRecoveryMs": {
+            "count": 12,
+            "minimum": 44,
+            "median": 118.5,
+            "maximum": 506
+          },
+          "longestUnchangedMs": {
+            "count": 12,
+            "minimum": 297,
+            "median": 339.0,
+            "maximum": 841
+          },
+          "engineHistoryIsolated": 12,
+          "engineHistoryRestored": 12
+        },
+        "exact1080p60": {
+          "total": 10,
+          "passed": 10,
+          "failed": 0,
+          "passedWithRecovery": 10,
+          "recoveryAtOrBelowMs": {
+            "100": 4,
+            "150": 7,
+            "200": 8
+          },
+          "lastUpRecoveryMs": {
+            "count": 10,
+            "minimum": 44,
+            "median": 104.0,
+            "maximum": 506
+          },
+          "longestUnchangedMs": {
+            "count": 10,
+            "minimum": 297,
+            "median": 332.0,
+            "maximum": 841
+          },
+          "engineHistoryIsolated": 10,
+          "engineHistoryRestored": 10
+        },
+        "knownUpTo1080p60": {
+          "total": 12,
+          "passed": 12,
+          "failed": 0,
+          "passedWithRecovery": 12,
+          "recoveryAtOrBelowMs": {
+            "100": 4,
+            "150": 7,
+            "200": 9
+          },
+          "lastUpRecoveryMs": {
+            "count": 12,
+            "minimum": 44,
+            "median": 118.5,
+            "maximum": 506
+          },
+          "longestUnchangedMs": {
+            "count": 12,
+            "minimum": 297,
+            "median": 339.0,
+            "maximum": 841
+          },
+          "engineHistoryIsolated": 12,
+          "engineHistoryRestored": 12
+        },
+        "unknownFps": {
+          "total": 0,
+          "passed": 0,
+          "failed": 0,
+          "passedWithRecovery": 0,
+          "recoveryAtOrBelowMs": {
+            "100": 0,
+            "150": 0,
+            "200": 0
+          },
+          "lastUpRecoveryMs": {
+            "count": 0,
+            "minimum": null,
+            "median": null,
+            "maximum": null
+          },
+          "longestUnchangedMs": {
+            "count": 0,
+            "minimum": null,
+            "median": null,
+            "maximum": null
+          },
+          "engineHistoryIsolated": 0,
+          "engineHistoryRestored": 0
+        }
+      }
+    },
+    {
+      "cohort": "B",
+      "buildRole": "final_candidate",
+      "apkSha256": "206598c8f32430e9f343b2379c3624186020233b180af2161cdcc69ff72ad3a7",
+      "runs": [
+        {
+          "technical": {
+            "codec": "H264",
+            "profile": 8,
+            "width": 1920,
+            "height": 1080,
+            "fps": 24,
+            "hdr": false,
+            "syncGapMs": 3125
+          },
+          "status": "passed",
+          "initial": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "final": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "lastUpRecoveryMs": 49,
+          "longestUnchangedMs": 293,
+          "engineHistoryIsolated": true,
+          "engineHistoryRestored": true,
+          "preferencesRestored": true,
+          "cadenceValid": true
+        },
+        {
+          "technical": {
+            "codec": "H264",
+            "profile": 8,
+            "width": 1920,
+            "height": 1080,
+            "fps": 30,
+            "hdr": false,
+            "syncGapMs": 999
+          },
+          "status": "passed",
+          "initial": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "final": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "lastUpRecoveryMs": 50,
+          "longestUnchangedMs": 292,
+          "engineHistoryIsolated": true,
+          "engineHistoryRestored": true,
+          "preferencesRestored": true,
+          "cadenceValid": true
+        },
+        {
+          "technical": {
+            "codec": "H264",
+            "profile": 2,
+            "width": 1920,
+            "height": 1080,
+            "fps": 30,
+            "hdr": false,
+            "syncGapMs": 2999
+          },
+          "status": "passed",
+          "initial": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "final": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "lastUpRecoveryMs": 128,
+          "longestUnchangedMs": 370,
+          "engineHistoryIsolated": true,
+          "engineHistoryRestored": true,
+          "preferencesRestored": true,
+          "cadenceValid": true
+        },
+        {
+          "technical": {
+            "codec": "H264",
+            "profile": 8,
+            "width": 1920,
+            "height": 1080,
+            "fps": 30,
+            "hdr": false,
+            "syncGapMs": 10333
+          },
+          "status": "passed",
+          "initial": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "final": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "lastUpRecoveryMs": 116,
+          "longestUnchangedMs": 728,
+          "engineHistoryIsolated": true,
+          "engineHistoryRestored": true,
+          "preferencesRestored": true,
+          "cadenceValid": true
+        },
+        {
+          "technical": {
+            "codec": "H264",
+            "profile": 2,
+            "width": 1080,
+            "height": 1920,
+            "fps": 60,
+            "hdr": false,
+            "syncGapMs": 1000
+          },
+          "status": "passed",
+          "initial": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "final": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "lastUpRecoveryMs": 74,
+          "longestUnchangedMs": 383,
+          "engineHistoryIsolated": true,
+          "engineHistoryRestored": true,
+          "preferencesRestored": true,
+          "cadenceValid": true
+        },
+        {
+          "technical": {
+            "codec": "H264",
+            "profile": 8,
+            "width": 1080,
+            "height": 1920,
+            "fps": 30,
+            "hdr": false,
+            "syncGapMs": 8333
+          },
+          "status": "passed",
+          "initial": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "final": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "lastUpRecoveryMs": 98,
+          "longestUnchangedMs": 538,
+          "engineHistoryIsolated": true,
+          "engineHistoryRestored": true,
+          "preferencesRestored": true,
+          "cadenceValid": true
+        },
+        {
+          "technical": {
+            "codec": "H264",
+            "profile": 8,
+            "width": 1080,
+            "height": 1920,
+            "fps": 24,
+            "hdr": false,
+            "syncGapMs": 1250
+          },
+          "status": "passed",
+          "initial": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "final": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "lastUpRecoveryMs": 34,
+          "longestUnchangedMs": 395,
+          "engineHistoryIsolated": true,
+          "engineHistoryRestored": true,
+          "preferencesRestored": true,
+          "cadenceValid": true
+        },
+        {
+          "technical": {
+            "codec": "H264",
+            "profile": 8,
+            "width": 1080,
+            "height": 1920,
+            "fps": 30,
+            "hdr": false,
+            "syncGapMs": 253
+          },
+          "status": "passed",
+          "initial": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "final": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "lastUpRecoveryMs": 140,
+          "longestUnchangedMs": 373,
+          "engineHistoryIsolated": true,
+          "engineHistoryRestored": true,
+          "preferencesRestored": true,
+          "cadenceValid": true
+        },
+        {
+          "technical": {
+            "codec": "H264",
+            "profile": 8,
+            "width": 604,
+            "height": 1080,
+            "fps": 30,
+            "hdr": false,
+            "syncGapMs": 8333
+          },
+          "status": "passed",
+          "initial": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "final": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "lastUpRecoveryMs": 50,
+          "longestUnchangedMs": 397,
+          "engineHistoryIsolated": true,
+          "engineHistoryRestored": true,
+          "preferencesRestored": true,
+          "cadenceValid": true
+        },
+        {
+          "technical": {
+            "codec": "H264",
+            "profile": 8,
+            "width": 720,
+            "height": 480,
+            "fps": 25,
+            "hdr": false,
+            "syncGapMs": 1000
+          },
+          "status": "passed",
+          "initial": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "final": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "lastUpRecoveryMs": 50,
+          "longestUnchangedMs": 279,
+          "engineHistoryIsolated": true,
+          "engineHistoryRestored": true,
+          "preferencesRestored": true,
+          "cadenceValid": true
+        },
+        {
+          "technical": {
+            "codec": "H264",
+            "profile": 8,
+            "width": 1280,
+            "height": 720,
+            "fps": 60,
+            "hdr": false,
+            "syncGapMs": 500
+          },
+          "status": "passed",
+          "initial": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "final": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_software_requested"
+          },
+          "lastUpRecoveryMs": 55,
+          "longestUnchangedMs": 287,
+          "engineHistoryIsolated": true,
+          "engineHistoryRestored": true,
+          "preferencesRestored": true,
+          "cadenceValid": true
+        },
+        {
+          "technical": {
+            "codec": "H264",
+            "profile": 8,
+            "width": 1280,
+            "height": 720,
+            "fps": null,
+            "hdr": false,
+            "syncGapMs": 6072
+          },
+          "status": "passed",
+          "initial": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_hardware_preferred"
+          },
+          "final": {
+            "engine": "LibVLC",
+            "decoderConfiguration": "native_hardware_preferred"
+          },
+          "lastUpRecoveryMs": 109,
+          "longestUnchangedMs": 779,
+          "engineHistoryIsolated": true,
+          "engineHistoryRestored": true,
+          "preferencesRestored": true,
+          "cadenceValid": true
+        }
+      ],
+      "statistics": {
+        "all": {
+          "total": 12,
+          "passed": 12,
+          "failed": 0,
+          "passedWithRecovery": 12,
+          "recoveryAtOrBelowMs": {
+            "100": 8,
+            "150": 12,
+            "200": 12
+          },
+          "lastUpRecoveryMs": {
+            "count": 12,
+            "minimum": 34,
+            "median": 64.5,
+            "maximum": 140
+          },
+          "longestUnchangedMs": {
+            "count": 12,
+            "minimum": 279,
+            "median": 378.0,
+            "maximum": 779
+          },
+          "engineHistoryIsolated": 12,
+          "engineHistoryRestored": 12
+        },
+        "exact1080p60": {
+          "total": 1,
+          "passed": 1,
+          "failed": 0,
+          "passedWithRecovery": 1,
+          "recoveryAtOrBelowMs": {
+            "100": 1,
+            "150": 1,
+            "200": 1
+          },
+          "lastUpRecoveryMs": {
+            "count": 1,
+            "minimum": 74,
+            "median": 74,
+            "maximum": 74
+          },
+          "longestUnchangedMs": {
+            "count": 1,
+            "minimum": 383,
+            "median": 383,
+            "maximum": 383
+          },
+          "engineHistoryIsolated": 1,
+          "engineHistoryRestored": 1
+        },
+        "knownUpTo1080p60": {
+          "total": 11,
+          "passed": 11,
+          "failed": 0,
+          "passedWithRecovery": 11,
+          "recoveryAtOrBelowMs": {
+            "100": 8,
+            "150": 11,
+            "200": 11
+          },
+          "lastUpRecoveryMs": {
+            "count": 11,
+            "minimum": 34,
+            "median": 55,
+            "maximum": 140
+          },
+          "longestUnchangedMs": {
+            "count": 11,
+            "minimum": 279,
+            "median": 373,
+            "maximum": 728
+          },
+          "engineHistoryIsolated": 11,
+          "engineHistoryRestored": 11
+        },
+        "unknownFps": {
+          "total": 1,
+          "passed": 1,
+          "failed": 0,
+          "passedWithRecovery": 1,
+          "recoveryAtOrBelowMs": {
+            "100": 0,
+            "150": 1,
+            "200": 1
+          },
+          "lastUpRecoveryMs": {
+            "count": 1,
+            "minimum": 109,
+            "median": 109,
+            "maximum": 109
+          },
+          "longestUnchangedMs": {
+            "count": 1,
+            "minimum": 779,
+            "median": 779,
+            "maximum": 779
+          },
+          "engineHistoryIsolated": 1,
+          "engineHistoryRestored": 1
+        }
+      }
+    }
+  ],
+  "pooledDescriptiveStatistics": {
+    "all": {
+      "total": 24,
+      "passed": 24,
+      "failed": 0,
+      "passedWithRecovery": 24,
+      "recoveryAtOrBelowMs": {
+        "100": 12,
+        "150": 19,
+        "200": 21
+      },
+      "lastUpRecoveryMs": {
+        "count": 24,
+        "minimum": 34,
+        "median": 101.0,
+        "maximum": 506
+      },
+      "longestUnchangedMs": {
+        "count": 24,
+        "minimum": 279,
+        "median": 371.5,
+        "maximum": 841
+      },
+      "engineHistoryIsolated": 24,
+      "engineHistoryRestored": 24
+    },
+    "exact1080p60": {
+      "total": 11,
+      "passed": 11,
+      "failed": 0,
+      "passedWithRecovery": 11,
+      "recoveryAtOrBelowMs": {
+        "100": 5,
+        "150": 8,
+        "200": 9
+      },
+      "lastUpRecoveryMs": {
+        "count": 11,
+        "minimum": 44,
+        "median": 104,
+        "maximum": 506
+      },
+      "longestUnchangedMs": {
+        "count": 11,
+        "minimum": 297,
+        "median": 337,
+        "maximum": 841
+      },
+      "engineHistoryIsolated": 11,
+      "engineHistoryRestored": 11
+    },
+    "knownUpTo1080p60": {
+      "total": 23,
+      "passed": 23,
+      "failed": 0,
+      "passedWithRecovery": 23,
+      "recoveryAtOrBelowMs": {
+        "100": 12,
+        "150": 18,
+        "200": 20
+      },
+      "lastUpRecoveryMs": {
+        "count": 23,
+        "minimum": 34,
+        "median": 98,
+        "maximum": 506
+      },
+      "longestUnchangedMs": {
+        "count": 23,
+        "minimum": 279,
+        "median": 370,
+        "maximum": 841
+      },
+      "engineHistoryIsolated": 23,
+      "engineHistoryRestored": 23
+    },
+    "unknownFps": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0,
+      "passedWithRecovery": 1,
+      "recoveryAtOrBelowMs": {
+        "100": 0,
+        "150": 1,
+        "200": 1
+      },
+      "lastUpRecoveryMs": {
+        "count": 1,
+        "minimum": 109,
+        "median": 109,
+        "maximum": 109
+      },
+      "longestUnchangedMs": {
+        "count": 1,
+        "minimum": 779,
+        "median": 779,
+        "maximum": 779
+      },
+      "engineHistoryIsolated": 1,
+      "engineHistoryRestored": 1
+    }
+  }
+}

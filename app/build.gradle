@@ -4,6 +4,10 @@ def releaseProperties = new Properties()
 def releasePropertiesFile = rootProject.file('.tools/signing/release.properties')
 if (releasePropertiesFile.exists()) releasePropertiesFile.withInputStream { releaseProperties.load(it) }
 def previewInstall = providers.gradleProperty('previewInstall').getOrElse('false').toBoolean()
+def officialRelease = providers.gradleProperty('officialRelease').getOrElse('false').toBoolean()
+if (officialRelease && !previewInstall) {
+    throw new GradleException('Official releases must keep the existing package: add -PpreviewInstall=true')
+}
 
 android {
     namespace 'io.mediamaster.app'
@@ -13,8 +17,8 @@ android {
         resValue 'string', 'app_name', '映序'
         minSdk 26
         targetSdk 35
-        versionCode 30
-        versionName '2.4.0-dev.4'
+        versionCode 31
+        versionName '2.5.0'
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
     }
     compileOptions {
@@ -42,8 +46,12 @@ android {
         abi {
             enable true
             reset()
-            include 'armeabi-v7a', 'arm64-v8a', 'x86_64'
-            universalApk true
+            if (officialRelease) {
+                include 'armeabi-v7a', 'arm64-v8a'
+            } else {
+                include 'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'
+            }
+            universalApk !officialRelease
         }
     }
     testOptions { unitTests.returnDefaultValues = true }

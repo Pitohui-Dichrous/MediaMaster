@@ -442,7 +442,7 @@ public final class PlaybackStatsStoreTest {
     assertEquals(31.5, store.recentScore(video), 1e-9);
     assertEquals(.75, store.recentScore(other), 1e-9);
     try (SQLiteDatabase db = database()) {
-      assertEquals(5, db.getVersion());
+      assertEquals(6, db.getVersion());
     }
     close(store);
     clock.addAndGet(HALF_LIFE);
@@ -655,7 +655,7 @@ public final class PlaybackStatsStoreTest {
     assertEquals(WeightedShuffle.weight(2), store.weight(video), 0);
     assertArrayEquals(new double[] {4, 0, 0, START}, masses(video), 0);
     try (SQLiteDatabase db = database()) {
-      assertEquals(5, db.getVersion());
+      assertEquals(6, db.getVersion());
     }
   }
 
@@ -683,7 +683,7 @@ public final class PlaybackStatsStoreTest {
     assertArrayEquals(new double[] {4, 0, 0, START}, masses(video), 0);
     try (SQLiteDatabase db = database();
         Cursor cols = db.rawQuery("PRAGMA table_info(plays)", null)) {
-      assertEquals(5, db.getVersion());
+      assertEquals(6, db.getVersion());
       while (cols.moveToNext()) assertFalse(cols.getString(1).startsWith("feedback"));
     }
   }

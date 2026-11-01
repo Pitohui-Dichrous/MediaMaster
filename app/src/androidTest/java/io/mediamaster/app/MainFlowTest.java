@@ -960,8 +960,7 @@ public final class MainFlowTest {
     Instrumentation.ActivityMonitor monitor =
         instrumentation.addMonitor(PlayerActivity.class.getName(), null, false);
     try {
-      View random =
-          onMain(() -> viewWithDescription(activity.getWindow().getDecorView(), "随机播放，开启随机连播"));
+      View random = onMain(() -> viewWithDescription(activity.getWindow().getDecorView(), "随机播放"));
       View firstRow = onMain(() -> ((RecyclerView) read(activity, "list")).getChildAt(0));
       assertNotNull(random);
       assertNotNull(firstRow);

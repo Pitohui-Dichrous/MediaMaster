@@ -3,6 +3,7 @@ package io.mediamaster.app.player;
 import android.content.Context;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
+import android.database.sqlite.SQLiteFullException;
 import android.database.sqlite.SQLiteOpenHelper;
 import android.net.Uri;
 import android.os.Handler;
@@ -16,9 +17,11 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -30,6 +33,8 @@ import java.util.function.LongSupplier;
 public final class PlaybackStatsStore {
   private static final String DATABASE = "playback-stats.db";
   private static final int MAX_RECORDS = 50_000;
+  public static final long MAX_STORAGE_BYTES = 5_000_000L;
+  private static final long JOURNAL_HEADROOM = 65_536L;
   private static volatile PlaybackStatsStore instance;
   private final Object lock = new Object();
   private final LinkedHashMap<String, Record> counts = new LinkedHashMap<>(16, .75f, true);
@@ -39,6 +44,8 @@ public final class PlaybackStatsStore {
   private final Map<PreparedWeights, Boolean> liveQueues = new WeakHashMap<>();
   private boolean completeInitialIndex;
   private final ArrayList<Runnable> readyCallbacks = new ArrayList<>();
+  private final ArrayList<Runnable> capacityListeners = new ArrayList<>();
+  private final ArrayList<Runnable> afterCapacity = new ArrayList<>();
   private final Handler main = new Handler(Looper.getMainLooper());
   private final ExecutorService io;
   private final Map<String, Entry> dirty = new HashMap<>();
@@ -51,6 +58,10 @@ public final class PlaybackStatsStore {
   private final Database database;
   private final int maxRecords;
   private final LongSupplier clock;
+  private final long storageBytes;
+  private boolean budgetInitialized, capacityPending;
+  private int capacityNotice;
+  private long maximumPages, pageSize;
   private boolean ready;
   private boolean diskLoaded;
   private boolean resetPending;
@@ -83,12 +94,76 @@ public final class PlaybackStatsStore {
       int maxRecords,
       ExecutorService io,
       LongSupplier clock) {
+    this(context, databaseName, maxRecords, io, clock, MAX_STORAGE_BYTES);
+  }
+
+  PlaybackStatsStore(
+      Context context,
+      String databaseName,
+      int maxRecords,
+      ExecutorService io,
+      LongSupplier clock,
+      long storageBytes) {
     if (maxRecords < 1) throw new IllegalArgumentException("Positive record limit required");
+    if (storageBytes < 192_000) throw new IllegalArgumentException("Storage budget too small");
     this.io = io;
     this.maxRecords = maxRecords;
     this.clock = clock;
+    this.storageBytes = storageBytes;
     database = new Database(context.getApplicationContext(), databaseName, clock);
     io.execute(this::load);
+  }
+
+  /** Foreground owners subscribe; a pending notice is never consumed merely by posting it. */
+  public void addCapacityListener(Runnable listener) {
+    synchronized (lock) {
+      if (!capacityListeners.contains(listener)) capacityListeners.add(listener);
+    }
+    postCapacityListener(listener);
+  }
+
+  public void removeCapacityListener(Runnable listener) {
+    synchronized (lock) {
+      capacityListeners.remove(listener);
+    }
+  }
+
+  /** Memory-only consumption. The durable acknowledgment is serialized with database writes. */
+  public boolean consumeCapacityNotice() {
+    synchronized (lock) {
+      if (capacityNotice != 1) return false;
+      capacityNotice = 2;
+    }
+    io.execute(
+        () -> {
+          try {
+            openDatabase().execSQL("UPDATE storage_state SET notice=2 WHERE id=1 AND notice=1");
+          } catch (RuntimeException failure) {
+            Log.w("PlaybackStatsStore", "Capacity notice acknowledgment could not be saved");
+          }
+        });
+    return true;
+  }
+
+  private void postCapacityListener(Runnable listener) {
+    main.post(
+        () -> {
+          synchronized (lock) {
+            if (capacityNotice != 1 || !capacityListeners.contains(listener)) return;
+          }
+          listener.run();
+        });
+  }
+
+  private void publishCapacityNotice(SQLiteDatabase db) {
+    int state = (int) scalar(db, "SELECT notice FROM storage_state WHERE id=1");
+    ArrayList<Runnable> listeners;
+    synchronized (lock) {
+      // An in-flight local acknowledgment must not be undone by a worker read of pending=1.
+      if (capacityNotice != 2) capacityNotice = state;
+      listeners = new ArrayList<>(capacityListeners);
+    }
+    for (Runnable listener : listeners) postCapacityListener(listener);
   }
 
   public boolean isReady() {
@@ -238,7 +313,7 @@ public final class PlaybackStatsStore {
 
   boolean canAcceptVote() {
     synchronized (lock) {
-      return !resetPending;
+      return !resetPending && !capacityPending;
     }
   }
 
@@ -246,7 +321,7 @@ public final class PlaybackStatsStore {
   Object refreshSessionVotes(
       Map<String, VoteContribution> votes, Map<String, String> aliases, Object observed) {
     synchronized (lock) {
-      if (resetPending || observed == identityGeneration) return observed;
+      if (resetPending || capacityPending || observed == identityGeneration) return observed;
       Map<String, VoteContribution> updated = new HashMap<>();
       Map<String, String> redirected = new HashMap<>();
       boolean removedDuplicate = false;
@@ -463,13 +538,13 @@ public final class PlaybackStatsStore {
     long anchor = now();
     try {
       flushPending();
-      database.getWritableDatabase();
+      openDatabase();
       synchronized (lock) {
         diskLoaded = true;
         if (!diskLoaded || !dirty.isEmpty() || !migrations.isEmpty() || !pendingRecords.isEmpty())
           throw new IllegalStateException("Pending statistics were not saved");
       }
-      SQLiteDatabase db = database.getWritableDatabase();
+      SQLiteDatabase db = openDatabase();
       db.beginTransaction();
       try {
         db.execSQL(
@@ -517,6 +592,10 @@ public final class PlaybackStatsStore {
     synchronized (lock) {
       if (resetPending) {
         afterReset.add(() -> recordPlay(item));
+        return;
+      }
+      if (capacityPending) {
+        afterCapacity.add(() -> recordPlay(item));
         return;
       }
       Record record = recordFor(key(item));
@@ -575,6 +654,10 @@ public final class PlaybackStatsStore {
         afterReset.add(() -> migrate(original, replacement));
         return;
       }
+      if (capacityPending) {
+        afterCapacity.add(() -> migrate(original, replacement));
+        return;
+      }
       migrations.add(new String[] {before, after});
       io.execute(this::flushPending);
     }
@@ -611,7 +694,7 @@ public final class PlaybackStatsStore {
     ArrayList<Entry> loaded = new ArrayList<>();
     boolean success = false;
     try {
-      SQLiteDatabase db = database.getWritableDatabase();
+      SQLiteDatabase db = openDatabase();
       try (Cursor cursor =
           db.query(
               "plays",
@@ -748,7 +831,7 @@ public final class PlaybackStatsStore {
     if (missing.isEmpty()) return true;
     Map<String, Entry> loaded = new HashMap<>();
     try {
-      SQLiteDatabase db = database.getWritableDatabase();
+      SQLiteDatabase db = openDatabase();
       ArrayList<String> keys = new ArrayList<>(missing.keySet());
       for (int offset = 0; offset < keys.size(); offset += 256) {
         List<String> part = keys.subList(offset, Math.min(keys.size(), offset + 256));
@@ -891,49 +974,231 @@ public final class PlaybackStatsStore {
       writes.putAll(dirty);
     }
     if (writes.isEmpty()) return;
-    boolean saved = false;
+    boolean capacityMode = false;
+    Set<String> evicted = new HashSet<>();
     try {
-      SQLiteDatabase db = database.getWritableDatabase();
-      db.beginTransaction();
-      try {
-        for (Map.Entry<String, Entry> write : writes.entrySet()) {
-          Entry entry = write.getValue();
-          if (entry == null) db.delete("plays", "media_key=?", new String[] {write.getKey()});
-          else {
-            // Absolute merged totals make queued duplicate writes and retries idempotent.
-            db.execSQL(
-                "INSERT OR REPLACE INTO"
-                    + " plays(media_key,play_count,last_played,recent_score,score_updated,exposure,likes,dislikes,preference_updated,mass_exponent)"
-                    + " VALUES(?,?,?,?,?,?,?,?,?,?)",
-                new Object[] {
-                  entry.key,
-                  entry.count,
-                  entry.lastPlayed,
-                  entry.score,
-                  entry.scoreUpdated,
-                  entry.exposure,
-                  entry.likes,
-                  entry.dislikes,
-                  entry.preferenceUpdated,
-                  entry.massExponent
-                });
+      SQLiteDatabase db = openDatabase();
+      for (int attempt = 0; ; attempt++) {
+        try {
+          writeTransaction(db, writes, evicted);
+          break;
+        } catch (SQLiteFullException full) {
+          // A genuinely full filesystem must not be treated as permission to discard history.
+          long freeBytes = new java.io.File(db.getPath()).getParentFile().getUsableSpace();
+          long remainingPages = maximumPages - scalar(db, "PRAGMA page_count");
+          if (attempt >= 16
+              || freeBytes < storageBytes * 2
+              || remainingPages > 16 && writes.size() * 320L < remainingPages * pageSize)
+            throw full;
+          if (!capacityMode) {
+            beginCapacity();
+            capacityMode = true;
           }
+          List<String> more = planEviction(db, writes, evicted, false);
+          if (more.isEmpty()) throw full;
+          evicted.addAll(more);
         }
-        db.setTransactionSuccessful();
-      } finally {
-        db.endTransaction();
       }
-      saved = true;
-    } catch (RuntimeException failure) {
-      Log.w("PlaybackStatsStore", "Playback counts could not be saved");
-    }
-    if (saved)
+      if (!evicted.isEmpty()) {
+        publishEvictions(writes, evicted);
+        publishCapacityNotice(db);
+      }
       synchronized (lock) {
         for (Map.Entry<String, Entry> write : writes.entrySet()) {
           if (dirty.containsKey(write.getKey()) && dirty.get(write.getKey()) == write.getValue())
             dirty.remove(write.getKey());
         }
       }
+    } catch (RuntimeException failure) {
+      Log.w("PlaybackStatsStore", "Playback counts could not be saved");
+    } finally {
+      if (capacityMode) endCapacity();
+    }
+  }
+
+  private void writeTransaction(SQLiteDatabase db, Map<String, Entry> writes, Set<String> evicted) {
+    db.beginTransaction();
+    RuntimeException original = null;
+    try {
+      deleteKeys(db, new ArrayList<>(evicted));
+      for (Map.Entry<String, Entry> write : writes.entrySet()) {
+        if (evicted.contains(write.getKey())) continue;
+        Entry entry = write.getValue();
+        if (entry == null) db.delete("plays", "media_key=?", new String[] {write.getKey()});
+        else
+          db.execSQL(
+              "INSERT OR REPLACE INTO plays(media_key,play_count,last_played,recent_score,"
+                  + "score_updated,exposure,likes,dislikes,preference_updated,mass_exponent)"
+                  + " VALUES(?,?,?,?,?,?,?,?,?,?)",
+              new Object[] {
+                entry.key,
+                entry.count,
+                entry.lastPlayed,
+                entry.score,
+                entry.scoreUpdated,
+                entry.exposure,
+                entry.likes,
+                entry.dislikes,
+                entry.preferenceUpdated,
+                entry.massExponent
+              });
+      }
+      if (!evicted.isEmpty())
+        db.execSQL("UPDATE storage_state SET notice=1 WHERE id=1 AND notice=0");
+      db.setTransactionSuccessful();
+    } catch (RuntimeException failure) {
+      original = failure;
+      throw failure;
+    } finally {
+      try {
+        db.endTransaction();
+      } catch (RuntimeException ending) {
+        // SQLITE_FULL may have already rolled back the native transaction. Preserve its cause.
+        if (original == null) throw ending;
+      }
+    }
+  }
+
+  private static long scalar(SQLiteDatabase db, String sql) {
+    try (Cursor cursor = db.rawQuery(sql, null)) {
+      if (!cursor.moveToFirst()) throw new IllegalStateException("Missing storage metadata");
+      return cursor.getLong(0);
+    }
+  }
+
+  /**
+   * Called only on the serial worker. Existing oversized files are repaired before exposing rows.
+   */
+  private SQLiteDatabase openDatabase() {
+    SQLiteDatabase db = database.getWritableDatabase();
+    if (budgetInitialized) return db;
+    pageSize = scalar(db, "PRAGMA page_size");
+    // DELETE rollback journals store at most one old copy of each page, plus eight bytes per
+    // page. cache_spill=OFF prevents extra journal headers; reserve 64KiB for alignment/header.
+    maximumPages = (storageBytes - JOURNAL_HEADROOM) / (2 * pageSize + 8);
+    if (maximumPages < 8) throw new IllegalStateException("Unsupported database page size");
+    if (scalar(db, "PRAGMA page_count") > maximumPages) {
+      // Compact existing free space first, so an upgrade does not evict history unnecessarily.
+      db.execSQL("VACUUM");
+      Map<String, Entry> none = new HashMap<>();
+      while (scalar(db, "PRAGMA page_count") - scalar(db, "PRAGMA freelist_count")
+          > maximumPages - 2) {
+        if (!reclaimOldest(db, none, true))
+          throw new IllegalStateException("Database cannot fit its storage budget");
+      }
+      if (scalar(db, "PRAGMA page_count") > maximumPages) db.execSQL("VACUUM");
+    }
+    long requested = maximumPages * pageSize;
+    if (db.setMaximumSize(requested) != requested
+        || scalar(db, "PRAGMA max_page_count") != maximumPages)
+      throw new IllegalStateException("Database storage limit was not applied");
+    budgetInitialized = true;
+    publishCapacityNotice(db);
+    return db;
+  }
+
+  /**
+   * Capacity pressure is rare. Defer mutations during its transaction without blocking UI reads;
+   * only after commit are live records, pending writes and session votes invalidated together.
+   */
+  private boolean reclaimOldest(
+      SQLiteDatabase db, Map<String, Entry> writes, boolean oversizedUpgrade) {
+    beginCapacity();
+    try {
+      List<String> evicted =
+          planEviction(db, writes, java.util.Collections.emptySet(), oversizedUpgrade);
+      if (evicted.isEmpty()) return false;
+      db.beginTransaction();
+      try {
+        deleteKeys(db, evicted);
+        db.execSQL("UPDATE storage_state SET notice=1 WHERE id=1 AND notice=0");
+        db.setTransactionSuccessful();
+      } finally {
+        db.endTransaction();
+      }
+      publishEvictions(writes, new HashSet<>(evicted));
+      publishCapacityNotice(db);
+      return true;
+    } finally {
+      endCapacity();
+    }
+  }
+
+  private List<String> planEviction(
+      SQLiteDatabase db, Map<String, Entry> writes, Set<String> already, boolean oversizedUpgrade) {
+    Map<String, Entry> candidates = new HashMap<>();
+    try (Cursor rows = db.query("plays", COLUMNS, null, null, null, null, null)) {
+      while (rows.moveToNext()) {
+        Entry entry = readEntry(rows);
+        candidates.put(entry.key, entry);
+      }
+    }
+    for (Entry entry : writes.values()) if (entry != null) candidates.put(entry.key, entry);
+    synchronized (lock) {
+      // Rank an accepted newer operation by its actual time, rather than its stale on-disk time.
+      for (Map.Entry<String, Entry> change : dirty.entrySet())
+        if (change.getValue() != null) candidates.put(change.getKey(), change.getValue());
+    }
+    for (String key : already) candidates.remove(key);
+    ArrayList<Entry> ordered = new ArrayList<>(candidates.values());
+    java.util.Collections.sort(ordered);
+    if (ordered.size() < 2) return java.util.Collections.emptyList();
+    int remove = Math.max(16, ordered.size() / 10);
+    if (oversizedUpgrade) {
+      long used = scalar(db, "PRAGMA page_count") - scalar(db, "PRAGMA freelist_count");
+      remove =
+          Math.max(remove, (int) Math.ceil(ordered.size() * (1d - (maximumPages - 2d) / used)));
+    } else {
+      // Large coalesced batches are trimmed together; actual SQLite page pressure decides retries.
+      long estimatedRows = Math.max(1, (maximumPages - 4) * pageSize / 320);
+      remove = (int) Math.max(remove, ordered.size() - estimatedRows);
+    }
+    remove = Math.min(remove, ordered.size() - 1);
+    ArrayList<String> keys = new ArrayList<>(remove);
+    for (int i = 0; i < remove; i++) keys.add(ordered.get(i).key);
+    return keys;
+  }
+
+  private void deleteKeys(SQLiteDatabase db, List<String> keys) {
+    for (int offset = 0; offset < keys.size(); offset += 256) {
+      List<String> part = keys.subList(offset, Math.min(keys.size(), offset + 256));
+      String marks = String.join(",", java.util.Collections.nCopies(part.size(), "?"));
+      db.delete("plays", "media_key IN (" + marks + ")", part.toArray(new String[0]));
+    }
+  }
+
+  private void publishEvictions(Map<String, Entry> writes, Set<String> keys) {
+    synchronized (lock) {
+      for (String key : keys) {
+        writes.remove(key);
+        dirty.remove(key);
+        RecordReference reference = retained.get(key);
+        Record record = reference == null ? null : reference.get();
+        if (record != null && record.redirect == null) record.entry = null;
+      }
+      for (VoteContribution contribution : new ArrayList<>(activeContributions.keySet())) {
+        if (keys.contains(contribution.key)) {
+          contribution.valid = false;
+          activeContributions.remove(contribution);
+        }
+      }
+      identityGeneration = new Object();
+    }
+  }
+
+  private void beginCapacity() {
+    synchronized (lock) {
+      capacityPending = true;
+    }
+  }
+
+  private void endCapacity() {
+    synchronized (lock) {
+      capacityPending = false;
+      ArrayList<Runnable> deferred = new ArrayList<>(afterCapacity);
+      afterCapacity.clear();
+      for (Runnable action : deferred) action.run();
+    }
   }
 
   private static long add(long left, long right) {
@@ -948,6 +1213,7 @@ public final class PlaybackStatsStore {
   private Entry correctFutureAnchor(Entry entry, long now) {
     if (entry == null
         || resetPending
+        || capacityPending
         || entry.scoreUpdated <= now && entry.preferenceUpdated <= now) return entry;
     if (entry.preferenceUpdated > now) {
       for (VoteContribution contribution : activeContributions.keySet()) {
@@ -1129,8 +1395,28 @@ public final class PlaybackStatsStore {
     private final LongSupplier clock;
 
     Database(Context context, String name, LongSupplier clock) {
-      super(context, name, null, 5);
+      super(context, name, null, 6);
       this.clock = clock;
+      setWriteAheadLoggingEnabled(false);
+    }
+
+    @Override
+    public void onConfigure(SQLiteDatabase db) {
+      db.disableWriteAheadLogging();
+      try (Cursor mode = db.rawQuery("PRAGMA journal_mode=DELETE", null)) {
+        if (!mode.moveToFirst() || !"delete".equalsIgnoreCase(mode.getString(0)))
+          throw new IllegalStateException("Bounded rollback journal required");
+      }
+      db.execSQL("PRAGMA cache_spill=OFF");
+      db.execSQL("PRAGMA temp_store=MEMORY");
+      scalar(db, "PRAGMA journal_size_limit=0");
+    }
+
+    private void createStorageState(SQLiteDatabase db) {
+      db.execSQL(
+          "CREATE TABLE storage_state(id INTEGER PRIMARY KEY CHECK(id=1),"
+              + "notice INTEGER NOT NULL DEFAULT 0 CHECK(notice BETWEEN 0 AND 2))");
+      db.execSQL("INSERT INTO storage_state(id,notice) VALUES(1,0)");
     }
 
     @Override
@@ -1145,12 +1431,17 @@ public final class PlaybackStatsStore {
               + " INTEGER NOT NULL DEFAULT 0 CHECK(mass_exponent>=0 AND mass_exponent<=1022))"
               + " WITHOUT ROWID");
       db.execSQL("CREATE INDEX plays_recent ON plays(last_played, media_key)");
+      createStorageState(db);
     }
 
     @Override
     public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
-      if (oldVersion < 1 || oldVersion > 4 || newVersion != 5)
+      if (oldVersion < 1 || oldVersion > 5 || newVersion != 6)
         throw new IllegalStateException("Unsupported playback statistics schema upgrade");
+      if (oldVersion == 5) {
+        createStorageState(db);
+        return;
+      }
       // SQLiteOpenHelper executes this upgrade in a transaction. No history is dropped if it fails.
       if (oldVersion == 1) {
         db.execSQL(

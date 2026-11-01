@@ -107,7 +107,7 @@ public final class LibraryFastScrollerTest {
       throws Exception {
     onMain(
         () -> {
-          View random = withDescription(activity.getWindow().getDecorView(), "随机播放，开启随机连播");
+          View random = withDescription(activity.getWindow().getDecorView(), "随机播放");
           assertTrue(
               "The standalone random action remains an accessible button",
               random instanceof Button);
@@ -145,8 +145,7 @@ public final class LibraryFastScrollerTest {
         () -> {
           LibraryHeader header = (LibraryHeader) read(activity, "libraryHeader");
           assertEquals(header.collapseRange(), header.collapseOffset(), 1f);
-          assertFalse(
-              withDescription(activity.getWindow().getDecorView(), "随机播放，开启随机连播").isShown());
+          assertFalse(withDescription(activity.getWindow().getDecorView(), "随机播放").isShown());
           assertFalse(withDescription(activity.getWindow().getDecorView(), "设置").isShown());
           assertFalse(
               visibleBounds((View) ((EditText) read(activity, "search")).getParent()).isEmpty());

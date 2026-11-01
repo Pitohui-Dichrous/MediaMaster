@@ -25,8 +25,10 @@ import java.util.concurrent.*;
 
 @androidx.media3.common.util.UnstableApi
 public class MainActivity extends Activity {
+  private static final String RANDOM_START_PORTRAIT = "random_start_portrait";
   private VideoRepository repository;
   private PlaybackStatsStore playbackStats;
+  private final Runnable capacityNotice = this::showCapacityNotice;
   private ThumbnailLoader thumbnails;
   private final ExecutorService worker = Executors.newSingleThreadExecutor();
   private final Handler handler = new Handler(Looper.getMainLooper());
@@ -212,7 +214,7 @@ public class MainActivity extends Activity {
     random.setCompoundDrawables(shuffle, null, null, null);
     random.setCompoundDrawablePadding(d(8));
     Ui.surface(random, Ui.ACCENT, 8);
-    random.setContentDescription("随机播放，开启随机连播");
+    random.setContentDescription("随机播放");
     random.setOnClickListener(
         v -> {
           v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
@@ -435,6 +437,7 @@ public class MainActivity extends Activity {
     super.onResume();
     TaskIdentity.update(this);
     active = true;
+    playbackStats.addCapacityListener(capacityNotice);
     thumbnails.setPaused(false);
     mediaObserver.start();
     // Query only the published media index; this also covers changes missed while backgrounded.
@@ -460,6 +463,7 @@ public class MainActivity extends Activity {
   @Override
   protected void onPause() {
     active = false;
+    playbackStats.removeCapacityListener(capacityNotice);
     randomRequest++;
     randomPending = false;
     mediaObserver.stop();
@@ -476,11 +480,17 @@ public class MainActivity extends Activity {
   @Override
   protected void onDestroy() {
     destroyed = true;
+    if (playbackStats != null) playbackStats.removeCapacityListener(capacityNotice);
     mediaObserver.stop();
     handler.removeCallbacksAndMessages(null);
     worker.shutdownNow();
     thumbnails.close();
     super.onDestroy();
+  }
+
+  private void showCapacityNotice() {
+    if (active && !destroyed && !isFinishing() && playbackStats.consumeCapacityNotice())
+      Toast.makeText(this, R.string.playback_database_full, Toast.LENGTH_LONG).show();
   }
 
   private void scan(boolean manual) {
@@ -791,6 +801,10 @@ public class MainActivity extends Activity {
   }
 
   private void open(int index, boolean shuffle) {
+    open(index, shuffle, false);
+  }
+
+  private void open(int index, boolean shuffle, boolean randomEntry) {
     if (visible.isEmpty()) {
       toast("暂无视频");
       return;
@@ -800,7 +814,13 @@ public class MainActivity extends Activity {
     search.clearFocus();
     ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE))
         .hideSoftInputFromWindow(search.getWindowToken(), 0);
-    PlayerActivity.launch(this, new ArrayList<>(visible), index, shuffle);
+    if (randomEntry) {
+      boolean portrait =
+          getSharedPreferences("player", MODE_PRIVATE).getBoolean(RANDOM_START_PORTRAIT, true);
+      PlayerActivity.launch(this, new ArrayList<>(visible), index, shuffle, portrait);
+    } else {
+      PlayerActivity.launch(this, new ArrayList<>(visible), index, shuffle);
+    }
   }
 
   private void playRandom() {
@@ -831,7 +851,7 @@ public class MainActivity extends Activity {
             return;
           }
           int index = WeightedShuffle.choose(weights.size(), weights::weight, new Random());
-          open(index, true);
+          open(index, true, true);
         });
   }
 
@@ -994,7 +1014,7 @@ public class MainActivity extends Activity {
     // A new user action supersedes a random draw still waiting for cold records.
     randomRequest++;
     randomPending = false;
-    String[] choices = {"外观", "灵敏度", "解码", "扫描设置", "重置权重", "使用说明", "关于映序"};
+    String[] choices = {"外观", "灵敏度", "解码", "随机入口", "扫描设置", "重置权重", "使用说明", "关于映序"};
     new AlertDialog.Builder(this)
         .setTitle("设置")
         .setItems(
@@ -1020,9 +1040,10 @@ public class MainActivity extends Activity {
                     .setNegativeButton("取消", null)
                     .show();
               } else if (b == 2) decoder();
-              else if (b == 3) sources();
-              else if (b == 4) resetWeights();
-              else if (b == 5)
+              else if (b == 3) randomEntryMode();
+              else if (b == 4) sources();
+              else if (b == 5) resetWeights();
+              else if (b == 6)
                 new AlertDialog.Builder(this)
                     .setTitle("使用说明")
                     .setMessage(
@@ -1063,6 +1084,25 @@ public class MainActivity extends Activity {
                     .show();
             })
         .setNegativeButton("关闭", null)
+        .show();
+  }
+
+  private void randomEntryMode() {
+    boolean portrait =
+        getSharedPreferences("player", MODE_PRIVATE).getBoolean(RANDOM_START_PORTRAIT, true);
+    new AlertDialog.Builder(this)
+        .setTitle("随机入口")
+        .setSingleChoiceItems(
+            new String[] {"竖屏", "全屏"},
+            portrait ? 0 : 1,
+            (dialog, which) -> {
+              getSharedPreferences("player", MODE_PRIVATE)
+                  .edit()
+                  .putBoolean(RANDOM_START_PORTRAIT, which == 0)
+                  .apply();
+              dialog.dismiss();
+            })
+        .setNegativeButton("取消", null)
         .show();
   }
 

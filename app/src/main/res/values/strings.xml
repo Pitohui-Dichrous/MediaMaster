@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="playback_database_full">视频数据库已满，旧权重数据将被覆盖</string>
+</resources>

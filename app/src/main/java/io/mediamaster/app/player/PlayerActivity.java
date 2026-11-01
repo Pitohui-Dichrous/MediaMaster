@@ -71,11 +71,13 @@ public final class PlayerActivity extends Activity {
   private static final int ACCENT = Ui.ACCENT, TEXT = 0xfffaf9fc, MUTED = 0xffd1ced8;
   private static final String EXTRA_QUEUE = "queue",
       EXTRA_INDEX = "index",
-      EXTRA_SHUFFLE = "shuffle";
+      EXTRA_SHUFFLE = "shuffle",
+      EXTRA_START_PORTRAIT = "start_portrait";
   private final Handler handler = new Handler(Looper.getMainLooper());
   private ArrayList<VideoItem> queue = new ArrayList<>();
   private PlaybackOrder order;
   private PlaybackStatsStore playbackStats;
+  private final Runnable capacityNotice = this::showCapacityNotice;
   private PlaybackVoteSession voteSession;
   private Object appliedWeightGeneration;
   private PlaybackStatsStore.PreparedWeights queueWeights;
@@ -203,13 +205,33 @@ public final class PlayerActivity extends Activity {
 
   public static void launch(
       Activity activity, ArrayList<VideoItem> videos, int index, boolean shuffle) {
+    startPlayback(activity, videos, index, shuffle, null);
+  }
+
+  public static void launch(
+      Activity activity,
+      ArrayList<VideoItem> videos,
+      int index,
+      boolean shuffle,
+      boolean startPortrait) {
+    startPlayback(activity, videos, index, shuffle, startPortrait);
+  }
+
+  private static void startPlayback(
+      Activity activity,
+      ArrayList<VideoItem> videos,
+      int index,
+      boolean shuffle,
+      Boolean startPortrait) {
     if (videos == null || videos.isEmpty()) return;
     String token = QueueStore.put(activity.getApplicationContext(), videos);
-    activity.startActivity(
+    Intent intent =
         new Intent(activity, PlayerActivity.class)
             .putExtra(EXTRA_QUEUE, token)
             .putExtra(EXTRA_INDEX, index)
-            .putExtra(EXTRA_SHUFFLE, shuffle));
+            .putExtra(EXTRA_SHUFFLE, shuffle);
+    if (startPortrait != null) intent.putExtra(EXTRA_START_PORTRAIT, startPortrait.booleanValue());
+    activity.startActivity(intent);
   }
 
   @Override
@@ -256,8 +278,11 @@ public final class PlayerActivity extends Activity {
     order = new PlaybackOrder(queue.size(), index, mode, new Random(), i -> queueWeights.weight(i));
     ensureQueueWeights(null);
     sensitivity = getSharedPreferences("player", MODE_PRIVATE).getFloat("seek_sensitivity", 1f);
+    portraitMode =
+        state != null
+            ? state.getBoolean("portrait_mode", false)
+            : getIntent().getBooleanExtra(EXTRA_START_PORTRAIT, false);
     if (state != null) {
-      portraitMode = state.getBoolean("portrait_mode", false);
       restorePosition = state.getLong("position");
       shouldPlay = state.getBoolean("playing", true);
       orientationOverride = state.getBoolean("orientation_override");
@@ -1152,6 +1177,7 @@ public final class PlayerActivity extends Activity {
   protected void onResume() {
     super.onResume();
     resumed = true;
+    if (playbackStats != null) playbackStats.addCapacityListener(capacityNotice);
     watchStateSaved = false;
     TaskIdentity.update(this);
     syncWeightReset();
@@ -1165,6 +1191,7 @@ public final class PlayerActivity extends Activity {
     cancelTapRecognition();
     if (likeEffect != null) likeEffect.clear();
     resumed = false;
+    if (playbackStats != null) playbackStats.removeCapacityListener(capacityNotice);
     super.onPause();
   }
 
@@ -1192,9 +1219,15 @@ public final class PlayerActivity extends Activity {
 
   @Override
   protected void onDestroy() {
+    if (playbackStats != null) playbackStats.removeCapacityListener(capacityNotice);
     if (previewLoader != null) previewLoader.close();
     if (isFinishing()) QueueStore.forget(queueToken);
     super.onDestroy();
+  }
+
+  private void showCapacityNotice() {
+    if (resumed && !isFinishing() && !isDestroyed() && playbackStats.consumeCapacityNotice())
+      Toast.makeText(this, R.string.playback_database_full, Toast.LENGTH_LONG).show();
   }
 
   @Override

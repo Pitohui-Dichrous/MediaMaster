@@ -1,0 +1,1433 @@
+{
+  "schema": "mediamaster-cold-seek-v1",
+  "version": "2.2.0-test.7",
+  "apkSha256": "2875796685b67fc4530b8bfe27a029ee83c8d92e509c6cc49da8197200e3c30a",
+  "runs": [
+    {
+      "id": "R001",
+      "stage": "baseline",
+      "apkSha256": null,
+      "artifactBinding": "not-final-artifact",
+      "kind": "cold-random",
+      "protocol": "cold-random-v2",
+      "status": "passed",
+      "completed": true,
+      "recordedPassed": true,
+      "cleanupConfirmed": true,
+      "decoderPreference": 0,
+      "decoderPreferenceEvidence": "result",
+      "engineChoice": 0,
+      "portrait": false,
+      "coldPlaying": false,
+      "randomDrag": false,
+      "operationCount": 64,
+      "coldOperationCount": 18,
+      "phaseCount": 3,
+      "phases": [
+        {
+          "ordinal": 1,
+          "actualRandomDurationMs": 18042,
+          "tailPictureChanges": 33,
+          "finalEngineCode": 1,
+          "finalState": {
+            "failed": false,
+            "playing": true,
+            "playRequested": true,
+            "buffering": false,
+            "queueWork": false,
+            "exactHold": false,
+            "scrubbing": false
+          }
+        },
+        {
+          "ordinal": 2,
+          "actualRandomDurationMs": 3041,
+          "tailPictureChanges": 34,
+          "finalEngineCode": 1,
+          "finalState": {
+            "failed": false,
+            "playing": true,
+            "playRequested": true,
+            "buffering": false,
+            "queueWork": false,
+            "exactHold": false,
+            "scrubbing": false
+          }
+        },
+        {
+          "ordinal": 3,
+          "actualRandomDurationMs": 9078,
+          "tailPictureChanges": 111,
+          "finalEngineCode": 1,
+          "finalState": {
+            "failed": false,
+            "playing": true,
+            "playRequested": true,
+            "buffering": false,
+            "queueWork": false,
+            "exactHold": false,
+            "scrubbing": false
+          }
+        }
+      ],
+      "inputEvidence": {
+        "consumptionRecorded": false,
+        "consumedCount": null,
+        "previewDispatchedCount": null,
+        "seekSerialAdvancedCount": null,
+        "previewRequiredCount": null,
+        "requiredPreviewDispatchedCount": null
+      },
+      "tailOutputEvidence": {
+        "gateRecordedPhases": 0,
+        "observedPhases": 0
+      },
+      "replacementCount": 6,
+      "replacementCounts": [
+        {
+          "fromEngineCode": 4,
+          "toEngineCode": 5,
+          "count": 3
+        },
+        {
+          "fromEngineCode": 5,
+          "toEngineCode": 3,
+          "count": 3
+        }
+      ],
+      "observation": {
+        "pictureChangedCount": 18,
+        "controlReleasedCount": 18,
+        "coldEngineChangedCount": 6,
+        "firstPictureChangeFromEventUpMs": {
+          "observations": 18,
+          "minMs": 21,
+          "maxMs": 2260
+        },
+        "queueAndHoldReleasedFromEventUpMs": {
+          "observations": 18,
+          "minMs": 21,
+          "maxMs": 2356
+        }
+      },
+      "stateEvidence": {
+        "pageFailureObserved": false,
+        "captureErrors": 7,
+        "media3ErrorCount": 0,
+        "media3ErrorCodes": [],
+        "nativeOwnedMaximum": 2,
+        "nativeQuarantinedMaximum": 0,
+        "neighborMaximum": 0,
+        "neighborWarmingMaximum": 0
+      },
+      "failurePhase": null,
+      "failureCategory": null
+    },
+    {
+      "id": "R002",
+      "stage": "baseline",
+      "apkSha256": null,
+      "artifactBinding": "not-final-artifact",
+      "kind": "cold-random",
+      "protocol": "cold-random-v2",
+      "status": "passed",
+      "completed": true,
+      "recordedPassed": true,
+      "cleanupConfirmed": true,
+      "decoderPreference": 0,
+      "decoderPreferenceEvidence": "result",
+      "engineChoice": 0,
+      "portrait": false,
+      "coldPlaying": true,
+      "randomDrag": true,
+      "operationCount": 116,
+      "coldOperationCount": 18,
+      "phaseCount": 3,
+      "phases": [
+        {
+          "ordinal": 1,
+          "actualRandomDurationMs": 54049,
+          "tailPictureChanges": 25,
+          "finalEngineCode": 1,
+          "finalState": {
+            "failed": false,
+            "playing": true,
+            "playRequested": true,
+            "buffering": false,
+            "queueWork": false,
+            "exactHold": false,
+            "scrubbing": false
+          }
+        },
+        {
+          "ordinal": 2,
+          "actualRandomDurationMs": 9097,
+          "tailPictureChanges": 1,
+          "finalEngineCode": 1,
+          "finalState": {
+            "failed": false,
+            "playing": true,
+            "playRequested": true,
+            "buffering": false,
+            "queueWork": false,
+            "exactHold": false,
+            "scrubbing": false
+          }
+        },
+        {
+          "ordinal": 3,
+          "actualRandomDurationMs": 27024,
+          "tailPictureChanges": 7,
+          "finalEngineCode": 1,
+          "finalState": {
+            "failed": false,
+            "playing": true,
+            "playRequested": true,
+            "buffering": false,
+            "queueWork": false,
+            "exactHold": false,
+            "scrubbing": false
+          }
+        }
+      ],
+      "inputEvidence": {
+        "consumptionRecorded": false,
+        "consumedCount": null,
+        "previewDispatchedCount": null,
+        "seekSerialAdvancedCount": null,
+        "previewRequiredCount": null,
+        "requiredPreviewDispatchedCount": null
+      },
+      "tailOutputEvidence": {
+        "gateRecordedPhases": 0,
+        "observedPhases": 0
+      },
+      "replacementCount": 6,
+      "replacementCounts": [
+        {
+          "fromEngineCode": 4,
+          "toEngineCode": 5,
+          "count": 3
+        },
+        {
+          "fromEngineCode": 5,
+          "toEngineCode": 3,
+          "count": 3
+        }
+      ],
+      "observation": {
+        "pictureChangedCount": 18,
+        "controlReleasedCount": 18,
+        "coldEngineChangedCount": 4,
+        "firstPictureChangeFromEventUpMs": {
+          "observations": 18,
+          "minMs": 37,
+          "maxMs": 2175
+        },
+        "queueAndHoldReleasedFromEventUpMs": {
+          "observations": 18,
+          "minMs": 44,
+          "maxMs": 2264
+        }
+      },
+      "stateEvidence": {
+        "pageFailureObserved": false,
+        "captureErrors": 7,
+        "media3ErrorCount": 0,
+        "media3ErrorCodes": [],
+        "nativeOwnedMaximum": 2,
+        "nativeQuarantinedMaximum": 0,
+        "neighborMaximum": 0,
+        "neighborWarmingMaximum": 0
+      },
+      "failurePhase": null,
+      "failureCategory": null
+    },
+    {
+      "id": "R003",
+      "stage": "baseline",
+      "apkSha256": null,
+      "artifactBinding": "not-final-artifact",
+      "kind": "cold-random",
+      "protocol": "cold-random-v2",
+      "status": "passed",
+      "completed": true,
+      "recordedPassed": true,
+      "cleanupConfirmed": true,
+      "decoderPreference": 0,
+      "decoderPreferenceEvidence": "result",
+      "engineChoice": 0,
+      "portrait": false,
+      "coldPlaying": true,
+      "randomDrag": true,
+      "operationCount": 55,
+      "coldOperationCount": 18,
+      "phaseCount": 3,
+      "phases": [
+        {
+          "ordinal": 1,
+          "actualRandomDurationMs": 18059,
+          "tailPictureChanges": 33,
+          "finalEngineCode": 1,
+          "finalState": {
+            "failed": false,
+            "playing": true,
+            "playRequested": true,
+            "buffering": false,
+            "queueWork": false,
+            "exactHold": false,
+            "scrubbing": false
+          }
+        },
+        {
+          "ordinal": 2,
+          "actualRandomDurationMs": 3438,
+          "tailPictureChanges": 34,
+          "finalEngineCode": 1,
+          "finalState": {
+            "failed": false,
+            "playing": true,
+            "playRequested": true,
+            "buffering": false,
+            "queueWork": false,
+            "exactHold": false,
+            "scrubbing": false
+          }
+        },
+        {
+          "ordinal": 3,
+          "actualRandomDurationMs": 9000,
+          "tailPictureChanges": 111,
+          "finalEngineCode": 1,
+          "finalState": {
+            "failed": false,
+            "playing": true,
+            "playRequested": true,
+            "buffering": false,
+            "queueWork": false,
+            "exactHold": false,
+            "scrubbing": false
+          }
+        }
+      ],
+      "inputEvidence": {
+        "consumptionRecorded": false,
+        "consumedCount": null,
+        "previewDispatchedCount": null,
+        "seekSerialAdvancedCount": null,
+        "previewRequiredCount": null,
+        "requiredPreviewDispatchedCount": null
+      },
+      "tailOutputEvidence": {
+        "gateRecordedPhases": 0,
+        "observedPhases": 0
+      },
+      "replacementCount": 6,
+      "replacementCounts": [
+        {
+          "fromEngineCode": 4,
+          "toEngineCode": 5,
+          "count": 3
+        },
+        {
+          "fromEngineCode": 5,
+          "toEngineCode": 3,
+          "count": 3
+        }
+      ],
+      "observation": {
+        "pictureChangedCount": 18,
+        "controlReleasedCount": 18,
+        "coldEngineChangedCount": 5,
+        "firstPictureChangeFromEventUpMs": {
+          "observations": 18,
+          "minMs": 28,
+          "maxMs": 2241
+        },
+        "queueAndHoldReleasedFromEventUpMs": {
+          "observations": 18,
+          "minMs": 64,
+          "maxMs": 2335
+        }
+      },
+      "stateEvidence": {
+        "pageFailureObserved": false,
+        "captureErrors": 7,
+        "media3ErrorCount": 0,
+        "media3ErrorCodes": [],
+        "nativeOwnedMaximum": 2,
+        "nativeQuarantinedMaximum": 0,
+        "neighborMaximum": 0,
+        "neighborWarmingMaximum": 0
+      },
+      "failurePhase": null,
+      "failureCategory": null
+    },
+    {
+      "id": "R004",
+      "stage": "candidate",
+      "apkSha256": null,
+      "artifactBinding": "not-final-artifact",
+      "kind": "cold-random",
+      "protocol": "cold-random-v2",
+      "status": "passed",
+      "completed": true,
+      "recordedPassed": true,
+      "cleanupConfirmed": true,
+      "decoderPreference": 0,
+      "decoderPreferenceEvidence": "result",
+      "engineChoice": 0,
+      "portrait": false,
+      "coldPlaying": false,
+      "randomDrag": false,
+      "operationCount": 64,
+      "coldOperationCount": 18,
+      "phaseCount": 3,
+      "phases": [
+        {
+          "ordinal": 1,
+          "actualRandomDurationMs": 18025,
+          "tailPictureChanges": 34,
+          "finalEngineCode": 4,
+          "finalState": {
+            "failed": false,
+            "playing": true,
+            "playRequested": true,
+            "buffering": false,
+            "queueWork": false,
+            "exactHold": false,
+            "scrubbing": false
+          }
+        },
+        {
+          "ordinal": 2,
+          "actualRandomDurationMs": 3073,
+          "tailPictureChanges": 35,
+          "finalEngineCode": 4,
+          "finalState": {
+            "failed": false,
+            "playing": true,
+            "playRequested": true,
+            "buffering": false,
+            "queueWork": false,
+            "exactHold": false,
+            "scrubbing": false
+          }
+        },
+        {
+          "ordinal": 3,
+          "actualRandomDurationMs": 9022,
+          "tailPictureChanges": 112,
+          "finalEngineCode": 4,
+          "finalState": {
+            "failed": false,
+            "playing": true,
+            "playRequested": true,
+            "buffering": false,
+            "queueWork": false,
+            "exactHold": false,
+            "scrubbing": false
+          }
+        }
+      ],
+      "inputEvidence": {
+        "consumptionRecorded": false,
+        "consumedCount": null,
+        "previewDispatchedCount": null,
+        "seekSerialAdvancedCount": null,
+        "previewRequiredCount": null,
+        "requiredPreviewDispatchedCount": null
+      },
+      "tailOutputEvidence": {
+        "gateRecordedPhases": 0,
+        "observedPhases": 0
+      },
+      "replacementCount": 0,
+      "replacementCounts": [],
+      "observation": {
+        "pictureChangedCount": 18,
+        "controlReleasedCount": 18,
+        "coldEngineChangedCount": 0,
+        "firstPictureChangeFromEventUpMs": {
+          "observations": 18,
+          "minMs": 18,
+          "maxMs": 105
+        },
+        "queueAndHoldReleasedFromEventUpMs": {
+          "observations": 18,
+          "minMs": 18,
+          "maxMs": 134
+        }
+      },
+      "stateEvidence": {
+        "pageFailureObserved": false,
+        "captureErrors": 1,
+        "media3ErrorCount": 0,
+        "media3ErrorCodes": [],
+        "nativeOwnedMaximum": 1,
+        "nativeQuarantinedMaximum": 0,
+        "neighborMaximum": 0,
+        "neighborWarmingMaximum": 0
+      },
+      "failurePhase": null,
+      "failureCategory": null
+    },
+    {
+      "id": "R005",
+      "stage": "candidate",
+      "apkSha256": null,
+      "artifactBinding": "not-final-artifact",
+      "kind": "cold-random",
+      "protocol": "cold-random-v2",
+      "status": "passed",
+      "completed": true,
+      "recordedPassed": true,
+      "cleanupConfirmed": true,
+      "decoderPreference": 0,
+      "decoderPreferenceEvidence": "result",
+      "engineChoice": 0,
+      "portrait": false,
+      "coldPlaying": true,
+      "randomDrag": true,
+      "operationCount": 116,
+      "coldOperationCount": 18,
+      "phaseCount": 3,
+      "phases": [
+        {
+          "ordinal": 1,
+          "actualRandomDurationMs": 54019,
+          "tailPictureChanges": 23,
+          "finalEngineCode": 4,
+          "finalState": {
+            "failed": false,
+            "playing": true,
+            "playRequested": true,
+            "buffering": false,
+            "queueWork": false,
+            "exactHold": false,
+            "scrubbing": false
+          }
+        },
+        {
+          "ordinal": 2,
+          "actualRandomDurationMs": 9051,
+          "tailPictureChanges": 0,
+          "finalEngineCode": 4,
+          "finalState": {
+            "failed": false,
+            "playing": true,
+            "playRequested": true,
+            "buffering": false,
+            "queueWork": false,
+            "exactHold": false,
+            "scrubbing": false
+          }
+        },
+        {
+          "ordinal": 3,
+          "actualRandomDurationMs": 27079,
+          "tailPictureChanges": 3,
+          "finalEngineCode": 4,
+          "finalState": {
+            "failed": false,
+            "playing": true,
+            "playRequested": true,
+            "buffering": false,
+            "queueWork": false,
+            "exactHold": false,
+            "scrubbing": false
+          }
+        }
+      ],
+      "inputEvidence": {
+        "consumptionRecorded": false,
+        "consumedCount": null,
+        "previewDispatchedCount": null,
+        "seekSerialAdvancedCount": null,
+        "previewRequiredCount": null,
+        "requiredPreviewDispatchedCount": null
+      },
+      "tailOutputEvidence": {
+        "gateRecordedPhases": 0,
+        "observedPhases": 0
+      },
+      "replacementCount": 0,
+      "replacementCounts": [],
+      "observation": {
+        "pictureChangedCount": 18,
+        "controlReleasedCount": 18,
+        "coldEngineChangedCount": 0,
+        "firstPictureChangeFromEventUpMs": {
+          "observations": 18,
+          "minMs": 25,
+          "maxMs": 145
+        },
+        "queueAndHoldReleasedFromEventUpMs": {
+          "observations": 18,
+          "minMs": 29,
+          "maxMs": 140
+        }
+      },
+      "stateEvidence": {
+        "pageFailureObserved": false,
+        "captureErrors": 0,
+        "media3ErrorCount": 0,
+        "media3ErrorCodes": [],
+        "nativeOwnedMaximum": 1,
+        "nativeQuarantinedMaximum": 0,
+        "neighborMaximum": 0,
+        "neighborWarmingMaximum": 0
+      },
+      "failurePhase": null,
+      "failureCategory": null
+    },
+    {
+      "id": "R006",
+      "stage": "final",
+      "apkSha256": "2875796685b67fc4530b8bfe27a029ee83c8d92e509c6cc49da8197200e3c30a",
+      "artifactBinding": "operator-designated",
+      "kind": "cold-random",
+      "protocol": "cold-random-v3",
+      "status": "failed",
+      "completed": false,
+      "recordedPassed": false,
+      "cleanupConfirmed": true,
+      "decoderPreference": 0,
+      "decoderPreferenceEvidence": "result",
+      "engineChoice": 0,
+      "portrait": true,
+      "coldPlaying": true,
+      "randomDrag": true,
+      "operationCount": 80,
+      "coldOperationCount": 6,
+      "phaseCount": 2,
+      "phases": [
+        {
+          "ordinal": 1,
+          "actualRandomDurationMs": 72064,
+          "tailPictureChanges": 35,
+          "finalEngineCode": 4,
+          "finalState": {
+            "failed": false,
+            "playing": true,
+            "playRequested": true,
+            "buffering": false,
+            "queueWork": false,
+            "exactHold": false,
+            "scrubbing": false
+          }
+        },
+        {
+          "ordinal": 2,
+          "actualRandomDurationMs": null,
+          "tailPictureChanges": null,
+          "finalEngineCode": null,
+          "finalState": {
+            "failed": null,
+            "playing": null,
+            "playRequested": null,
+            "buffering": null,
+            "queueWork": null,
+            "exactHold": null,
+            "scrubbing": null
+          }
+        }
+      ],
+      "inputEvidence": {
+        "consumptionRecorded": false,
+        "consumedCount": null,
+        "previewDispatchedCount": null,
+        "seekSerialAdvancedCount": null,
+        "previewRequiredCount": null,
+        "requiredPreviewDispatchedCount": null
+      },
+      "tailOutputEvidence": {
+        "gateRecordedPhases": 1,
+        "observedPhases": 1
+      },
+      "replacementCount": 0,
+      "replacementCounts": [],
+      "observation": {
+        "pictureChangedCount": 6,
+        "controlReleasedCount": 6,
+        "coldEngineChangedCount": 0,
+        "firstPictureChangeFromEventUpMs": {
+          "observations": 6,
+          "minMs": 36,
+          "maxMs": 87
+        },
+        "queueAndHoldReleasedFromEventUpMs": {
+          "observations": 6,
+          "minMs": 36,
+          "maxMs": 150
+        }
+      },
+      "stateEvidence": {
+        "pageFailureObserved": false,
+        "captureErrors": 1,
+        "media3ErrorCount": 0,
+        "media3ErrorCodes": [],
+        "nativeOwnedMaximum": 3,
+        "nativeQuarantinedMaximum": 0,
+        "neighborMaximum": 2,
+        "neighborWarmingMaximum": 1
+      },
+      "failurePhase": 2,
+      "failureCategory": "assertion"
+    },
+    {
+      "id": "R007",
+      "stage": "final",
+      "apkSha256": "2875796685b67fc4530b8bfe27a029ee83c8d92e509c6cc49da8197200e3c30a",
+      "artifactBinding": "operator-designated",
+      "kind": "cold-random",
+      "protocol": "cold-random-v3",
+      "status": "passed",
+      "completed": true,
+      "recordedPassed": true,
+      "cleanupConfirmed": true,
+      "decoderPreference": 0,
+      "decoderPreferenceEvidence": "result",
+      "engineChoice": 0,
+      "portrait": true,
+      "coldPlaying": true,
+      "randomDrag": true,
+      "operationCount": 116,
+      "coldOperationCount": 18,
+      "phaseCount": 3,
+      "phases": [
+        {
+          "ordinal": 1,
+          "actualRandomDurationMs": 72042,
+          "tailPictureChanges": 0,
+          "finalEngineCode": 4,
+          "finalState": {
+            "failed": false,
+            "playing": true,
+            "playRequested": true,
+            "buffering": false,
+            "queueWork": false,
+            "exactHold": false,
+            "scrubbing": false
+          }
+        },
+        {
+          "ordinal": 2,
+          "actualRandomDurationMs": 10609,
+          "tailPictureChanges": 35,
+          "finalEngineCode": 4,
+          "finalState": {
+            "failed": false,
+            "playing": true,
+            "playRequested": true,
+            "buffering": false,
+            "queueWork": false,
+            "exactHold": false,
+            "scrubbing": false
+          }
+        },
+        {
+          "ordinal": 3,
+          "actualRandomDurationMs": 36056,
+          "tailPictureChanges": 2,
+          "finalEngineCode": 4,
+          "finalState": {
+            "failed": false,
+            "playing": true,
+            "playRequested": true,
+            "buffering": false,
+            "queueWork": false,
+            "exactHold": false,
+            "scrubbing": false
+          }
+        }
+      ],
+      "inputEvidence": {
+        "consumptionRecorded": true,
+        "consumedCount": 116,
+        "previewDispatchedCount": 116,
+        "seekSerialAdvancedCount": 116,
+        "previewRequiredCount": 116,
+        "requiredPreviewDispatchedCount": 116
+      },
+      "tailOutputEvidence": {
+        "gateRecordedPhases": 3,
+        "observedPhases": 3
+      },
+      "replacementCount": 0,
+      "replacementCounts": [],
+      "observation": {
+        "pictureChangedCount": 18,
+        "controlReleasedCount": 18,
+        "coldEngineChangedCount": 0,
+        "firstPictureChangeFromEventUpMs": {
+          "observations": 18,
+          "minMs": 31,
+          "maxMs": 80
+        },
+        "queueAndHoldReleasedFromEventUpMs": {
+          "observations": 18,
+          "minMs": 31,
+          "maxMs": 139
+        }
+      },
+      "stateEvidence": {
+        "pageFailureObserved": false,
+        "captureErrors": 2,
+        "media3ErrorCount": 0,
+        "media3ErrorCodes": [],
+        "nativeOwnedMaximum": 3,
+        "nativeQuarantinedMaximum": 0,
+        "neighborMaximum": 2,
+        "neighborWarmingMaximum": 1
+      },
+      "failurePhase": null,
+      "failureCategory": null
+    },
+    {
+      "id": "R008",
+      "stage": "final",
+      "apkSha256": "2875796685b67fc4530b8bfe27a029ee83c8d92e509c6cc49da8197200e3c30a",
+      "artifactBinding": "operator-designated",
+      "kind": "cold-random",
+      "protocol": "cold-random-v3",
+      "status": "passed",
+      "completed": true,
+      "recordedPassed": true,
+      "cleanupConfirmed": true,
+      "decoderPreference": 0,
+      "decoderPreferenceEvidence": "result",
+      "engineChoice": 0,
+      "portrait": false,
+      "coldPlaying": true,
+      "randomDrag": true,
+      "operationCount": 128,
+      "coldOperationCount": 6,
+      "phaseCount": 1,
+      "phases": [
+        {
+          "ordinal": 1,
+          "actualRandomDurationMs": 150454,
+          "tailPictureChanges": 43,
+          "finalEngineCode": 4,
+          "finalState": {
+            "failed": false,
+            "playing": true,
+            "playRequested": true,
+            "buffering": false,
+            "queueWork": false,
+            "exactHold": false,
+            "scrubbing": false
+          }
+        }
+      ],
+      "inputEvidence": {
+        "consumptionRecorded": true,
+        "consumedCount": 128,
+        "previewDispatchedCount": 128,
+        "seekSerialAdvancedCount": 128,
+        "previewRequiredCount": 128,
+        "requiredPreviewDispatchedCount": 128
+      },
+      "tailOutputEvidence": {
+        "gateRecordedPhases": 1,
+        "observedPhases": 1
+      },
+      "replacementCount": 0,
+      "replacementCounts": [],
+      "observation": {
+        "pictureChangedCount": 6,
+        "controlReleasedCount": 6,
+        "coldEngineChangedCount": 0,
+        "firstPictureChangeFromEventUpMs": {
+          "observations": 6,
+          "minMs": 26,
+          "maxMs": 39
+        },
+        "queueAndHoldReleasedFromEventUpMs": {
+          "observations": 6,
+          "minMs": 31,
+          "maxMs": 122
+        }
+      },
+      "stateEvidence": {
+        "pageFailureObserved": false,
+        "captureErrors": 0,
+        "media3ErrorCount": 0,
+        "media3ErrorCodes": [],
+        "nativeOwnedMaximum": 1,
+        "nativeQuarantinedMaximum": 0,
+        "neighborMaximum": 0,
+        "neighborWarmingMaximum": 0
+      },
+      "failurePhase": null,
+      "failureCategory": null
+    },
+    {
+      "id": "R009",
+      "stage": "final",
+      "apkSha256": "2875796685b67fc4530b8bfe27a029ee83c8d92e509c6cc49da8197200e3c30a",
+      "artifactBinding": "operator-designated",
+      "kind": "continuous",
+      "protocol": "continuous-forward-v2",
+      "status": "passed",
+      "recordedPassed": true,
+      "cleanupConfirmed": true,
+      "decoderPreference": 2,
+      "decoderPreferenceEvidence": "result",
+      "engineChoice": 0,
+      "operationCount": 1,
+      "actualEngine": "LibVLC",
+      "nativeSoftwareRequested": true,
+      "media3HardwareConfigured": false,
+      "media3SoftwareConfigured": false,
+      "oracle": "barcode150ms",
+      "metrics": {
+        "wallMs": 2000,
+        "sampleLimitHz": 25,
+        "barcodeFps": 60,
+        "stableFinalSamples": 3,
+        "changedPicturesDuringGesture": 24,
+        "longestUnchangedDuringGestureUpperMs": 121,
+        "firstChangedPictureFromInjectedDownMs": 88,
+        "firstChangedPictureFromInjectedUpMs": -1913,
+        "finalAccurateRecoveryFromInjectedUpMs": 54,
+        "downDeliveryLagMs": 14,
+        "upDeliveryLagMs": 4,
+        "downDispatchMs": 6,
+        "upDispatchMs": 3
+      }
+    },
+    {
+      "id": "R010",
+      "stage": "final",
+      "apkSha256": "2875796685b67fc4530b8bfe27a029ee83c8d92e509c6cc49da8197200e3c30a",
+      "artifactBinding": "operator-designated",
+      "kind": "continuous",
+      "protocol": "continuous-forward-v2",
+      "status": "passed",
+      "recordedPassed": true,
+      "cleanupConfirmed": true,
+      "decoderPreference": 0,
+      "decoderPreferenceEvidence": "result",
+      "engineChoice": 0,
+      "operationCount": 1,
+      "actualEngine": "Media3",
+      "nativeSoftwareRequested": false,
+      "media3HardwareConfigured": true,
+      "media3SoftwareConfigured": false,
+      "oracle": "barcode150ms",
+      "metrics": {
+        "wallMs": 2000,
+        "sampleLimitHz": 25,
+        "barcodeFps": 60,
+        "stableFinalSamples": 3,
+        "changedPicturesDuringGesture": 39,
+        "longestUnchangedDuringGestureUpperMs": 169,
+        "firstChangedPictureFromInjectedDownMs": 167,
+        "firstChangedPictureFromInjectedUpMs": -1833,
+        "finalAccurateRecoveryFromInjectedUpMs": 88,
+        "downDeliveryLagMs": 20,
+        "upDeliveryLagMs": 3,
+        "downDispatchMs": 3,
+        "upDispatchMs": 1
+      }
+    },
+    {
+      "id": "R011",
+      "stage": "final",
+      "apkSha256": "2875796685b67fc4530b8bfe27a029ee83c8d92e509c6cc49da8197200e3c30a",
+      "artifactBinding": "operator-designated",
+      "kind": "continuous",
+      "protocol": "continuous-forward-v2",
+      "status": "passed",
+      "recordedPassed": true,
+      "cleanupConfirmed": true,
+      "decoderPreference": 1,
+      "decoderPreferenceEvidence": "result",
+      "engineChoice": 0,
+      "operationCount": 1,
+      "actualEngine": "Media3",
+      "nativeSoftwareRequested": false,
+      "media3HardwareConfigured": true,
+      "media3SoftwareConfigured": false,
+      "oracle": "barcode150ms",
+      "metrics": {
+        "wallMs": 2000,
+        "sampleLimitHz": 25,
+        "barcodeFps": 60,
+        "stableFinalSamples": 3,
+        "changedPicturesDuringGesture": 39,
+        "longestUnchangedDuringGestureUpperMs": 235,
+        "firstChangedPictureFromInjectedDownMs": 234,
+        "firstChangedPictureFromInjectedUpMs": -1767,
+        "finalAccurateRecoveryFromInjectedUpMs": 72,
+        "downDeliveryLagMs": 21,
+        "upDeliveryLagMs": 2,
+        "downDispatchMs": 5,
+        "upDispatchMs": 1
+      }
+    },
+    {
+      "id": "R012",
+      "stage": "final",
+      "apkSha256": "2875796685b67fc4530b8bfe27a029ee83c8d92e509c6cc49da8197200e3c30a",
+      "artifactBinding": "operator-designated",
+      "kind": "continuous",
+      "protocol": "continuous-forward-v2",
+      "status": "passed",
+      "recordedPassed": true,
+      "cleanupConfirmed": true,
+      "decoderPreference": 2,
+      "decoderPreferenceEvidence": "result",
+      "engineChoice": 0,
+      "operationCount": 1,
+      "actualEngine": "LibVLC",
+      "nativeSoftwareRequested": true,
+      "media3HardwareConfigured": false,
+      "media3SoftwareConfigured": false,
+      "oracle": "barcode150ms",
+      "metrics": {
+        "wallMs": 2000,
+        "sampleLimitHz": 25,
+        "barcodeFps": 60,
+        "stableFinalSamples": 3,
+        "changedPicturesDuringGesture": 18,
+        "longestUnchangedDuringGestureUpperMs": 158,
+        "firstChangedPictureFromInjectedDownMs": 122,
+        "firstChangedPictureFromInjectedUpMs": -1878,
+        "finalAccurateRecoveryFromInjectedUpMs": 297,
+        "downDeliveryLagMs": 7,
+        "upDeliveryLagMs": 2,
+        "downDispatchMs": 3,
+        "upDispatchMs": 1
+      }
+    },
+    {
+      "id": "R013",
+      "stage": "final",
+      "apkSha256": "2875796685b67fc4530b8bfe27a029ee83c8d92e509c6cc49da8197200e3c30a",
+      "artifactBinding": "operator-designated",
+      "kind": "cold-random",
+      "protocol": "cold-random-v2",
+      "status": "passed",
+      "completed": true,
+      "recordedPassed": true,
+      "cleanupConfirmed": true,
+      "decoderPreference": 1,
+      "decoderPreferenceEvidence": "result",
+      "engineChoice": 0,
+      "portrait": false,
+      "coldPlaying": true,
+      "randomDrag": true,
+      "operationCount": 117,
+      "coldOperationCount": 18,
+      "phaseCount": 3,
+      "phases": [
+        {
+          "ordinal": 1,
+          "actualRandomDurationMs": 54074,
+          "tailPictureChanges": 2,
+          "finalEngineCode": 5,
+          "finalState": {
+            "failed": false,
+            "playing": true,
+            "playRequested": true,
+            "buffering": false,
+            "queueWork": false,
+            "exactHold": false,
+            "scrubbing": false
+          }
+        },
+        {
+          "ordinal": 2,
+          "actualRandomDurationMs": 9092,
+          "tailPictureChanges": 5,
+          "finalEngineCode": 5,
+          "finalState": {
+            "failed": false,
+            "playing": true,
+            "playRequested": true,
+            "buffering": false,
+            "queueWork": false,
+            "exactHold": false,
+            "scrubbing": false
+          }
+        },
+        {
+          "ordinal": 3,
+          "actualRandomDurationMs": 27014,
+          "tailPictureChanges": 7,
+          "finalEngineCode": 5,
+          "finalState": {
+            "failed": false,
+            "playing": true,
+            "playRequested": true,
+            "buffering": false,
+            "queueWork": false,
+            "exactHold": false,
+            "scrubbing": false
+          }
+        }
+      ],
+      "inputEvidence": {
+        "consumptionRecorded": false,
+        "consumedCount": null,
+        "previewDispatchedCount": null,
+        "seekSerialAdvancedCount": null,
+        "previewRequiredCount": null,
+        "requiredPreviewDispatchedCount": null
+      },
+      "tailOutputEvidence": {
+        "gateRecordedPhases": 0,
+        "observedPhases": 0
+      },
+      "replacementCount": 0,
+      "replacementCounts": [],
+      "observation": {
+        "pictureChangedCount": 18,
+        "controlReleasedCount": 18,
+        "coldEngineChangedCount": 0,
+        "firstPictureChangeFromEventUpMs": {
+          "observations": 18,
+          "minMs": 22,
+          "maxMs": 138
+        },
+        "queueAndHoldReleasedFromEventUpMs": {
+          "observations": 18,
+          "minMs": 289,
+          "maxMs": 553
+        }
+      },
+      "stateEvidence": {
+        "pageFailureObserved": false,
+        "captureErrors": 2,
+        "media3ErrorCount": 0,
+        "media3ErrorCodes": [],
+        "nativeOwnedMaximum": 1,
+        "nativeQuarantinedMaximum": 0,
+        "neighborMaximum": 0,
+        "neighborWarmingMaximum": 0
+      },
+      "failurePhase": null,
+      "failureCategory": null
+    },
+    {
+      "id": "R014",
+      "stage": "final",
+      "apkSha256": "2875796685b67fc4530b8bfe27a029ee83c8d92e509c6cc49da8197200e3c30a",
+      "artifactBinding": "operator-designated",
+      "kind": "cold-random",
+      "protocol": "cold-random-v3",
+      "status": "passed",
+      "completed": true,
+      "recordedPassed": true,
+      "cleanupConfirmed": true,
+      "decoderPreference": 2,
+      "decoderPreferenceEvidence": "result",
+      "engineChoice": 0,
+      "portrait": false,
+      "coldPlaying": false,
+      "randomDrag": true,
+      "operationCount": 69,
+      "coldOperationCount": 18,
+      "phaseCount": 3,
+      "phases": [
+        {
+          "ordinal": 1,
+          "actualRandomDurationMs": 36051,
+          "tailPictureChanges": 1,
+          "finalEngineCode": 4,
+          "finalState": {
+            "failed": false,
+            "playing": true,
+            "playRequested": true,
+            "buffering": false,
+            "queueWork": false,
+            "exactHold": false,
+            "scrubbing": false
+          }
+        },
+        {
+          "ordinal": 2,
+          "actualRandomDurationMs": 6613,
+          "tailPictureChanges": 35,
+          "finalEngineCode": 4,
+          "finalState": {
+            "failed": false,
+            "playing": true,
+            "playRequested": true,
+            "buffering": false,
+            "queueWork": false,
+            "exactHold": false,
+            "scrubbing": false
+          }
+        },
+        {
+          "ordinal": 3,
+          "actualRandomDurationMs": 18052,
+          "tailPictureChanges": 113,
+          "finalEngineCode": 4,
+          "finalState": {
+            "failed": false,
+            "playing": true,
+            "playRequested": true,
+            "buffering": false,
+            "queueWork": false,
+            "exactHold": false,
+            "scrubbing": false
+          }
+        }
+      ],
+      "inputEvidence": {
+        "consumptionRecorded": true,
+        "consumedCount": 69,
+        "previewDispatchedCount": 69,
+        "seekSerialAdvancedCount": 69,
+        "previewRequiredCount": 69,
+        "requiredPreviewDispatchedCount": 69
+      },
+      "tailOutputEvidence": {
+        "gateRecordedPhases": 3,
+        "observedPhases": 3
+      },
+      "replacementCount": 0,
+      "replacementCounts": [],
+      "observation": {
+        "pictureChangedCount": 18,
+        "controlReleasedCount": 18,
+        "coldEngineChangedCount": 0,
+        "firstPictureChangeFromEventUpMs": {
+          "observations": 18,
+          "minMs": 29,
+          "maxMs": 71
+        },
+        "queueAndHoldReleasedFromEventUpMs": {
+          "observations": 18,
+          "minMs": 43,
+          "maxMs": 154
+        }
+      },
+      "stateEvidence": {
+        "pageFailureObserved": false,
+        "captureErrors": 1,
+        "media3ErrorCount": 0,
+        "media3ErrorCodes": [],
+        "nativeOwnedMaximum": 1,
+        "nativeQuarantinedMaximum": 0,
+        "neighborMaximum": 0,
+        "neighborWarmingMaximum": 0
+      },
+      "failurePhase": null,
+      "failureCategory": null
+    },
+    {
+      "id": "R015",
+      "stage": "final",
+      "apkSha256": "2875796685b67fc4530b8bfe27a029ee83c8d92e509c6cc49da8197200e3c30a",
+      "artifactBinding": "operator-designated",
+      "kind": "native-regression",
+      "protocol": "androidjunit-status-v1",
+      "status": "failed",
+      "cleanupConfirmed": null,
+      "decoderPreference": 0,
+      "decoderPreferenceEvidence": "invocation-label",
+      "operationCount": 2,
+      "testsExpected": 2,
+      "testsPassed": 0,
+      "testsFailed": 2,
+      "testsErrored": 0,
+      "testsSkipped": 0,
+      "testsIncomplete": 0,
+      "runnerSuccessConfirmed": false
+    },
+    {
+      "id": "R016",
+      "stage": "final",
+      "apkSha256": "2875796685b67fc4530b8bfe27a029ee83c8d92e509c6cc49da8197200e3c30a",
+      "artifactBinding": "operator-designated",
+      "kind": "native-regression",
+      "protocol": "androidjunit-status-v1",
+      "status": "failed",
+      "cleanupConfirmed": null,
+      "decoderPreference": 1,
+      "decoderPreferenceEvidence": "invocation-label",
+      "operationCount": 2,
+      "testsExpected": 2,
+      "testsPassed": 0,
+      "testsFailed": 2,
+      "testsErrored": 0,
+      "testsSkipped": 0,
+      "testsIncomplete": 0,
+      "runnerSuccessConfirmed": false
+    },
+    {
+      "id": "R017",
+      "stage": "final",
+      "apkSha256": "2875796685b67fc4530b8bfe27a029ee83c8d92e509c6cc49da8197200e3c30a",
+      "artifactBinding": "operator-designated",
+      "kind": "native-regression",
+      "protocol": "androidjunit-status-v1",
+      "status": "failed",
+      "cleanupConfirmed": null,
+      "decoderPreference": 0,
+      "decoderPreferenceEvidence": "invocation-label",
+      "operationCount": 2,
+      "testsExpected": 2,
+      "testsPassed": 1,
+      "testsFailed": 1,
+      "testsErrored": 0,
+      "testsSkipped": 0,
+      "testsIncomplete": 0,
+      "runnerSuccessConfirmed": false
+    },
+    {
+      "id": "R018",
+      "stage": "final",
+      "apkSha256": "2875796685b67fc4530b8bfe27a029ee83c8d92e509c6cc49da8197200e3c30a",
+      "artifactBinding": "operator-designated",
+      "kind": "native-regression",
+      "protocol": "androidjunit-status-v1",
+      "status": "passed",
+      "cleanupConfirmed": null,
+      "decoderPreference": 1,
+      "decoderPreferenceEvidence": "invocation-label",
+      "operationCount": 2,
+      "testsExpected": 2,
+      "testsPassed": 2,
+      "testsFailed": 0,
+      "testsErrored": 0,
+      "testsSkipped": 0,
+      "testsIncomplete": 0,
+      "runnerSuccessConfirmed": true
+    },
+    {
+      "id": "R019",
+      "stage": "final",
+      "apkSha256": "2875796685b67fc4530b8bfe27a029ee83c8d92e509c6cc49da8197200e3c30a",
+      "artifactBinding": "operator-designated",
+      "kind": "native-regression",
+      "protocol": "androidjunit-status-v1",
+      "status": "failed",
+      "cleanupConfirmed": null,
+      "decoderPreference": 2,
+      "decoderPreferenceEvidence": "invocation-label",
+      "operationCount": 8,
+      "testsExpected": 8,
+      "testsPassed": 7,
+      "testsFailed": 1,
+      "testsErrored": 0,
+      "testsSkipped": 0,
+      "testsIncomplete": 0,
+      "runnerSuccessConfirmed": false
+    },
+    {
+      "id": "R020",
+      "stage": "final",
+      "apkSha256": "2875796685b67fc4530b8bfe27a029ee83c8d92e509c6cc49da8197200e3c30a",
+      "artifactBinding": "operator-designated",
+      "kind": "native-regression",
+      "protocol": "androidjunit-status-v1",
+      "status": "passed",
+      "cleanupConfirmed": null,
+      "decoderPreference": 0,
+      "decoderPreferenceEvidence": "invocation-label",
+      "operationCount": 2,
+      "testsExpected": 2,
+      "testsPassed": 2,
+      "testsFailed": 0,
+      "testsErrored": 0,
+      "testsSkipped": 0,
+      "testsIncomplete": 0,
+      "runnerSuccessConfirmed": true
+    },
+    {
+      "id": "R021",
+      "stage": "final",
+      "apkSha256": "2875796685b67fc4530b8bfe27a029ee83c8d92e509c6cc49da8197200e3c30a",
+      "artifactBinding": "operator-designated",
+      "kind": "native-regression",
+      "protocol": "androidjunit-status-v1",
+      "status": "passed",
+      "cleanupConfirmed": null,
+      "decoderPreference": 1,
+      "decoderPreferenceEvidence": "invocation-label",
+      "operationCount": 2,
+      "testsExpected": 2,
+      "testsPassed": 2,
+      "testsFailed": 0,
+      "testsErrored": 0,
+      "testsSkipped": 0,
+      "testsIncomplete": 0,
+      "runnerSuccessConfirmed": true
+    },
+    {
+      "id": "R022",
+      "stage": "final",
+      "apkSha256": "2875796685b67fc4530b8bfe27a029ee83c8d92e509c6cc49da8197200e3c30a",
+      "artifactBinding": "operator-designated",
+      "kind": "native-regression",
+      "protocol": "androidjunit-status-v1",
+      "status": "passed",
+      "cleanupConfirmed": null,
+      "decoderPreference": 2,
+      "decoderPreferenceEvidence": "invocation-label",
+      "operationCount": 8,
+      "testsExpected": 8,
+      "testsPassed": 8,
+      "testsFailed": 0,
+      "testsErrored": 0,
+      "testsSkipped": 0,
+      "testsIncomplete": 0,
+      "runnerSuccessConfirmed": true
+    },
+    {
+      "id": "R023",
+      "stage": "final",
+      "apkSha256": "2875796685b67fc4530b8bfe27a029ee83c8d92e509c6cc49da8197200e3c30a",
+      "artifactBinding": "operator-designated",
+      "kind": "native-regression",
+      "protocol": "androidjunit-status-v1",
+      "status": "failed",
+      "cleanupConfirmed": null,
+      "decoderPreference": 2,
+      "decoderPreferenceEvidence": "invocation-label",
+      "operationCount": 8,
+      "testsExpected": 8,
+      "testsPassed": 6,
+      "testsFailed": 2,
+      "testsErrored": 0,
+      "testsSkipped": 0,
+      "testsIncomplete": 0,
+      "runnerSuccessConfirmed": false
+    }
+  ],
+  "acceptance": {
+    "selectionExplicit": true,
+    "selectedRunIds": [
+      "R013",
+      "R007",
+      "R008",
+      "R014",
+      "R022",
+      "R021",
+      "R020",
+      "R010",
+      "R011",
+      "R012",
+      "R009"
+    ],
+    "allSelectedPassed": true
+  },
+  "limits": [
+    "selected-coverage-not-population-estimate",
+    "cold-decoder-not-cold-filesystem",
+    "cold-picture-change-not-independent-target-pts",
+    "playing-picture-change-may-be-natural-playback",
+    "queue-release-not-accurate-frame-latency",
+    "capture-completion-is-sampling-upper-bound",
+    "native-errors-may-be-missed-between-state-samples",
+    "installation-and-native-invocation-association-designated-by-operator",
+    "failed-and-incomplete-attempts-retained"
+  ]
+}

@@ -9,12 +9,17 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.graphics.Bitmap;
+import android.graphics.Rect;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Bundle;
 import android.os.SystemClock;
 import android.provider.MediaStore;
+import android.view.InputDevice;
+import android.view.MotionEvent;
 import android.view.SurfaceView;
 import android.view.View;
+import android.widget.SeekBar;
 import androidx.media3.common.util.UnstableApi;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
@@ -23,8 +28,12 @@ import io.mediamaster.app.media.VideoItem;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.concurrent.Callable;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
+import org.json.JSONArray;
+import org.json.JSONObject;
 import org.junit.After;
 import org.junit.Assume;
 import org.junit.Before;
@@ -51,6 +60,8 @@ public final class NativeSeekQueueDeviceTest {
   private PlayerActivity activity;
   private VideoPage page;
   private MediaPlayer source;
+  private ScopedPlaybackHistory history;
+  private boolean preferencesCaptured;
 
   @Before
   public void launchGeneratedSoftwareFixture() throws Exception {
@@ -67,12 +78,19 @@ public final class NativeSeekQueueDeviceTest {
       hadPreference[i] = prefs.contains(preferenceNames[i]);
       savedPreference[i] = prefs.getInt(preferenceNames[i], 0);
     }
+    preferencesCaptured = true;
+    history = onMain(() -> ScopedPlaybackHistory.open(context));
+    int decoder =
+        Integer.parseInt(
+            InstrumentationRegistry.getArguments()
+                .getString("benchQueueDecoder", Integer.toString(NativeDecoderPolicy.SOFTWARE)));
+    assertTrue(decoder >= 0 && decoder <= 2);
     assertTrue(
         prefs
             .edit()
             .putInt("engine_choice", 2)
             .putInt("playback_mode", PlaybackOrder.SINGLE)
-            .putInt("native_decoder_mode", NativeDecoderPolicy.SOFTWARE)
+            .putInt("native_decoder_mode", decoder)
             .commit());
     ArrayList<VideoItem> items = new ArrayList<>();
     items.add(fixture());
@@ -96,15 +114,304 @@ public final class NativeSeekQueueDeviceTest {
   }
 
   @After
-  public void restorePreferences() {
-    if (activity != null) rule.finishActivity();
-    if (context == null) return;
-    SharedPreferences.Editor restore = context.getSharedPreferences("player", 0).edit();
-    for (int i = 0; i < preferenceNames.length; i++) {
-      if (hadPreference[i]) restore.putInt(preferenceNames[i], savedPreference[i]);
-      else restore.remove(preferenceNames[i]);
+  public void restorePreferences() throws Exception {
+    try {
+      try {
+        if (activity != null) rule.finishActivity();
+      } finally {
+        if (history != null) history.closeAfterActivityDestroyed(activity);
+      }
+    } finally {
+      if (context != null && preferencesCaptured) {
+        SharedPreferences.Editor restore = context.getSharedPreferences("player", 0).edit();
+        for (int i = 0; i < preferenceNames.length; i++) {
+          if (hadPreference[i]) restore.putInt(preferenceNames[i], savedPreference[i]);
+          else restore.remove(preferenceNames[i]);
+        }
+        assertTrue(restore.commit());
+      }
     }
-    assertTrue(restore.commit());
+  }
+
+  @Test
+  public void heldPausedPreviewProducesTargetWithoutReplacingNativeDecoder() throws Exception {
+    long target = physicalHeldSeek(false);
+    awaitPausedPicture(target);
+    awaitQueueDrain();
+    SystemClock.sleep(2300);
+    awaitPausedPicture(target);
+    assertRetainedPaused();
+  }
+
+  @Test
+  public void heldPlayingPreviewResumesActualBarcodeProgressOnSameNativeDecoder() throws Exception {
+    long target = physicalHeldSeek(true);
+    long started = SystemClock.uptimeMillis(), anchorFrame = -1, anchorAt = -1, latestFrame = -1;
+    int nearTargetRewinds = 0;
+    boolean settled = false;
+    JSONArray trace = new JSONArray();
+    try {
+      while (SystemClock.uptimeMillis() - started < 4000) {
+        boolean queueBefore =
+            onMain(
+                () -> {
+                  assertSame("Held preview must retain its native decoder", source, page.vlc);
+                  assertTrue("Playing intent must survive held preview", page.playRequested);
+                  assertFalse("Released input must finish scrubbing", flag("scrubbing"));
+                  return queue().hasWork();
+                });
+        long frame = barcodeFrameMs();
+        long now = SystemClock.uptimeMillis();
+        boolean queueAfter = onMain(() -> queue().hasWork());
+        trace.put(
+            new JSONObject()
+                .put("atMs", now - started)
+                .put("frameMs", frame)
+                .put("queueBefore", queueBefore)
+                .put("queueAfter", queueAfter));
+        // Preview playback may already be ahead when final EXACT revisits the same target.
+        // Queue drain alone is not a PTS oracle: both barcode proximity and forward output follow.
+        if (queueBefore || queueAfter || frame < 0) {
+          anchorFrame = latestFrame = -1;
+        } else if (anchorFrame < 0) {
+          if (Math.abs(frame - target) <= 200) {
+            anchorFrame = latestFrame = frame;
+            anchorAt = now;
+          }
+        } else if (frame < latestFrame) {
+          assertTrue(
+              "Only a bounded final retarget near the exact target is permitted",
+              Math.abs(frame - target) <= 200
+                  && Math.abs(latestFrame - target) <= 200
+                  && ++nearTargetRewinds <= 2);
+          anchorFrame = latestFrame = frame;
+          anchorAt = now;
+        } else {
+          latestFrame = frame;
+          if (frame - anchorFrame >= 200
+              && now - anchorAt >= 150
+              && Math.abs((frame - anchorFrame) - (now - anchorAt)) <= 300) {
+            settled = true;
+            break;
+          }
+        }
+        SystemClock.sleep(30);
+      }
+      assertTrue(
+          "Final target must converge to sustained forward barcode output within 4 seconds",
+          settled);
+      long settledAt = SystemClock.uptimeMillis(), settledFrame = latestFrame;
+      SystemClock.sleep(2300);
+      long after = barcodeFrameMs(), at = SystemClock.uptimeMillis();
+      trace.put(
+          new JSONObject()
+              .put("atMs", at - started)
+              .put("frameMs", after)
+              .put("retainedTail", true));
+      assertTrue(
+          "Actual output must keep advancing beyond the recovery watchdog",
+          after - settledFrame >= 500
+              && Math.abs((after - settledFrame) - (at - settledAt)) <= 800);
+      onMain(
+          () -> {
+            assertSame(source, page.vlc);
+            assertTrue(page.playRequested);
+            assertTrue(source.isPlaying());
+            assertTrue("Playing output must not remain muted", source.getVolume() > 0);
+            assertFalse(queue().hasWork());
+            return null;
+          });
+    } finally {
+      Bundle status = new Bundle();
+      status.putString(
+          "heldPlayingBarcode",
+          new JSONObject()
+              .put("targetMs", target)
+              .put("nearTargetRewinds", nearTargetRewinds)
+              .put("settled", settled)
+              .put("samples", trace)
+              .toString());
+      instrumentation.sendStatus(2, status);
+    }
+  }
+
+  /** Real input exceeds the 50 ms preview delay; final output, not a flag alone, is the oracle. */
+  private long physicalHeldSeek(boolean playing) throws Exception {
+    seek(6200);
+    awaitPausedPicture(6200);
+    awaitQueueDrain();
+    setPlaying(playing);
+    if (playing) await(() -> onMain(source::isPlaying));
+    int[] geometry = awaitSeekGeometry();
+    int[] location =
+        onMain(
+            () -> {
+              assertTrue("Generated fixture must span the target", page.duration() > 26000);
+              int x =
+                  geometry[0]
+                      + geometry[4]
+                      + Math.round(
+                          (geometry[2] - geometry[4] - geometry[5]) * 18720f / page.duration());
+              return new int[] {x, geometry[1] + geometry[3] / 2};
+            });
+    long serialBefore = onMain(() -> (long) read(page, "explicitSeekSerial"));
+    long down = SystemClock.uptimeMillis();
+    boolean released = false;
+    try {
+      injectHeld(down, MotionEvent.ACTION_DOWN, location);
+      long consumeDeadline = SystemClock.uptimeMillis() + 1500;
+      while (!onMain(() -> flag("scrubbing") && (boolean) read(activity, "scrubbing"))
+          && SystemClock.uptimeMillis() < consumeDeadline) SystemClock.sleep(10);
+      assertTrue(
+          "DOWN did not reach SeekBar; " + heldDiagnostic(location),
+          onMain(() -> flag("scrubbing") && (boolean) read(activity, "scrubbing")));
+      long consumed = SystemClock.uptimeMillis();
+      SystemClock.sleep(30);
+      injectHeld(down, MotionEvent.ACTION_MOVE, location);
+      long remaining = 120 - (SystemClock.uptimeMillis() - consumed);
+      if (remaining > 0) SystemClock.sleep(remaining);
+      String diagnostic = heldDiagnostic(location);
+      onMain(
+          () -> {
+            assertSame(source, page.vlc);
+            assertTrue(
+                "Held input must dispatch a real preview; " + diagnostic,
+                (int) read(page, "scrubSubmittedCount") > 0);
+            NativeSeekQueue.Request submitted = queue().submitted();
+            if (submitted != null)
+              assertFalse("Native preview must request accurate decoding", submitted.fast);
+            return null;
+          });
+      injectHeld(down, MotionEvent.ACTION_UP, location);
+      released = true;
+      return onMain(
+          () -> {
+            long target = (long) read(activity, "gestureTarget");
+            assertTrue(
+                "UP must commit a consumed seek",
+                (long) read(page, "explicitSeekSerial") > serialBefore);
+            assertFalse("UP must finish SeekBar tracking", flag("scrubbing"));
+            assertTrue(
+                "Target must fit the existing barcode decoder", target > 1000 && target < 28000);
+            return target;
+          });
+    } finally {
+      if (!released) injectHeld(down, MotionEvent.ACTION_CANCEL, location);
+    }
+  }
+
+  /**
+   * GONE-to-visible controls and rotation must finish layout before physical coordinates are used.
+   */
+  private int[] awaitSeekGeometry() throws Exception {
+    onMain(
+        () -> {
+          invoke(activity, "showChrome");
+          invoke(activity, "updateProgress");
+          return null;
+        });
+    long until = SystemClock.uptimeMillis() + 3000, stableSince = 0;
+    int[] last = null;
+    while (SystemClock.uptimeMillis() < until) {
+      int[] now =
+          onMain(
+              () -> {
+                SeekBar bar = (SeekBar) read(activity, "seek");
+                View root = activity.getWindow().getDecorView();
+                Rect visible = new Rect();
+                if (!root.hasWindowFocus()
+                    || !bar.hasWindowFocus()
+                    || !bar.isShown()
+                    || !bar.isLaidOut()
+                    || bar.isLayoutRequested()
+                    || root.isLayoutRequested()
+                    || bar.getWidth() <= bar.getPaddingLeft() + bar.getPaddingRight()
+                    || bar.getHeight() <= 0
+                    || !bar.getGlobalVisibleRect(visible)) return null;
+                int[] xy = new int[2], rootXY = new int[2];
+                bar.getLocationOnScreen(xy);
+                root.getLocationOnScreen(rootXY);
+                return new int[] {
+                  xy[0],
+                  xy[1],
+                  bar.getWidth(),
+                  bar.getHeight(),
+                  bar.getPaddingLeft(),
+                  bar.getPaddingRight(),
+                  rootXY[0],
+                  rootXY[1],
+                  root.getWidth(),
+                  root.getHeight(),
+                  visible.left,
+                  visible.top,
+                  visible.right,
+                  visible.bottom
+                };
+              });
+      long at = SystemClock.uptimeMillis();
+      if (now == null || !Arrays.equals(last, now)) {
+        last = now;
+        stableSince = at;
+      } else if (at - stableSince >= 200) return now;
+      SystemClock.sleep(40);
+    }
+    throw new AssertionError("Seek geometry did not settle; " + heldDiagnostic(new int[] {-1, -1}));
+  }
+
+  private String heldDiagnostic(int[] location) throws Exception {
+    return onMain(
+        () -> {
+          SeekBar bar = (SeekBar) read(activity, "seek");
+          int[] xy = new int[2];
+          bar.getLocationOnScreen(xy);
+          return "x="
+              + location[0]
+              + ",y="
+              + location[1]
+              + ",barX="
+              + xy[0]
+              + ",barY="
+              + xy[1]
+              + ",width="
+              + bar.getWidth()
+              + ",height="
+              + bar.getHeight()
+              + ",shown="
+              + bar.isShown()
+              + ",focused="
+              + bar.hasWindowFocus()
+              + ",scrubbing="
+              + flag("scrubbing")
+              + ",count="
+              + (int) read(page, "scrubSubmittedCount")
+              + ",serial="
+              + (long) read(page, "explicitSeekSerial");
+        });
+  }
+
+  private void injectHeld(long down, int action, int[] location) {
+    MotionEvent event =
+        MotionEvent.obtain(down, SystemClock.uptimeMillis(), action, location[0], location[1], 0);
+    event.setSource(InputDevice.SOURCE_TOUCHSCREEN);
+    try {
+      assertTrue(
+          "Physical held input rejected",
+          instrumentation.getUiAutomation().injectInputEvent(event, true));
+    } finally {
+      event.recycle();
+    }
+  }
+
+  private long barcodeFrameMs() throws Exception {
+    View surface = onMain(() -> NativeFrameProbe.findVideoSurface(page.vlcView));
+    if (surface == null) return -1;
+    Bitmap picture = NativeFrameProbe.captureSurface(instrumentation, surface);
+    try {
+      OpticalSeekBenchmark.Code code = OpticalSeekBenchmark.decode(picture);
+      return code == null ? -1 : code.frame * 40L;
+    } finally {
+      picture.recycle();
+    }
   }
 
   @Test
@@ -131,7 +438,7 @@ public final class NativeSeekQueueDeviceTest {
   }
 
   @Test
-  public void cancelDuringSubmittedCoarseSeekKeepsOnlyTheCancelOrigin() throws Exception {
+  public void cancelDuringSubmittedPreviewKeepsOnlyTheCancelOrigin() throws Exception {
     seek(4200);
     awaitPausedPicture(4200);
     awaitQueueDrain();
@@ -340,23 +647,34 @@ public final class NativeSeekQueueDeviceTest {
 
   private VideoItem fixture() {
     String name = "mm_seek_b2_h264_720_gop1.mp4";
+    String explicit = InstrumentationRegistry.getArguments().getString("benchQueueUri", "");
+    Uri query =
+        explicit.isEmpty() ? MediaStore.Video.Media.EXTERNAL_CONTENT_URI : Uri.parse(explicit);
+    assertEquals("Only indexed generated media is supported", "content", query.getScheme());
+    assertEquals("Only MediaStore is supported", "media", query.getAuthority());
     try (Cursor cursor =
         context
             .getContentResolver()
             .query(
-                MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
-                new String[] {"_id", "duration", "_size", "date_modified", "width", "height"},
-                "_display_name=?",
-                new String[] {name},
+                query,
+                new String[] {
+                  "_id", "duration", "_size", "date_modified", "width", "height", "_display_name"
+                },
+                explicit.isEmpty() ? "_display_name=?" : null,
+                explicit.isEmpty() ? new String[] {name} : null,
                 null)) {
       assertNotNull(cursor);
       assertEquals("Exactly one generated B2 H.264720 fixture is required", 1, cursor.getCount());
       assertTrue(cursor.moveToFirst());
+      assertTrue(
+          "Only generated barcode fixtures are accepted",
+          cursor.getString(6).matches("mm_seek_(b2|stress)_[A-Za-z0-9_-]+\\.mp4"));
+      assertTrue("Generated fixture must cover all regression targets", cursor.getLong(1) >= 26000);
       Uri uri =
           Uri.withAppendedPath(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, cursor.getString(0));
       return new VideoItem(
           "native-seek-queue-" + SystemClock.elapsedRealtimeNanos(),
-          name,
+          cursor.getString(6),
           uri.toString(),
           "",
           cursor.getLong(2),
@@ -369,20 +687,19 @@ public final class NativeSeekQueueDeviceTest {
   }
 
   private <T> T onMain(Callable<T> action) throws Exception {
-    AtomicReference<T> value = new AtomicReference<>();
-    AtomicReference<Throwable> error = new AtomicReference<>();
-    instrumentation.runOnMainSync(
-        () -> {
-          try {
-            value.set(action.call());
-          } catch (Throwable failure) {
-            error.set(failure);
-          }
-        });
-    if (error.get() instanceof AssertionError) throw (AssertionError) error.get();
-    if (error.get() instanceof Exception) throw (Exception) error.get();
-    if (error.get() != null) throw new RuntimeException(error.get());
-    return value.get();
+    FutureTask<T> task = new FutureTask<>(action);
+    new android.os.Handler(android.os.Looper.getMainLooper()).post(task);
+    try {
+      return task.get(1500, TimeUnit.MILLISECONDS);
+    } catch (java.util.concurrent.TimeoutException error) {
+      task.cancel(false);
+      throw error;
+    } catch (java.util.concurrent.ExecutionException error) {
+      Throwable cause = error.getCause();
+      if (cause instanceof Exception) throw (Exception) cause;
+      if (cause instanceof Error) throw (Error) cause;
+      throw new RuntimeException(cause);
+    }
   }
 
   private static void await(Callable<Boolean> condition) throws Exception {

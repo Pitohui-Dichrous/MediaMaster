@@ -994,7 +994,7 @@ final class VideoPage extends FrameLayout {
     nativeSeekFrameBaseline = nativeSurfaceFrames == null ? 0 : nativeSurfaceFrames.frameSequence();
     nativeSeekTextureBaseline = textureTimestamp(currentTexture());
     fenceVlcSeek(request.positionMs);
-    // Register before setTime: a fast paused seek may submit its only buffer before setTime
+    // Register before setTime: a paused seek may submit its only buffer before setTime
     // returns. The clock check below still rejects obviously unrelated pre-seek output.
     if (nativeSurfacePlayback && nativeSurfaceFrames != null)
       nativeSurfaceFrames.observeNextFrame();
@@ -1131,7 +1131,9 @@ final class VideoPage extends FrameLayout {
     vlcTextureBaseline = textureTimestamp(findTexture(vlcView));
     // A native input-repeat must return to zero, not reapply a media-level start-time offset.
     fenceVlcSeek(target);
-    source.setTime(target, scrubbing);
+    // Startup/replacement may inherit an active gesture. Use the same precise preroll as the
+    // regular seek queue so a coarse request cannot strand its first-frame preparation.
+    source.setTime(target, false);
   }
 
   private void resetVlcRepeatObservation() {
@@ -1510,7 +1512,10 @@ final class VideoPage extends FrameLayout {
       exo.seekTo(target);
     } else if (vlc != null) {
       applyVlcPlayback(vlc);
-      submitNativeSeek(target, true);
+      // Native fast seek can stop at a distant sync point without producing new output. That
+      // blocks the final exact request behind it. Precise preroll works in both playback states;
+      // the bounded queue still coalesces intermediate targets and deduplicates the final one.
+      submitNativeSeek(target, false);
     }
   }
 
@@ -1683,8 +1688,8 @@ final class VideoPage extends FrameLayout {
           || !matchesSubmittedTarget(pts / 1000)
           || System.nanoTime() < releaseTimeNs) return null;
     } else if (previewVlc != null) {
-      // Native fast seek may stop at a distant keyframe. A fresh rendered texture is still useful;
-      // the VLC clock is only an approximate caption, not proof of an exact decoded frame PTS.
+      // A fresh native texture is useful, but VLC's clock is only an approximate caption,
+      // not proof of an exact decoded frame PTS.
       if (buffering) return null;
     } else return null;
     long previewPositionMs = previewExo != null ? pts / 1000 : Math.max(0, previewVlc.getTime());

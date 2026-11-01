@@ -22,6 +22,7 @@ import java.util.TreeSet;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.function.LongSupplier;
 
 /** Private aggregate play counts. UI queries never open the database or read media files. */
 public final class PlaybackStatsStore {
@@ -38,6 +39,7 @@ public final class PlaybackStatsStore {
   private final ArrayList<String[]> migrations = new ArrayList<>();
   private final Database database;
   private final int maxRecords;
+  private final LongSupplier clock;
   private boolean ready;
   private boolean diskLoaded;
   private long lastRecordedAt;
@@ -60,10 +62,20 @@ public final class PlaybackStatsStore {
   }
 
   PlaybackStatsStore(Context context, String databaseName, int maxRecords, ExecutorService io) {
+    this(context, databaseName, maxRecords, io, System::currentTimeMillis);
+  }
+
+  PlaybackStatsStore(
+      Context context,
+      String databaseName,
+      int maxRecords,
+      ExecutorService io,
+      LongSupplier clock) {
     if (maxRecords < 1) throw new IllegalArgumentException("Positive record limit required");
     this.io = io;
     this.maxRecords = maxRecords;
-    database = new Database(context.getApplicationContext(), databaseName);
+    this.clock = clock;
+    database = new Database(context.getApplicationContext(), databaseName, clock);
     io.execute(this::load);
   }
 
@@ -106,15 +118,59 @@ public final class PlaybackStatsStore {
     return result;
   }
 
+  /**
+   * Ordinary time decay is evaluated lazily without a timer or writes. A clock rollback is repaired
+   * once so a future timestamp cannot pin the score indefinitely.
+   */
+  public double recentScore(VideoItem item) {
+    String key = key(item);
+    long now = now();
+    synchronized (lock) {
+      Entry entry = counts.get(key);
+      Entry corrected = correctFutureAnchor(entry, now);
+      if (entry != corrected) io.execute(this::flushPending);
+      entry = corrected;
+      return entry == null ? 0 : RecentPlaybackPolicy.decay(entry.score, entry.scoreUpdated, now);
+    }
+  }
+
+  /** Every item in a sampling decision uses the same clock instant. */
+  public double[] recentSnapshot(List<VideoItem> videos) {
+    String[] keys = new String[videos.size()];
+    for (int i = 0; i < keys.length; i++) keys[i] = key(videos.get(i));
+    double[] result = new double[keys.length];
+    long now = now();
+    synchronized (lock) {
+      boolean correctedAny = false;
+      for (int i = 0; i < keys.length; i++) {
+        Entry entry = counts.get(keys[i]);
+        Entry corrected = correctFutureAnchor(entry, now);
+        correctedAny |= entry != corrected;
+        entry = corrected;
+        if (entry != null)
+          result[i] = RecentPlaybackPolicy.decay(entry.score, entry.scoreUpdated, now);
+      }
+      if (correctedAny) io.execute(this::flushPending);
+    }
+    return result;
+  }
+
   /** The caller records one actual new playback entry, not a decoder prepare or a resume. */
   public void recordPlay(VideoItem item) {
     String key = key(item);
     synchronized (lock) {
       Entry previous = counts.get(key);
       long count = previous == null ? 1 : add(previous.count, 1);
-      long now = Math.max(System.currentTimeMillis(), add(lastRecordedAt, 1));
-      lastRecordedAt = now;
-      put(new Entry(key, count, now));
+      long now = now();
+      long recordedAt = Math.max(now, add(lastRecordedAt, 1));
+      lastRecordedAt = recordedAt;
+      double score =
+          previous == null
+              ? 1
+              : RecentPlaybackPolicy.addPlay(previous.score, previous.scoreUpdated, now);
+      // The score anchor is the actual wall clock, independent of the monotonic eviction order.
+      // A clock correction must not leave future timestamps pinning the recent-play penalty.
+      put(new Entry(key, count, recordedAt, score, now));
       dirty.add(key);
       // Queue while holding the same lock as updates: concurrent calls preserve publication order.
       io.execute(this::flushPending);
@@ -140,14 +196,22 @@ public final class PlaybackStatsStore {
       try (Cursor cursor =
           db.query(
               "plays",
-              new String[] {"media_key", "play_count", "last_played"},
+              new String[] {
+                "media_key", "play_count", "last_played", "recent_score", "score_updated"
+              },
               null,
               null,
               null,
               null,
               null)) {
         while (cursor.moveToNext()) {
-          Entry entry = new Entry(cursor.getString(0), cursor.getLong(1), cursor.getLong(2));
+          Entry entry =
+              new Entry(
+                  cursor.getString(0),
+                  cursor.getLong(1),
+                  cursor.getLong(2),
+                  cursor.getDouble(3),
+                  cursor.getLong(4));
           loaded.put(entry.key, entry);
         }
       }
@@ -158,9 +222,11 @@ public final class PlaybackStatsStore {
       loaded.clear();
     }
     ArrayList<Runnable> callbacks;
+    boolean repairedFutureAnchor = false;
     synchronized (lock) {
       // Entries already in memory are new plays that arrived during disk loading, not disk totals.
       long mergedClock = lastRecordedAt;
+      long now = now();
       for (Entry saved : loaded.values()) mergedClock = Math.max(mergedClock, saved.lastPlayed);
       for (Entry pending : oldest) {
         // These plays happened after the saved session, including after a wall-clock correction.
@@ -171,11 +237,19 @@ public final class PlaybackStatsStore {
             new Entry(
                 pending.key,
                 saved == null ? pending.count : add(saved.count, pending.count),
-                mergedClock));
+                mergedClock,
+                mergedScore(saved, pending, now),
+                now));
       }
       counts.clear();
       oldest.clear();
-      for (Entry entry : loaded.values()) {
+      for (Entry savedEntry : loaded.values()) {
+        Entry entry = savedEntry;
+        if (entry.scoreUpdated > now) {
+          entry = new Entry(entry.key, entry.count, entry.lastPlayed, entry.score, now);
+          dirty.add(entry.key);
+          repairedFutureAnchor = true;
+        }
         put(entry);
         lastRecordedAt = Math.max(lastRecordedAt, entry.lastPlayed);
       }
@@ -184,6 +258,7 @@ public final class PlaybackStatsStore {
       callbacks = new ArrayList<>(readyCallbacks);
       readyCallbacks.clear();
     }
+    if (succeeded && repairedFutureAnchor) io.execute(this::flushPending);
     for (Runnable callback : callbacks) main.post(callback);
   }
 
@@ -206,6 +281,7 @@ public final class PlaybackStatsStore {
     }
     Map<String, Entry> writes = new HashMap<>();
     synchronized (lock) {
+      long now = now();
       for (String[] migration : migrations) {
         Entry before = counts.remove(migration[0]);
         if (before == null) continue;
@@ -215,7 +291,9 @@ public final class PlaybackStatsStore {
             new Entry(
                 migration[1],
                 after == null ? before.count : add(before.count, after.count),
-                after == null ? before.lastPlayed : Math.max(before.lastPlayed, after.lastPlayed)));
+                after == null ? before.lastPlayed : Math.max(before.lastPlayed, after.lastPlayed),
+                mergedScore(before, after, now),
+                now));
         dirty.add(migration[0]);
         dirty.add(migration[1]);
       }
@@ -234,8 +312,12 @@ public final class PlaybackStatsStore {
           else {
             // Absolute merged totals make queued duplicate writes and retries idempotent.
             db.execSQL(
-                "INSERT OR REPLACE INTO plays(media_key,play_count,last_played) VALUES(?,?,?)",
-                new Object[] {entry.key, entry.count, entry.lastPlayed});
+                "INSERT OR REPLACE INTO"
+                    + " plays(media_key,play_count,last_played,recent_score,score_updated)"
+                    + " VALUES(?,?,?,?,?)",
+                new Object[] {
+                  entry.key, entry.count, entry.lastPlayed, entry.score, entry.scoreUpdated
+                });
           }
         }
         pruneDatabase(db);
@@ -264,6 +346,25 @@ public final class PlaybackStatsStore {
 
   private static long add(long left, long right) {
     return left >= Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right;
+  }
+
+  private long now() {
+    return Math.max(0, clock.getAsLong());
+  }
+
+  /** Only a clock rollback repairs storage. Ordinary passage of time remains read-only. */
+  private Entry correctFutureAnchor(Entry entry, long now) {
+    if (entry == null || entry.scoreUpdated <= now) return entry;
+    Entry repaired = new Entry(entry.key, entry.count, entry.lastPlayed, entry.score, now);
+    put(repaired);
+    dirty.add(entry.key);
+    return repaired;
+  }
+
+  private static double mergedScore(Entry left, Entry right, long now) {
+    double a = left == null ? 0 : RecentPlaybackPolicy.decay(left.score, left.scoreUpdated, now);
+    double b = right == null ? 0 : RecentPlaybackPolicy.decay(right.score, right.scoreUpdated, now);
+    return RecentPlaybackPolicy.sanitizeScore(a + b);
   }
 
   static String key(VideoItem item) {
@@ -298,6 +399,8 @@ public final class PlaybackStatsStore {
 
   void awaitIdle() throws Exception {
     io.submit(() -> {}).get(20, TimeUnit.SECONDS);
+    // Loading can enqueue one repair flush behind the first barrier.
+    io.submit(() -> {}).get(20, TimeUnit.SECONDS);
   }
 
   void close() throws Exception {
@@ -308,11 +411,15 @@ public final class PlaybackStatsStore {
   private static final class Entry implements Comparable<Entry> {
     final String key;
     final long count, lastPlayed;
+    final double score;
+    final long scoreUpdated;
 
-    Entry(String key, long count, long lastPlayed) {
+    Entry(String key, long count, long lastPlayed, double score, long scoreUpdated) {
       this.key = key;
-      this.count = count;
-      this.lastPlayed = lastPlayed;
+      this.count = Math.max(0, count);
+      this.lastPlayed = Math.max(0, lastPlayed);
+      this.score = RecentPlaybackPolicy.sanitizeScore(score);
+      this.scoreUpdated = Math.max(0, scoreUpdated);
     }
 
     @Override
@@ -323,21 +430,47 @@ public final class PlaybackStatsStore {
   }
 
   private static final class Database extends SQLiteOpenHelper {
-    Database(Context context, String name) {
-      super(context, name, null, 1);
+    private final LongSupplier clock;
+
+    Database(Context context, String name, LongSupplier clock) {
+      super(context, name, null, 2);
+      this.clock = clock;
     }
 
     @Override
     public void onCreate(SQLiteDatabase db) {
       db.execSQL(
           "CREATE TABLE plays (media_key TEXT PRIMARY KEY NOT NULL, play_count INTEGER NOT NULL"
-              + " CHECK(play_count>=0), last_played INTEGER NOT NULL) WITHOUT ROWID");
+              + " CHECK(play_count>=0), last_played INTEGER NOT NULL,"
+              + " recent_score REAL NOT NULL DEFAULT 0 CHECK(recent_score>=0 AND recent_score<=63),"
+              + " score_updated INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID");
       db.execSQL("CREATE INDEX plays_recent ON plays(last_played, media_key)");
     }
 
     @Override
     public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
-      throw new IllegalStateException("Unsupported playback statistics schema upgrade");
+      if (oldVersion != 1 || newVersion != 2)
+        throw new IllegalStateException("Unsupported playback statistics schema upgrade");
+      // SQLiteOpenHelper executes this upgrade in a transaction. No history is dropped if it fails.
+      db.execSQL(
+          "ALTER TABLE plays ADD COLUMN recent_score REAL NOT NULL DEFAULT 0"
+              + " CHECK(recent_score>=0 AND recent_score<=63)");
+      db.execSQL("ALTER TABLE plays ADD COLUMN score_updated INTEGER NOT NULL DEFAULT 0");
+      long now = Math.max(0, clock.getAsLong());
+      try (Cursor rows = db.rawQuery("SELECT media_key,play_count,last_played FROM plays", null);
+          android.database.sqlite.SQLiteStatement update =
+              db.compileStatement(
+                  "UPDATE plays SET recent_score=?,score_updated=? WHERE media_key=?")) {
+        while (rows.moveToNext()) {
+          // Version 1 had no event timestamps. This bounded last-play estimate is migrated once;
+          // cumulative counts remain intact, but never permanently determine future weights.
+          update.bindDouble(
+              1, RecentPlaybackPolicy.migrateLegacy(rows.getLong(1), rows.getLong(2), now));
+          update.bindLong(2, now);
+          update.bindString(3, rows.getString(0));
+          update.executeUpdateDelete();
+        }
+      }
     }
   }
 }

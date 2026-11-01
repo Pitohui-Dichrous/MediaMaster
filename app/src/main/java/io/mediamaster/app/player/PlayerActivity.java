@@ -72,7 +72,8 @@ public final class PlayerActivity extends Activity {
   private ArrayList<VideoItem> queue = new ArrayList<>();
   private PlaybackOrder order;
   private PlaybackStatsStore playbackStats;
-  private boolean playEntryRecorded, mutatingPageWindow;
+  private final PlaybackWatchTracker watchTracker = new PlaybackWatchTracker();
+  private boolean mutatingPageWindow, resumed, watchStateSaved;
   private boolean navigationPending;
   private int navigationRequestGeneration;
   private String queueToken;
@@ -227,14 +228,16 @@ public final class PlayerActivity extends Activity {
     if (state != null) mode = state.getInt("mode", mode);
     int index = state != null ? state.getInt(EXTRA_INDEX) : getIntent().getIntExtra(EXTRA_INDEX, 0);
     playbackStats = PlaybackStatsStore.get(this);
-    playEntryRecorded = state != null && state.getBoolean("play_entry_recorded", false);
+    watchTracker.restore(
+        state != null ? state.getLong("play_entry_watched_ms", 0) : 0,
+        state != null && state.getBoolean("play_entry_recorded", false));
     order =
         new PlaybackOrder(
             queue.size(),
             index,
             mode,
             new Random(),
-            i -> WeightedShuffle.weight(playbackStats.playCount(queue.get(i))));
+            i -> WeightedShuffle.weight(playbackStats.recentScore(queue.get(i))));
     playbackStats.whenReady(
         () -> {
           if (!isFinishing() && !isDestroyed()) ensurePortraitWindow();
@@ -763,6 +766,7 @@ public final class PlayerActivity extends Activity {
 
   private void suspendForPageScroll() {
     if (pageSuspended) return;
+    stopWatching();
     shouldPlay = playRequested();
     pageSuspended = true;
     // Close all audio gates before the viewport leaves its anchor. Decoders and surfaces stay.
@@ -787,6 +791,7 @@ public final class PlayerActivity extends Activity {
           // Incoming already owns a prepared decoder and rendered first frame. Never reopen it
           // here.
           if (chosen != 0) {
+            stopWatching();
             if (chosen > 0) order.next(false);
             else order.previous();
             adoptPreparedPage(chosen);
@@ -802,9 +807,10 @@ public final class PlayerActivity extends Activity {
 
   /** Promote by rotating references. All three native video surfaces remain attached. */
   private void adoptPreparedPage(int direction) {
+    stopWatching();
     boolean wasMutating = mutatingPageWindow;
     mutatingPageWindow = true;
-    playEntryRecorded = false;
+    watchTracker.reset();
     try {
       invalidateCompletion();
       currentPage.setPlayback(false, false, false);
@@ -915,6 +921,7 @@ public final class PlayerActivity extends Activity {
   }
 
   private void beginPlayerScrub(long inputDownTimeMs) {
+    stopWatching();
     invalidateCompletion();
     handler.removeCallbacks(preloadWindow);
     if (previewLoader != null) previewLoader.reset();
@@ -1051,11 +1058,22 @@ public final class PlayerActivity extends Activity {
   @Override
   protected void onResume() {
     super.onResume();
+    resumed = true;
+    watchStateSaved = false;
     TaskIdentity.update(this);
+    recordStartedPlayback();
+  }
+
+  @Override
+  protected void onPause() {
+    stopWatching();
+    resumed = false;
+    super.onPause();
   }
 
   @Override
   protected void onStop() {
+    stopWatching();
     navigationRequestGeneration++;
     navigationPending = false;
     invalidateCompletion();
@@ -1084,6 +1102,10 @@ public final class PlayerActivity extends Activity {
 
   @Override
   protected void onSaveInstanceState(Bundle state) {
+    stopWatching();
+    // Freeze this entry at its snapshot. An old instance must not count after saving a Bundle
+    // that would let its replacement count the same viewing interval again.
+    watchStateSaved = true;
     super.onSaveInstanceState(state);
     if (order == null) return;
     state.putString(EXTRA_QUEUE, queueToken);
@@ -1097,7 +1119,8 @@ public final class PlayerActivity extends Activity {
     state.putBoolean("vlc", useVlc);
     state.putFloat("speed", speed);
     state.putBoolean("portrait_mode", portraitMode);
-    state.putBoolean("play_entry_recorded", playEntryRecorded);
+    state.putBoolean("play_entry_recorded", watchTracker.recorded());
+    state.putLong("play_entry_watched_ms", watchTracker.watchedMs());
   }
 
   @Override
@@ -1151,6 +1174,7 @@ public final class PlayerActivity extends Activity {
           @Override
           public void onEnded(VideoPage page) {
             if (page != currentPage || !started || mutatingPageWindow || handlingEnd) return;
+            stopWatching();
             handlingEnd = true;
             final long generation = page.generation;
             final long completion = ++completionGeneration;
@@ -1215,6 +1239,7 @@ public final class PlayerActivity extends Activity {
   }
 
   private void prepareCurrent(long start, boolean forceVlc) {
+    stopWatching();
     abandonVlcFocus();
     currentPage.prepare(
         currentItem(),
@@ -1238,7 +1263,9 @@ public final class PlayerActivity extends Activity {
       shouldPlay = false;
       canPlay = false;
     }
+    if (!canPlay) stopWatching();
     currentPage.setPlayback(true, canPlay, !pageSuspended);
+    recordStartedPlayback();
   }
 
   private void abandonVlcFocus() {
@@ -1264,6 +1291,7 @@ public final class PlayerActivity extends Activity {
   }
 
   private void playbackFailed() {
+    stopWatching();
     resetPageMotion();
     showLoading(false, "");
     shouldPlay = false;
@@ -1302,6 +1330,7 @@ public final class PlayerActivity extends Activity {
                       || !started) return;
                   if (change == AudioManager.AUDIOFOCUS_LOSS
                       || change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
+                    stopWatching();
                     focusPaused = change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT && shouldPlay;
                     if (change == AudioManager.AUDIOFOCUS_LOSS) shouldPlay = false;
                     currentPage.setPlayback(true, false, false);
@@ -1314,6 +1343,7 @@ public final class PlayerActivity extends Activity {
                     currentPage.setNativeDucked(false);
                     currentPage.setPlayback(true, resume && !pageSuspended, !pageSuspended);
                   }
+                  recordStartedPlayback();
                   updatePlayUi();
                 })
             .build();
@@ -1329,6 +1359,10 @@ public final class PlayerActivity extends Activity {
   }
 
   private void navigateRelative(boolean forward) {
+    navigateRelative(forward, false);
+  }
+
+  private void navigateRelative(boolean forward, boolean automatic) {
     if (order.mode() == PlaybackOrder.SHUFFLE && !playbackStats.isReady()) {
       if (navigationPending) return;
       navigationPending = true;
@@ -1339,10 +1373,12 @@ public final class PlayerActivity extends Activity {
             if (request != navigationRequestGeneration) return;
             navigationPending = false;
             if (started && !isFinishing() && !isDestroyed() && order.current() == index)
-              navigateRelative(forward);
+              navigateRelative(forward, automatic);
           });
       return;
     }
+    stopWatching();
+    if (!automatic && queue.size() == 1) watchTracker.reset();
     changeVideo(forward ? order.next(false) : order.previous(), forward ? 1 : -1);
   }
 
@@ -1351,9 +1387,10 @@ public final class PlayerActivity extends Activity {
   }
 
   private void changeVideo(int index, int direction) {
+    stopWatching();
     boolean wasMutating = mutatingPageWindow;
     mutatingPageWindow = true;
-    if (currentPage == null || currentPage.index != index) playEntryRecorded = false;
+    if (currentPage == null || currentPage.index != index) watchTracker.reset();
     try {
       invalidateCompletion();
       cancelInteractions();
@@ -1416,7 +1453,7 @@ public final class PlayerActivity extends Activity {
       applyCurrentPlayback(shouldPlay);
       return;
     }
-    navigateRelative(true);
+    navigateRelative(true, true);
   }
 
   private boolean isPlaying() {
@@ -1447,6 +1484,7 @@ public final class PlayerActivity extends Activity {
   }
 
   private void seekTo(long at) {
+    stopWatching();
     boolean resume = playRequested();
     boolean completing = handlingEnd;
     invalidateCompletion();
@@ -1458,6 +1496,7 @@ public final class PlayerActivity extends Activity {
   }
 
   private void setPlaying(boolean play) {
+    if (!play) stopWatching();
     if (!play) invalidateCompletion();
     shouldPlay = play;
     if (play && exo != null && exo.getPlaybackState() == Player.STATE_ENDED) currentPage.seekTo(0);
@@ -1479,23 +1518,43 @@ public final class PlayerActivity extends Activity {
   }
 
   private void recordStartedPlayback() {
-    if (playEntryRecorded
-        || playbackStats == null
-        || order == null
-        || !started
-        || mutatingPageWindow
-        || pageSuspended
-        || pageTransitioning
-        || currentPage == null
-        || currentPage.index != order.current()
-        || !currentPage.active
-        || !currentPage.playRequested
-        || !currentPage.firstFrameReady
-        || currentPage.failed
-        || currentPage.buffering
-        || !currentPage.isPlaying()) return;
-    playEntryRecorded = true;
-    playbackStats.recordPlay(currentItem());
+    updateWatchTime(
+        playbackStats != null
+            && order != null
+            && started
+            && resumed
+            && !watchStateSaved
+            && !mutatingPageWindow
+            && !pageSuspended
+            && !pageTransitioning
+            && !handlingEnd
+            && !scrubbing
+            && !gestureSeeking
+            && scrubbingPage == null
+            && currentPage != null
+            && currentPage.index == order.current()
+            && currentPage.active
+            && currentPage.playRequested
+            && currentPage.firstFrameReady
+            && !currentPage.failed
+            && !currentPage.buffering
+            && !currentPage.isSeekingForWatchTime()
+            && currentPage.isPlaying());
+  }
+
+  private void stopWatching() {
+    updateWatchTime(false);
+  }
+
+  private void updateWatchTime(boolean eligible) {
+    if (watchTracker.update(eligible, SystemClock.elapsedRealtime())
+        && playbackStats != null
+        && currentPage != null
+        && currentPage.item != null) {
+      // A navigation callback may already have advanced the order. The settling interval still
+      // belongs to the page on screen, never the incoming index or a paused preload neighbor.
+      playbackStats.recordPlay(currentPage.item);
+    }
   }
 
   private void updatePlayUi() {

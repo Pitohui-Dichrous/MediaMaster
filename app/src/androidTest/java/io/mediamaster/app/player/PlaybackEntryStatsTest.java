@@ -11,6 +11,7 @@ import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Bundle;
 import android.os.SystemClock;
 import android.provider.MediaStore;
 import android.view.View;
@@ -139,6 +140,158 @@ public final class PlaybackEntryStatsTest {
   }
 
   @Test
+  public void shortEntriesNeverCountAndReturningStartsASeparateWatchInterval() throws Exception {
+    launch(videos);
+    awaitWatching(1000);
+    pauseAndReadWatched();
+    assertEquals(0, store.playCount(videos.get(0)));
+    click("下一条");
+    await(() -> onMain(() -> current().index == 1));
+    awaitWatching(1000);
+    pauseAndReadWatched();
+    assertEquals(0, store.playCount(videos.get(1)));
+    click("上一条");
+    await(() -> onMain(() -> current().index == 0));
+    awaitWatching(1000);
+    long watched = pauseAndReadWatched();
+    assertTrue("Returning starts a new interval", watched < 2500);
+    assertEquals(
+        "Short visits never increase lifetime or recent counts", 0, store.playCount(videos.get(0)));
+    assertEquals(0, store.playCount(videos.get(1)));
+    resume();
+    awaitCount(0, 1);
+  }
+
+  @Test
+  public void nativePlaybackCountsOnlyQualifiedViewingAcrossPauseAndResume() throws Exception {
+    assertTrue(
+        context.getSharedPreferences("player", 0).edit().putInt("engine_choice", 2).commit());
+    // Keep this check to one native decoder; the separate three-window test covers preloads.
+    launch(new ArrayList<>(videos.subList(0, 1)));
+    await(
+        () ->
+            onMain(
+                () -> current().vlc != null && current().firstFrameReady && current().isPlaying()));
+    awaitWatching(750);
+    long watched = pauseAndReadWatched();
+    assertTrue("Short native viewing has not reached the threshold", watched < 3000);
+    assertEquals(0, store.playCount(videos.get(0)));
+    SystemClock.sleep(3200);
+    assertEquals("Paused native playback is not viewing", watched, updateAndReadWatched());
+    assertEquals(0, store.playCount(videos.get(0)));
+    resume();
+    awaitCount(0, 1);
+    assertTrue(onMain(() -> current().vlc != null));
+    assertEquals("Only the played entry is recorded", 0, store.playCount(videos.get(1)));
+    pauseAndReadWatched();
+    assertEquals(1, store.playCount(videos.get(0)));
+  }
+
+  @Test
+  public void pausedAndScrubbingTimeDoNotCountTowardActualViewing() throws Exception {
+    launch(videos);
+    awaitWatching(750);
+    long watched = pauseAndReadWatched();
+    SystemClock.sleep(3200);
+    assertEquals(watched, updateAndReadWatched());
+    assertEquals(0, store.playCount(videos.get(0)));
+    onMain(
+        () -> {
+          invoke("setPlaying", new Class<?>[] {boolean.class}, true);
+          invoke("beginPlayerScrub", new Class<?>[0]);
+          return null;
+        });
+    long held = updateAndReadWatched();
+    SystemClock.sleep(3200);
+    assertEquals(
+        "Seeking is not watching, even when the decoder renders previews",
+        held,
+        updateAndReadWatched());
+    assertEquals(0, store.playCount(videos.get(0)));
+    onMain(
+        () -> {
+          invoke("endPlayerScrub", new Class<?>[] {long.class, boolean.class}, 1500L, true);
+          return null;
+        });
+    awaitCount(0, 1);
+  }
+
+  @Test
+  public void recreationPreservesPartialViewingButDoesNotCountPausedTime() throws Exception {
+    launch(videos);
+    awaitWatching(1000);
+    long watched = pauseAndReadWatched();
+    recreateActivity();
+    assertEquals(watched, updateAndReadWatched());
+    SystemClock.sleep(3200);
+    assertEquals(watched, updateAndReadWatched());
+    assertEquals(0, store.playCount(videos.get(0)));
+    resume();
+    awaitCount(0, 1);
+    assertEquals(3001, updateAndReadWatched());
+  }
+
+  @Test
+  public void savedStateFreezesTheOldEntryUntilItsNextResume() throws Exception {
+    launch(videos);
+    awaitWatching(1000);
+    Bundle snapshot = new Bundle();
+    onMain(
+        () -> {
+          invoke("onSaveInstanceState", new Class<?>[] {Bundle.class}, snapshot);
+          return null;
+        });
+    long saved = snapshot.getLong("play_entry_watched_ms");
+    assertFalse(snapshot.getBoolean("play_entry_recorded"));
+    SystemClock.sleep(3200);
+    assertEquals(
+        "The still-visible old instance cannot outgrow its saved entry",
+        saved,
+        updateAndReadWatched());
+    assertEquals(0, store.playCount(videos.get(0)));
+    recreateActivity();
+    awaitCount(0, 1);
+    assertEquals(1, store.playCount(videos.get(0)));
+  }
+
+  @Test
+  public void naturalLoopAccumulatesWatchTimeBeforeItsFirstCountAndDoesNotRecount()
+      throws Exception {
+    launch(new ArrayList<>(videos.subList(1, 2)));
+    awaitWatching(500);
+    pauseAndReadWatched();
+    AtomicInteger loops = new AtomicInteger();
+    onMain(
+        () -> {
+          current()
+              .exo
+              .addListener(
+                  new Player.Listener() {
+                    @Override
+                    public void onMediaItemTransition(MediaItem item, int reason) {
+                      if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT)
+                        loops.incrementAndGet();
+                    }
+                  });
+          invoke("seekTo", new Class<?>[] {long.class}, Math.max(0, current().duration() - 250));
+          invoke("setPlaying", new Class<?>[] {boolean.class}, true);
+          return null;
+        });
+    await(() -> loops.get() > 0);
+    assertEquals(
+        "A quick loop is not yet three seconds of viewing", 0, store.playCount(videos.get(1)));
+    awaitCount(1, 1);
+    int firstLoops = loops.get();
+    onMain(
+        () -> {
+          invoke("seekTo", new Class<?>[] {long.class}, Math.max(0, current().duration() - 250));
+          return null;
+        });
+    await(() -> loops.get() > firstLoops);
+    assertEquals(1, store.playCount(videos.get(1)));
+  }
+
+  @Test
   public void onlyActualNewEntriesCountAcrossPreloadResumeLoopAndCatalogReentry() throws Exception {
     launch(videos);
     awaitCount(0, 1);
@@ -211,6 +364,14 @@ public final class PlaybackEntryStatsTest {
   public void recreationPreservesTheAlreadyCountedEntry() throws Exception {
     launch(videos);
     awaitCount(0, 1);
+    recreateActivity();
+    await(() -> onMain(() -> current().firstFrameReady && current().isPlaying()));
+    updateAndReadWatched();
+    assertEquals(
+        "Recreated playback retains its already-counted entry", 1, store.playCount(videos.get(0)));
+  }
+
+  private void recreateActivity() throws Exception {
     PlayerActivity original = activity;
     AtomicReference<PlayerActivity> replacement = new AtomicReference<>();
     ActivityLifecycleCallback callback =
@@ -228,16 +389,6 @@ public final class PlaybackEntryStatsTest {
           });
       await(() -> replacement.get() != null);
       activity = replacement.get();
-      await(() -> onMain(() -> current().firstFrameReady && current().isPlaying()));
-      onMain(
-          () -> {
-            invoke("updateProgress", new Class<?>[0]);
-            return null;
-          });
-      assertEquals(
-          "Recreated playback retains its already-counted entry",
-          1,
-          store.playCount(videos.get(0)));
     } finally {
       ActivityLifecycleMonitorRegistry.getInstance().removeLifecycleCallback(callback);
     }
@@ -335,6 +486,34 @@ public final class PlaybackEntryStatsTest {
 
   private void awaitCount(int index, long count) throws Exception {
     await(() -> store.playCount(videos.get(index)) == count);
+  }
+
+  private void awaitWatching(long minimumMs) throws Exception {
+    await(() -> updateAndReadWatched() >= minimumMs);
+  }
+
+  private long updateAndReadWatched() throws Exception {
+    return onMain(
+        () -> {
+          invoke("updateProgress", new Class<?>[0]);
+          return ((PlaybackWatchTracker) read("watchTracker")).watchedMs();
+        });
+  }
+
+  private long pauseAndReadWatched() throws Exception {
+    return onMain(
+        () -> {
+          invoke("setPlaying", new Class<?>[] {boolean.class}, false);
+          return ((PlaybackWatchTracker) read("watchTracker")).watchedMs();
+        });
+  }
+
+  private void resume() throws Exception {
+    onMain(
+        () -> {
+          invoke("setPlaying", new Class<?>[] {boolean.class}, true);
+          return null;
+        });
   }
 
   private void awaitNeighbors() throws Exception {

@@ -7,13 +7,19 @@ import java.util.function.IntToDoubleFunction;
 
 /** Shared, in-memory sampling policy for the library button and shuffled playback rounds. */
 public final class WeightedShuffle {
-  private static final double MIN_WEIGHT = .01;
+  private static final double MIN_WEIGHT = .125;
 
   private WeightedShuffle() {}
 
-  /** Frequent plays reduce priority gently, with a nonzero floor and no count overflow. */
+  /** Compatibility overload; new callers pass their lazily decayed recent score. */
   public static double weight(long plays) {
-    return Math.max(MIN_WEIGHT, 1 / Math.sqrt(1.0 + Math.max(0, plays)));
+    return weight((double) plays);
+  }
+
+  /** Each eligible item's chance stays at least one eighth of the same pool's uniform chance. */
+  public static double weight(double recentScore) {
+    return Math.max(
+        MIN_WEIGHT, 1 / Math.sqrt(1.0 + RecentPlaybackPolicy.sanitizeScore(recentScore)));
   }
 
   /** Returns -1 for an empty library; otherwise every item retains a positive chance. */

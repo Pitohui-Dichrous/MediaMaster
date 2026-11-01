@@ -1847,6 +1847,16 @@ final class VideoPage extends FrameLayout {
     return scrubbing;
   }
 
+  /** Read-only observation: seek/decode work must not be counted as actual watching. */
+  boolean isSeekingForWatchTime() {
+    return scrubbing
+        || scrubPending
+        || pendingSeekSet
+        || nativeSeekQueue.hasWork()
+        || exoExactHold != null
+        || (exo != null && exo.isScrubbingModeEnabled());
+  }
+
   void release() {
     generation++;
     main.removeCallbacksAndMessages(null);

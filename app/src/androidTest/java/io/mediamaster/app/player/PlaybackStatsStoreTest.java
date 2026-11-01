@@ -21,6 +21,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongSupplier;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -31,6 +33,8 @@ import org.junit.runner.RunWith;
  */
 @RunWith(AndroidJUnit4.class)
 public final class PlaybackStatsStoreTest {
+  private static final long HALF_LIFE = RecentPlaybackPolicy.HALF_LIFE_MS,
+      START = 1_700_000_000_000L;
   private Context context;
   private String databaseName;
   private final ArrayList<PlaybackStatsStore> stores = new ArrayList<>();
@@ -193,7 +197,11 @@ public final class PlaybackStatsStoreTest {
       Set<String> names = new HashSet<>();
       while (columns.moveToNext())
         names.add(columns.getString(columns.getColumnIndexOrThrow("name")));
-      assertEquals(new HashSet<>(Arrays.asList("media_key", "play_count", "last_played")), names);
+      assertEquals(
+          new HashSet<>(
+              Arrays.asList(
+                  "media_key", "play_count", "last_played", "recent_score", "score_updated")),
+          names);
       try (Cursor row = db.rawQuery("SELECT media_key,play_count,last_played FROM plays", null)) {
         assertTrue(row.moveToFirst());
         assertTrue(row.getString(0).matches("[a-f0-9]{64}"));
@@ -234,14 +242,15 @@ public final class PlaybackStatsStoreTest {
     VideoItem library = item("media:external_primary:42");
     VideoItem external = new VideoItem(uri, "generated.mp4", uri, "", 0, 1000, 0, 0, 640, 360);
     String aggregateUri = "content://media/external/video/media/42";
-    VideoItem aggregate = new VideoItem(aggregateUri, "generated.mp4", aggregateUri, "",
-        0, 1000, 0, 0, 640, 360);
-    VideoItem custom = new VideoItem("provider-specific:42", "generated.mp4", uri, "",
-        0, 1000, 0, 0, 640, 360);
+    VideoItem aggregate =
+        new VideoItem(aggregateUri, "generated.mp4", aggregateUri, "", 0, 1000, 0, 0, 640, 360);
+    VideoItem custom =
+        new VideoItem("provider-specific:42", "generated.mp4", uri, "", 0, 1000, 0, 0, 640, 360);
     assertEquals(PlaybackStatsStore.key(library), PlaybackStatsStore.key(external));
     assertNotEquals(PlaybackStatsStore.key(library), PlaybackStatsStore.key(aggregate));
     assertNotEquals(PlaybackStatsStore.key(library), PlaybackStatsStore.key(custom));
-    assertNotEquals(PlaybackStatsStore.key(library), PlaybackStatsStore.key(item("media:other-volume:42")));
+    assertNotEquals(
+        PlaybackStatsStore.key(library), PlaybackStatsStore.key(item("media:other-volume:42")));
     PlaybackStatsStore store = open(50);
     store.awaitIdle();
     store.recordPlay(external);
@@ -300,6 +309,199 @@ public final class PlaybackStatsStoreTest {
     assertEquals(1, restarted.playCount(video));
   }
 
+  @Test
+  public void recentFrequencyDecaysAcrossRestartWhileReadsLeaveStoredHistoryUntouched()
+      throws Exception {
+    AtomicLong clock = new AtomicLong(START);
+    VideoItem video = item("recent");
+    PlaybackStatsStore store = open(50, executor(), clock::get);
+    store.awaitIdle();
+    for (int i = 0; i < 4; i++) store.recordPlay(video);
+    store.awaitIdle();
+    assertEquals(4, store.recentScore(video), 0);
+    clock.addAndGet(HALF_LIFE);
+    for (int i = 0; i < 10; i++) assertEquals(2, store.recentScore(video), 1e-9);
+    store.awaitIdle();
+    assertEquals("Reading decay never rewrites its persisted anchor", START, scoreAnchor(video));
+    assertEquals(4, storedScore(video), 0);
+    assertEquals(4, store.playCount(video));
+    close(store);
+    PlaybackStatsStore restarted = open(50, executor(), clock::get);
+    restarted.awaitIdle();
+    assertEquals(2, restarted.recentScore(video), 1e-9);
+    clock.addAndGet(HALF_LIFE);
+    assertEquals(1, restarted.recentScore(video), 1e-9);
+    assertEquals(4, restarted.playCount(video));
+  }
+
+  @Test
+  public void pendingPlaysMergeRecentScoresAtOneReferenceTimeAfterLateLoad() throws Exception {
+    VideoItem video = item("late-recent");
+    seedRecent(video, 7, 8, START);
+    AtomicLong clock = new AtomicLong(START + HALF_LIFE);
+    ExecutorService executor = executor();
+    CountDownLatch gate = block(executor);
+    PlaybackStatsStore store = open(50, executor, clock::get);
+    store.recordPlay(video);
+    clock.addAndGet(HALF_LIFE);
+    store.recordPlay(video);
+    gate.countDown();
+    store.awaitIdle();
+    // Eight old plays become two; the pending plays contribute .5 + 1.
+    assertEquals(3.5, store.recentScore(video), 1e-9);
+    assertEquals(9, store.playCount(video));
+    close(store);
+    PlaybackStatsStore restarted = open(50, executor(), clock::get);
+    restarted.awaitIdle();
+    assertEquals(3.5, restarted.recentScore(video), 1e-9);
+    assertEquals(9, restarted.playCount(video));
+  }
+
+  @Test
+  public void renameCombinesDecayedScoresWithoutRefreshingOldViewingHistory() throws Exception {
+    VideoItem before = item("recent-before"), after = item("recent-after");
+    seedRecent(before, 4, 4, START);
+    seedRecent(after, 8, 8, START + HALF_LIFE);
+    AtomicLong clock = new AtomicLong(START + 2 * HALF_LIFE);
+    PlaybackStatsStore store = open(50, executor(), clock::get);
+    store.awaitIdle();
+    store.migrate(before, after);
+    store.awaitIdle();
+    assertEquals(0, store.recentScore(before), 0);
+    assertEquals(5, store.recentScore(after), 1e-9);
+    assertEquals(12, store.playCount(after));
+    close(store);
+    clock.addAndGet(HALF_LIFE);
+    PlaybackStatsStore restarted = open(50, executor(), clock::get);
+    restarted.awaitIdle();
+    assertEquals(2.5, restarted.recentScore(after), 1e-9);
+    assertEquals(12, restarted.playCount(after));
+  }
+
+  @Test
+  public void versionOneUpgradePreservesTotalsAndMigratesOnlyOneBoundedAgeEstimate()
+      throws Exception {
+    VideoItem video = item("legacy-large"), other = item("legacy-small");
+    createLegacyDatabase(false);
+    seedLegacy(video, Long.MAX_VALUE, START);
+    seedLegacy(other, 3, START - HALF_LIFE);
+    AtomicLong clock = new AtomicLong(START + HALF_LIFE);
+    PlaybackStatsStore store = open(50, executor(), clock::get);
+    store.awaitIdle();
+    assertEquals(Long.MAX_VALUE, store.playCount(video));
+    assertEquals(31.5, store.recentScore(video), 1e-9);
+    assertEquals(.75, store.recentScore(other), 1e-9);
+    try (SQLiteDatabase db = database()) {
+      assertEquals(2, db.getVersion());
+    }
+    close(store);
+    clock.addAndGet(HALF_LIFE);
+    PlaybackStatsStore restarted = open(50, executor(), clock::get);
+    restarted.awaitIdle();
+    assertEquals(15.75, restarted.recentScore(video), 1e-9);
+    assertEquals(Long.MAX_VALUE, restarted.playCount(video));
+  }
+
+  @Test
+  public void runtimeClockRollbackRepairsAnchorOnceThenResumesDecay() throws Exception {
+    AtomicLong clock = new AtomicLong(START + HALF_LIFE);
+    VideoItem video = item("rollback");
+    PlaybackStatsStore store = open(50, executor(), clock::get);
+    store.awaitIdle();
+    for (int i = 0; i < 4; i++) store.recordPlay(video);
+    store.awaitIdle();
+    clock.set(START);
+    assertEquals(4, store.recentScore(video), 0);
+    store.awaitIdle();
+    assertEquals(START, scoreAnchor(video));
+    clock.addAndGet(HALF_LIFE);
+    assertEquals(2, store.recentScore(video), 1e-9);
+    store.recordPlay(video);
+    store.awaitIdle();
+    assertEquals(3, store.recentScore(video), 1e-9);
+    assertEquals(5, store.playCount(video));
+  }
+
+  @Test
+  public void futurePersistedTimestampIsRepairedWithoutWaitingForAnotherPlay() throws Exception {
+    VideoItem video = item("far-future");
+    seedRecent(video, Long.MAX_VALUE, 63, Long.MAX_VALUE);
+    AtomicLong clock = new AtomicLong(START);
+    PlaybackStatsStore store = open(50, executor(), clock::get);
+    store.awaitIdle();
+    assertEquals(63, store.recentScore(video), 0);
+    assertEquals(START, scoreAnchor(video));
+    clock.addAndGet(HALF_LIFE);
+    assertEquals(31.5, store.recentScore(video), 1e-9);
+    close(store);
+    PlaybackStatsStore restarted = open(50, executor(), clock::get);
+    restarted.awaitIdle();
+    assertEquals(31.5, restarted.recentScore(video), 1e-9);
+    assertEquals(Long.MAX_VALUE, restarted.playCount(video));
+  }
+
+  @Test
+  public void saturatedRecentScoreRecoversAndExtremeElapsedTimeCannotOverflow() throws Exception {
+    VideoItem video = item("bounded-recent");
+    AtomicLong clock = new AtomicLong(START);
+    seedRecent(video, Long.MAX_VALUE, 63, START);
+    PlaybackStatsStore store = open(50, executor(), clock::get);
+    store.awaitIdle();
+    for (int i = 0; i < 80; i++) store.recordPlay(video);
+    store.awaitIdle();
+    assertEquals(63, storedScore(video), 0);
+    assertEquals(Long.MAX_VALUE, store.playCount(video));
+    clock.addAndGet(HALF_LIFE);
+    assertEquals(31.5, store.recentScore(video), 1e-9);
+    clock.set(Long.MAX_VALUE);
+    assertEquals(0, store.recentScore(video), 0);
+    store.recordPlay(video);
+    store.awaitIdle();
+    assertEquals(1, store.recentScore(video), 0);
+    assertEquals(Long.MAX_VALUE, store.playCount(video));
+  }
+
+  @Test
+  public void recentSnapshotUsesOneInstantForEveryCandidate() throws Exception {
+    VideoItem a = item("same-age-a"), b = item("same-age-b");
+    seedRecent(a, 8, 8, START);
+    seedRecent(b, 8, 8, START);
+    AtomicLong clock = new AtomicLong(START);
+    PlaybackStatsStore store = open(50, executor(), () -> clock.getAndAdd(HALF_LIFE));
+    store.awaitIdle();
+    clock.set(START + 4 * HALF_LIFE);
+    double[] scores = store.recentSnapshot(Arrays.asList(a, b));
+    assertArrayEquals(new double[] {.5, .5}, scores, 1e-9);
+    assertEquals(START + 5 * HALF_LIFE, clock.get());
+  }
+
+  @Test
+  public void failedSchemaUpgradeRollsBackWithoutClearingLegacyRecords() throws Exception {
+    VideoItem video = item("upgrade-protected");
+    // A conflicting second column makes the upgrade fail after its first ALTER statement.
+    createLegacyDatabase(true);
+    seedLegacy(video, 9, START);
+    PlaybackStatsStore store = open(50, executor(), () -> START + HALF_LIFE);
+    store.awaitIdle();
+    store.recordPlay(video);
+    store.awaitIdle();
+    try (SQLiteDatabase db = database();
+        Cursor row =
+            db.rawQuery(
+                "SELECT play_count FROM plays WHERE media_key=?",
+                new String[] {PlaybackStatsStore.key(video)});
+        Cursor columns = db.rawQuery("PRAGMA table_info(plays)", null)) {
+      assertEquals(1, db.getVersion());
+      assertTrue(row.moveToFirst());
+      assertEquals(9, row.getLong(0));
+      Set<String> names = new HashSet<>();
+      while (columns.moveToNext())
+        names.add(columns.getString(columns.getColumnIndexOrThrow("name")));
+      assertFalse("The first ALTER must be rolled back too", names.contains("recent_score"));
+      assertTrue(names.contains("score_updated"));
+    }
+  }
+
   private VideoItem item(String id) {
     return new VideoItem(id, "generated.mp4", "", "", 0, 1000, 0, 0, 640, 360);
   }
@@ -337,6 +539,12 @@ public final class PlaybackStatsStoreTest {
     return store;
   }
 
+  private PlaybackStatsStore open(int cap, ExecutorService executor, LongSupplier clock) {
+    PlaybackStatsStore store = new PlaybackStatsStore(context, databaseName, cap, executor, clock);
+    stores.add(store);
+    return store;
+  }
+
   private void close(PlaybackStatsStore store) throws Exception {
     store.close();
     stores.remove(store);
@@ -357,6 +565,57 @@ public final class PlaybackStatsStoreTest {
       db.execSQL(
           "INSERT OR REPLACE INTO plays(media_key,play_count,last_played) VALUES(?,?,?)",
           new Object[] {PlaybackStatsStore.key(item), count, lastPlayed});
+    }
+  }
+
+  private void seedRecent(VideoItem item, long count, double score, long updated) throws Exception {
+    seed(item, count, updated);
+    try (SQLiteDatabase db = database()) {
+      db.execSQL(
+          "UPDATE plays SET recent_score=?,score_updated=? WHERE media_key=?",
+          new Object[] {score, updated, PlaybackStatsStore.key(item)});
+    }
+  }
+
+  private void createLegacyDatabase(boolean conflict) {
+    try (SQLiteDatabase db = database()) {
+      db.execSQL(
+          "CREATE TABLE plays(media_key TEXT PRIMARY KEY NOT NULL,play_count INTEGER NOT NULL,"
+              + "last_played INTEGER NOT NULL"
+              + (conflict ? ",score_updated INTEGER NOT NULL DEFAULT 0" : "")
+              + ") WITHOUT ROWID");
+      db.execSQL("CREATE INDEX plays_recent ON plays(last_played,media_key)");
+      db.setVersion(1);
+    }
+  }
+
+  private void seedLegacy(VideoItem item, long count, long lastPlayed) {
+    try (SQLiteDatabase db = database()) {
+      db.execSQL(
+          "INSERT INTO plays(media_key,play_count,last_played) VALUES(?,?,?)",
+          new Object[] {PlaybackStatsStore.key(item), count, lastPlayed});
+    }
+  }
+
+  private long scoreAnchor(VideoItem item) {
+    try (SQLiteDatabase db = database();
+        Cursor row =
+            db.rawQuery(
+                "SELECT score_updated FROM plays WHERE media_key=?",
+                new String[] {PlaybackStatsStore.key(item)})) {
+      assertTrue(row.moveToFirst());
+      return row.getLong(0);
+    }
+  }
+
+  private double storedScore(VideoItem item) {
+    try (SQLiteDatabase db = database();
+        Cursor row =
+            db.rawQuery(
+                "SELECT recent_score FROM plays WHERE media_key=?",
+                new String[] {PlaybackStatsStore.key(item)})) {
+      assertTrue(row.moveToFirst());
+      return row.getDouble(0);
     }
   }
 

@@ -819,10 +819,10 @@ public class MainActivity extends Activity {
             toast("暂无视频");
             return;
           }
-          long[] counts = playbackStats.snapshot(visible);
+          double[] scores = playbackStats.recentSnapshot(visible);
           int index =
               WeightedShuffle.choose(
-                  counts.length, i -> WeightedShuffle.weight(counts[i]), new Random());
+                  scores.length, i -> WeightedShuffle.weight(scores[i]), new Random());
           open(index, true);
         });
   }

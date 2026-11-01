@@ -12,6 +12,8 @@ import android.content.SharedPreferences;
 import android.content.res.Configuration;
 import android.database.Cursor;
 import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.Color;
 import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.drawable.BitmapDrawable;
@@ -31,6 +33,7 @@ import android.view.ViewGroup;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.widget.FrameLayout;
 import android.widget.ImageButton;
+import android.widget.ImageView;
 import android.widget.TextView;
 import androidx.media3.common.util.UnstableApi;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
@@ -715,8 +718,9 @@ public final class FeedbackInteractionTest {
       effect =
           onMain(
               () -> {
-                ViewGroup overlay = (ViewGroup) read(player, "likeEffect");
-                android.widget.ImageView sticker = (android.widget.ImageView) overlay.getChildAt(0);
+                LikeEffectView overlay = (LikeEffectView) read(player, "likeEffect");
+                android.widget.ImageView sticker = overlay.latestSticker();
+                assertNotNull(sticker);
                 assertEquals(View.VISIBLE, sticker.getVisibility());
                 // Request the actual Window pixels before screenshot-idle waits, compression or
                 // image inspection can outlast this intentionally short animation.
@@ -826,11 +830,7 @@ public final class FeedbackInteractionTest {
     captureFixtureOnly("portrait-like-effect.png");
     assertVote(1);
     await(
-        () ->
-            onMain(
-                () ->
-                    ((ViewGroup) read(player, "likeEffect")).getChildAt(0).getVisibility()
-                        != View.VISIBLE));
+        () -> onMain(() -> ((LikeEffectView) read(player, "likeEffect")).activeEffectCount() == 0));
   }
 
   private void assertTopBarLayout(boolean rotationVisible) throws Exception {
@@ -918,6 +918,137 @@ public final class FeedbackInteractionTest {
     }
   }
 
+  private void saveFixtureWindowEvidence(Bitmap bitmap, String name) throws Exception {
+    if (!"true".equals(InstrumentationRegistry.getArguments().getString("captureFeedbackUi")))
+      return;
+    onMain(
+        () -> {
+          assertFixtureWindow();
+          return null;
+        });
+    File directory = new File(context.getExternalFilesDir(null), "feedback-ui");
+    assertTrue(directory.isDirectory() || directory.mkdirs());
+    try (FileOutputStream output = new FileOutputStream(new File(directory, name))) {
+      assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output));
+    }
+  }
+
+  private void saveFixtureTextEvidence(String text, String name) throws Exception {
+    if (!"true".equals(InstrumentationRegistry.getArguments().getString("captureFeedbackUi")))
+      return;
+    onMain(
+        () -> {
+          assertFixtureWindow();
+          return null;
+        });
+    File directory = new File(context.getExternalFilesDir(null), "feedback-ui");
+    assertTrue(directory.isDirectory() || directory.mkdirs());
+    try (FileOutputStream output = new FileOutputStream(new File(directory, name))) {
+      output.write(text.getBytes(StandardCharsets.UTF_8));
+    }
+  }
+
+  private String stickerGeometryDiagnostics(
+      LikeEffectView overlay, ImageView[] stickers, float[][] centers) throws Exception {
+    assertEquals(Looper.getMainLooper(), Looper.myLooper());
+    assertFixtureWindow();
+    List<?> slots = (List<?>) read(overlay, "slots");
+    StringBuilder diagnostics =
+        new StringBuilder()
+            .append("outerWidth=")
+            .append(overlay.getWidth())
+            .append("\nouterHeight=")
+            .append(overlay.getHeight())
+            .append("\nouterStickerWidth=")
+            .append(read(overlay, "stickerWidth"))
+            .append("\nouterStickerHeight=")
+            .append(read(overlay, "stickerHeight"))
+            .append("\n\n");
+    for (int i = 0; i < stickers.length; i++) {
+      ImageView sticker = stickers[i];
+      Object owner = null;
+      for (Object slot : slots) {
+        if (read(slot, "sticker") == sticker) {
+          owner = slot;
+          break;
+        }
+      }
+      assertNotNull("Each sticker belongs to a live slot", owner);
+      float centerX = (float) read(owner, "centerX");
+      float centerY = (float) read(owner, "centerY");
+      float[] transformed = {sticker.getWidth() / 2f, sticker.getHeight() / 2f};
+      sticker.getMatrix().mapPoints(transformed);
+      transformed[0] += sticker.getLeft();
+      transformed[1] += sticker.getTop();
+      centers[i] = new float[] {centerX, centerY, transformed[0], transformed[1]};
+      diagnostics
+          .append("sticker=")
+          .append(i)
+          .append("\nslotIndex=")
+          .append(slots.indexOf(owner))
+          .append("\ncenterX=")
+          .append(centerX)
+          .append("\ncenterY=")
+          .append(centerY)
+          .append("\nrestingX=")
+          .append(read(owner, "restingX"))
+          .append("\nrestingY=")
+          .append(read(owner, "restingY"))
+          .append("\nleft=")
+          .append(sticker.getLeft())
+          .append("\ntop=")
+          .append(sticker.getTop())
+          .append("\nx=")
+          .append(sticker.getX())
+          .append("\ny=")
+          .append(sticker.getY())
+          .append("\ntranslationX=")
+          .append(sticker.getTranslationX())
+          .append("\ntranslationY=")
+          .append(sticker.getTranslationY())
+          .append("\npivotX=")
+          .append(sticker.getPivotX())
+          .append("\npivotY=")
+          .append(sticker.getPivotY())
+          .append("\nscaleX=")
+          .append(sticker.getScaleX())
+          .append("\nscaleY=")
+          .append(sticker.getScaleY())
+          .append("\nrotation=")
+          .append(sticker.getRotation())
+          .append("\nwidth=")
+          .append(sticker.getWidth())
+          .append("\nheight=")
+          .append(sticker.getHeight())
+          .append("\nmeasuredWidth=")
+          .append(sticker.getMeasuredWidth())
+          .append("\nmeasuredHeight=")
+          .append(sticker.getMeasuredHeight())
+          .append("\nlayoutParamsWidth=")
+          .append(sticker.getLayoutParams().width)
+          .append("\nlayoutParamsHeight=")
+          .append(sticker.getLayoutParams().height)
+          .append("\npaddingLeft=")
+          .append(sticker.getPaddingLeft())
+          .append("\npaddingTop=")
+          .append(sticker.getPaddingTop())
+          .append("\npaddingRight=")
+          .append(sticker.getPaddingRight())
+          .append("\npaddingBottom=")
+          .append(sticker.getPaddingBottom())
+          .append("\nimageMatrix=")
+          .append(sticker.getImageMatrix().toShortString())
+          .append("\nviewMatrix=")
+          .append(sticker.getMatrix().toShortString())
+          .append("\ntransformedCenterX=")
+          .append(transformed[0])
+          .append("\ntransformedCenterY=")
+          .append(transformed[1])
+          .append("\n\n");
+    }
+    return diagnostics.toString();
+  }
+
   private static int nonTransparentPixels(Bitmap bitmap) {
     if (bitmap == null) return 0;
     int count = 0;
@@ -981,7 +1112,7 @@ public final class FeedbackInteractionTest {
   }
 
   @Test
-  public void stampFeedbackDeformsAndRotatesWithoutClippingAtAnyCorner() throws Exception {
+  public void burstFeedbackPopsUniformlyAndRotatesWithoutClippingAtAnyCorner() throws Exception {
     org.junit.Assume.assumeTrue(ValueAnimator.areAnimatorsEnabled());
     launch(true);
     setPlaying(false);
@@ -1000,9 +1131,15 @@ public final class FeedbackInteractionTest {
           () ->
               onMain(
                   () -> {
-                    View sticker = overlay.getChildAt(0);
-                    if (sticker.getVisibility() != View.VISIBLE) return true;
+                    if (overlay.activeEffectCount() == 0) return true;
+                    View sticker = overlay.latestSticker();
+                    assertNotNull(sticker);
                     assertTrue(sticker.getWidth() > 0 && sticker.getHeight() > 0);
+                    assertEquals(
+                        "The reference pop preserves the supplied artwork's proportions",
+                        sticker.getScaleX(),
+                        sticker.getScaleY(),
+                        .0001f);
                     RectF bounds = new RectF(0, 0, sticker.getWidth(), sticker.getHeight());
                     sticker.getMatrix().mapRect(bounds);
                     bounds.offset(sticker.getLeft(), sticker.getTop());
@@ -1013,89 +1150,241 @@ public final class FeedbackInteractionTest {
                             && bounds.right <= overlay.getWidth() + .5f
                             && bounds.bottom <= overlay.getHeight() + .5f);
                     if (sticker.getAlpha() > .5f) {
-                      observed[0] |= Math.abs(sticker.getScaleX() - sticker.getScaleY()) > .02f;
+                      observed[0] |= sticker.getScaleX() > 1.05f;
                       observed[1] |= Math.abs(sticker.getRotation()) > .5f;
                     }
                     return false;
                   }));
     }
-    assertTrue("Visible feedback includes squash and rebound", observed[0]);
+    assertTrue("Visible feedback overshoots before settling", observed[0]);
     assertTrue("Visible feedback includes a light rotation", observed[1]);
   }
 
   @Test
-  public void stampRetapContinuesCurrentPoseAndClearCancelsEveryPendingPhase() throws Exception {
+  public void independentBurstsOverlapAndBoundedReuseCannotClearNewerFeedback() throws Exception {
     org.junit.Assume.assumeTrue(ValueAnimator.areAnimatorsEnabled());
     launch(true);
     setPlaying(false);
     LikeEffectView overlay = onMain(() -> (LikeEffectView) read(player, "likeEffect"));
-    onMain(
-        () -> {
-          overlay.showAt(overlay.getWidth() * .3f, overlay.getHeight() * .3f);
-          return null;
-        });
-    await(() -> onMain(() -> overlay.getChildAt(0).getAlpha() >= .98f));
-    // Retarget during the exit: its old completion must not hide the new feedback.
-    await(
-        () ->
-            onMain(
-                () -> {
-                  View sticker = overlay.getChildAt(0);
-                  return sticker.getVisibility() == View.VISIBLE
-                      && sticker.getAlpha() > .2f
-                      && sticker.getAlpha() < .8f;
-                }));
-    onMain(
-        () -> {
-          View sticker = overlay.getChildAt(0);
-          float[] before = {
-            sticker.getScaleX(),
-            sticker.getScaleY(),
-            sticker.getRotation(),
-            sticker.getTranslationX(),
-            sticker.getTranslationY(),
-            sticker.getAlpha()
-          };
-          overlay.showAt(overlay.getWidth() * .7f, overlay.getHeight() * .6f);
-          assertArrayEquals(
-              "Retapping preserves the current pose until the next frame",
-              before,
-              new float[] {
-                sticker.getScaleX(),
-                sticker.getScaleY(),
-                sticker.getRotation(),
-                sticker.getTranslationX(),
-                sticker.getTranslationY(),
-                sticker.getAlpha()
-              },
-              .0001f);
-          return null;
-        });
-    SystemClock.sleep(250);
-    onMain(
-        () -> {
-          View sticker = overlay.getChildAt(0);
-          assertEquals(View.VISIBLE, sticker.getVisibility());
-          assertTrue(sticker.getAlpha() > .5f);
-          overlay.clear();
-          assertEquals(View.INVISIBLE, sticker.getVisibility());
-          assertEquals(0, sticker.getRotation(), 0);
-          assertEquals(1, sticker.getScaleX(), 0);
-          assertEquals(1, sticker.getScaleY(), 0);
-          return null;
-        });
-    SystemClock.sleep(1100);
-    onMain(
-        () -> {
-          View sticker = overlay.getChildAt(0);
-          assertEquals(
-              "Cancelled phases cannot resurrect feedback",
-              View.INVISIBLE,
-              sticker.getVisibility());
-          assertEquals(0, sticker.getAlpha(), 0);
-          assertEquals(0, sticker.getRotation(), 0);
-          return null;
-        });
+    WindowCapture baseline = onMain(this::requestFixtureWindowCopy);
+    WindowCapture overlapping = null;
+    Rect[] stickerAreas = new Rect[2];
+    float[][] centers = new float[2][];
+    long[] firstStarted = new long[1];
+    try {
+      awaitWindowCopy(baseline);
+      ImageView first =
+          onMain(
+              () -> {
+                firstStarted[0] = SystemClock.uptimeMillis();
+                overlay.showAt(overlay.getWidth() * .3f, overlay.getHeight() * .3f);
+                assertEquals(1, overlay.activeEffectCount());
+                return overlay.latestSticker();
+              });
+      assertNotNull(first);
+      await(() -> onMain(() -> first.getAlpha() >= .98f));
+      // Separate lifetimes even when the device uses a very short animator duration scale.
+      SystemClock.sleep(140);
+      ImageView second =
+          onMain(
+              () -> {
+                float[] before = {
+                  first.getScaleX(),
+                  first.getScaleY(),
+                  first.getRotation(),
+                  first.getTranslationX(),
+                  first.getTranslationY(),
+                  first.getAlpha()
+                };
+                overlay.showAt(overlay.getWidth() * .7f, overlay.getHeight() * .65f);
+                assertArrayEquals(
+                    "A new burst leaves the older sticker's pose and position alone",
+                    before,
+                    new float[] {
+                      first.getScaleX(),
+                      first.getScaleY(),
+                      first.getRotation(),
+                      first.getTranslationX(),
+                      first.getTranslationY(),
+                      first.getAlpha()
+                    },
+                    .0001f);
+                ImageView newest = overlay.latestSticker();
+                assertNotSame(first, newest);
+                assertSame(
+                    "Concurrent stickers share the decoded artwork",
+                    ((BitmapDrawable) first.getDrawable()).getBitmap(),
+                    ((BitmapDrawable) newest.getDrawable()).getBitmap());
+                assertEquals(
+                    "The newest sticker is drawn above existing stickers",
+                    overlay.indexOfChild(newest),
+                    overlay.getChildDrawingOrder(
+                        overlay.getChildCount(), overlay.getChildCount() - 1));
+                assertEquals(2, overlay.activeEffectCount());
+                assertEquals(View.VISIBLE, first.getVisibility());
+                assertEquals(View.VISIBLE, newest.getVisibility());
+                return newest;
+              });
+      await(() -> onMain(() -> second.getAlpha() >= .98f));
+      overlapping =
+          onMain(
+              () -> {
+                assertEquals(2, overlay.activeEffectCount());
+                assertTrue(first.getAlpha() > .5f && second.getAlpha() > .5f);
+                int[] location = new int[2];
+                overlay.getLocationInWindow(location);
+                ImageView[] stickers = {first, second};
+                for (int i = 0; i < stickers.length; i++) {
+                  View sticker = stickers[i];
+                  RectF bounds = new RectF(0, 0, sticker.getWidth(), sticker.getHeight());
+                  sticker.getMatrix().mapRect(bounds);
+                  bounds.offset(location[0] + sticker.getLeft(), location[1] + sticker.getTop());
+                  stickerAreas[i] = new Rect();
+                  bounds.roundOut(stickerAreas[i]);
+                }
+                String diagnostics = stickerGeometryDiagnostics(overlay, stickers, centers);
+                WindowCapture copy = requestFixtureWindowCopy();
+                copy.properties = diagnostics;
+                return copy;
+              });
+      awaitWindowCopy(overlapping);
+      await(() -> onMain(() -> first.getVisibility() != View.VISIBLE));
+      long observedLifetime = SystemClock.uptimeMillis() - firstStarted[0];
+      onMain(
+          () -> {
+            assertEquals(
+                "Finishing an older burst cannot clear a newer one",
+                View.VISIBLE,
+                second.getVisibility());
+            assertEquals(1, overlay.activeEffectCount());
+            overlay.clear();
+            assertEquals(0, overlay.activeEffectCount());
+            for (int i = 0; i < 8; i++) {
+              overlay.showAt(overlay.getWidth() * (.25f + i * .05f), overlay.getHeight() * .5f);
+            }
+            assertEquals(8, overlay.activeEffectCount());
+            assertTrue(overlay.getChildCount() <= 8);
+            return null;
+          });
+      // Recycle a full pool while its old delayed exits are pending.
+      SystemClock.sleep(Math.round(observedLifetime * .65));
+      View latest =
+          onMain(
+              () -> {
+                for (int i = 0; i < 20; i++) {
+                  overlay.showAt(
+                      overlay.getWidth() * (.25f + (i % 8) * .05f), overlay.getHeight() * .6f);
+                  assertTrue(overlay.activeEffectCount() <= 8);
+                  assertTrue(overlay.getChildCount() <= 8);
+                }
+                assertEquals(8, overlay.activeEffectCount());
+                boolean[] drawn = new boolean[overlay.getChildCount()];
+                for (int i = 0; i < drawn.length; i++) {
+                  int child = overlay.getChildDrawingOrder(drawn.length, i);
+                  assertTrue(child >= 0 && child < drawn.length);
+                  assertFalse("Each pooled sticker is drawn exactly once", drawn[child]);
+                  drawn[child] = true;
+                }
+                assertEquals(
+                    overlay.indexOfChild(overlay.latestSticker()),
+                    overlay.getChildDrawingOrder(drawn.length, drawn.length - 1));
+                return overlay.latestSticker();
+              });
+      SystemClock.sleep(Math.round(observedLifetime * .5));
+      onMain(
+          () -> {
+            assertEquals(
+                "Recycled slots ignore their old completion callbacks",
+                View.VISIBLE,
+                latest.getVisibility());
+            assertTrue(latest.getAlpha() > .5f);
+            assertEquals(8, overlay.activeEffectCount());
+            overlay.clear();
+            assertEquals(0, overlay.activeEffectCount());
+            return null;
+          });
+      SystemClock.sleep(Math.max(1400, observedLifetime + 300));
+      onMain(
+          () -> {
+            assertEquals(
+                "Cancelled phases cannot resurrect any feedback", 0, overlay.activeEffectCount());
+            for (int i = 0; i < overlay.getChildCount(); i++) {
+              View sticker = overlay.getChildAt(i);
+              assertEquals(View.INVISIBLE, sticker.getVisibility());
+              assertEquals(0, sticker.getAlpha(), 0);
+              assertEquals(0, sticker.getRotation(), 0);
+            }
+            return null;
+          });
+      for (Rect area : stickerAreas) {
+        assertTrue(
+            "Each independently positioned sticker changes pixels in the paused Window",
+            changedPixels(baseline.bitmap, overlapping.bitmap, area)
+                > Math.max(64, area.width() * area.height() / 2000));
+      }
+      saveFixtureWindowEvidence(overlapping.bitmap, "multi-sticker-window.png");
+      saveFixtureTextEvidence(overlapping.properties, "multi-sticker-properties.txt");
+      for (int i = 0; i < centers.length; i++) {
+        assertEquals(
+            "Sticker "
+                + i
+                + " keeps its transformed center on the particle center X\n"
+                + overlapping.properties,
+            centers[i][0],
+            centers[i][2],
+            .5f);
+        assertEquals(
+            "Sticker "
+                + i
+                + " keeps its transformed center on the particle center Y\n"
+                + overlapping.properties,
+            centers[i][1],
+            centers[i][3],
+            .5f);
+      }
+    } finally {
+      baseline.close();
+      if (overlapping != null) overlapping.close();
+    }
+  }
+
+  @Test
+  public void burstParticlesDrawInsideTheirRadiusAndLeaveNoFinishedFrame() {
+    LikeBurstPainter painter = new LikeBurstPainter();
+    Bitmap frame = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888);
+    Canvas canvas = new Canvas(frame);
+    int[] pixels = new int[256 * 256];
+    try {
+      for (float progress : new float[] {.15f, .45f, .75f}) {
+        frame.eraseColor(Color.TRANSPARENT);
+        painter.draw(canvas, 128, 128, 96, progress);
+        frame.getPixels(pixels, 0, 256, 0, 0, 256, 256);
+        int visible = 0;
+        java.util.Set<Integer> colors = new java.util.HashSet<>();
+        for (int y = 0; y < 256; y++) {
+          for (int x = 0; x < 256; x++) {
+            int pixel = pixels[y * 256 + x];
+            if (Color.alpha(pixel) == 0) continue;
+            visible++;
+            assertTrue(
+                "Particle strokes, including caps, stay inside their reserved radius",
+                Math.hypot(x + .5 - 128, y + .5 - 128) <= 97.5);
+            if (Color.alpha(pixel) > 32) colors.add(pixel & 0x00ffffff);
+          }
+        }
+        assertTrue("Active particle frames contain visible geometry", visible > 0);
+        assertTrue("The burst contains several colors", colors.size() >= 3);
+      }
+      for (float progress : new float[] {0, 1, 2}) {
+        frame.eraseColor(Color.TRANSPARENT);
+        painter.draw(canvas, 128, 128, 96, progress);
+        frame.getPixels(pixels, 0, 256, 0, 0, 256, 256);
+        for (int pixel : pixels)
+          assertEquals("Inactive bursts draw nothing", 0, Color.alpha(pixel));
+      }
+    } finally {
+      frame.recycle();
+    }
   }
 
   @Test
@@ -1117,7 +1406,8 @@ public final class FeedbackInteractionTest {
           onMain(
               () -> {
                 overlay.showAt(overlay.getWidth() * .5f, overlay.getHeight() * .5f);
-                View sticker = overlay.getChildAt(0);
+                View sticker = overlay.latestSticker();
+                assertNotNull(sticker);
                 assertEquals(View.VISIBLE, sticker.getVisibility());
                 assertEquals(1, sticker.getAlpha(), 0);
                 assertEquals(1, sticker.getScaleX(), 0);
@@ -1128,7 +1418,8 @@ public final class FeedbackInteractionTest {
       SystemClock.sleep(100);
       onMain(
           () -> {
-            View sticker = overlay.getChildAt(0);
+            View sticker = overlay.latestSticker();
+            assertNotNull(sticker);
             assertEquals(position[0], sticker.getTranslationX(), 0);
             assertEquals(position[1], sticker.getTranslationY(), 0);
             assertEquals(1, sticker.getScaleX(), 0);
@@ -1136,7 +1427,7 @@ public final class FeedbackInteractionTest {
             assertEquals(0, sticker.getRotation(), 0);
             return null;
           });
-      await(() -> onMain(() -> overlay.getChildAt(0).getVisibility() != View.VISIBLE));
+      await(() -> onMain(() -> overlay.activeEffectCount() == 0));
     } finally {
       onMain(
           () -> {

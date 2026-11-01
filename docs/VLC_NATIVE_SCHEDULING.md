@@ -25,7 +25,7 @@ fast参数证据：已有 JNI/核心导出与新增 `0x00f4f6d0–0x00f4f70c` �
 
 ## 精确落点与画面呈现
 
-MP4的 [Seek](https://github.com/videolan/vlc/blob/84177b2273abc5c4300234e6e18b55a4d2dd5a03/modules/demux/mp4/mp4.c#L1608-L1650) 先找可解码起点；精确模式额外设置目标显示时间，借助preroll跳过较早数据。这个接口标志不等于最终显示帧逐帧精确，软件解码的时间边界见下文。长关键帧间隔会增加依赖帧工作量，但缺少用户的慢视频，不能直接认定其具体原因。
+MP4的 [Seek](https://github.com/videolan/vlc/blob/84177b2273abc5c4300234e6e18b55a4d2dd5a03/modules/demux/mp4/mp4.c#L1608-L1650) 先找可解码起点；精确模式额外设置目标显示时间，借助preroll跳过较早数据。这个接口标志不等于最终显示帧逐帧精确，软件解码的时间边界见下文。长关键帧间隔会增加依赖帧工作量。早期2.2.0-test.2调查尚未取得用户的慢样本；后续匿名样本及持续输入结果见 [持续定位验证](SEEK_STRESS_TEST.md)，不能仅凭GOP长度认定全部延迟原因。
 
 [input_DecoderFlush](https://github.com/videolan/vlc/blob/84177b2273abc5c4300234e6e18b55a4d2dd5a03/src/input/decoder.c#L2121-L2151) 是异步清空入口；安装包精确导出范围为 `0x00f59bac–0x00f59c37`。[MediaCodec flush与输出线程](https://github.com/videolan/vlc/blob/84177b2273abc5c4300234e6e18b55a4d2dd5a03/modules/codec/omxil/mediacodec.c#L1240-L1320) 仍需协调旧输出的释放，不能将其理解为零成本。对应安装包指令位于 `native-scheduling-assembly.txt` 的 `0x01281660–0x012816f0`、`0x012833e4–0x01283470`。
 
@@ -49,7 +49,7 @@ reference-device、Android 14上的调查改变了原先只比较“Media3与Lib
 
 LibVLC 3.6.5与3.7.7内的版本字符串分别为 `Lavc58.134.100`、`Lavc62.28.102`，后者与被调查VLC一致。证据为 `.tools/qa-2.2.0-test.2/ffmpeg-version-comparison.json` 及安装包 `libvlc.so` 文件偏移 `0x4aa5d5`。先前仅走MediaCodec的库版本对比，不能用来否定FFmpeg软件路径升级的作用；版本字符串相同也不保证所有编译配置相同。
 
-本机H.264样片的软解与SurfaceView组合已经接近参照VLC的响应范围，但不能外推到所有编码或设备。硬解Surface试验没有同等收益，因此SurfaceView本身不是充分原因。当前Android 14及以上路径使用SurfaceView，首帧和预览由新表面活动及有界PixelCopy确认；旧系统保留TextureView。表面首帧可用只证明存在新画面，不能证明其PTS等于定位目标。比较方法、分组结果与未覆盖场景统一见 [定位性能验证](SEEK_PERFORMANCE_TEST.md)，原始对比保留在 `.tools/qa-2.2.0-test.2/`，不以UI时钟变化替代画面测量。
+2.2.0-test.2阶段，本机H.264样片的软解与SurfaceView组合已经接近参照VLC的响应范围，但不能外推到所有编码或设备。该阶段硬解Surface试验没有同等收益，因此SurfaceView本身不是充分原因。当前Android 14及以上路径使用SurfaceView，首帧和预览由新表面活动及有界PixelCopy确认；旧系统保留TextureView。表面首帧可用只证明存在新画面，不能证明其PTS等于定位目标。历史比较方法、分组结果与未覆盖场景见 [定位性能验证](SEEK_PERFORMANCE_TEST.md)，原始对比保留在 `.tools/qa-2.2.0-test.2/`；2.2.0-test.3的跨手势队列与持续输入结果另见 [持续定位验证](SEEK_STRESS_TEST.md)，不混用两轮协议或以UI时钟变化替代画面测量。
 
 ## 软件解码的preroll与线程取舍
 
@@ -65,7 +65,7 @@ avcodec还会按当前输入包的preroll标志决定是否输出，而FFmpeg帧
 
 `NativeDecoderSelector` 只对请求播放或相邻预载的文件读取媒体头，不扫描全库、不启动对照解码器。单后台工作线程、最多8项等待任务和128项内存缓存限制资源占用；150ms内没有结果即采用硬解优先，迟到结果只影响以后打开。缓存键含文件身份、修改时间、大小及系统指纹。
 
-自动软解仅覆盖已验证的reference-device/API34：明确的8-bit AVC配置、已知帧率不超过30fps、长边不超过1920且短边不超过1080、没有HDR标记。未知轨道信息、高规格视频和其他设备保留硬解优先。这是有证据边界的候选策略，不是逐文件测出“最快解码器”。
+自动软解仅覆盖已验证的reference-device/API34：明确的8-bit AVC配置、没有HDR标记、长边不超过1920且短边不超过1080。2.2.0-test.2原先限制为不超过30fps；2.2.0-test.3将已知帧率上限扩展到60fps，同时要求 `宽 × 高 × 帧率 ≤ 1920 × 1080 × 30`（每秒62,208,000像素）。720p60符合预算，1080p60不符合。未知轨道信息、高规格视频和其他设备保留硬解优先。像素率不包含全部GOP及参考帧成本；这是有证据边界的候选策略，不是逐文件测出“最快解码器”。60fps样本及连续播放观察见 [持续定位验证](SEEK_STRESS_TEST.md)。
 
 软解错误会先尝试原生硬解，再按已有兼容性路径转Media3。连续播放健康检查只在前台当前页、正常1倍速、非定位/缓冲状态采样：两个连续2秒窗口中，丢帧比例超过10%或呈现率低于轨道帧率75%时允许尝试硬解。缺失或完全不变的计数不作为解码器失败证据；它不能检测所有冻结，也不能测量定位精度。只有替代硬解实际产生首帧后，才记录该文件24小时内避开软解；这份记忆与整个LibVLC的失败记忆分开，记录数量有界。`--no-stats` 已移除以允许这些计数可用。
 

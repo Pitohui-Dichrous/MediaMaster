@@ -124,6 +124,16 @@ final class NativeSurfaceFrames {
     return hasSurface() && ready;
   }
 
+  /** Fresh output marker for seek backpressure; this is not the media presentation timestamp. */
+  long frameSequence() {
+    return frameSequence;
+  }
+
+  /** Shares the single existing watch with previews and first-frame readiness. */
+  void observeNextFrame() {
+    armNextFrame();
+  }
+
   /** Existing buffers cannot satisfy a rewind/re-prime; wait for fresh surface activity. */
   void requireFreshFrame() {
     readyRequest++;

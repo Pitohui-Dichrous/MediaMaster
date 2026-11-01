@@ -16,16 +16,17 @@ import org.junit.runner.RunWith;
 public final class DeviceTestCleanup {
   @Test
   public void setLowestAudibleMediaVolume() {
+    String setup = InstrumentationRegistry.getArguments().getString("benchMediaVolume");
     assumeTrue(
         "Explicit setup for mixer verification only",
-        "lowest".equals(InstrumentationRegistry.getArguments().getString("benchMediaVolume")));
+        "lowest".equals(setup) || "minimum".equals(setup));
     AudioManager audio =
         (AudioManager)
             InstrumentationRegistry.getInstrumentation()
                 .getTargetContext()
                 .getSystemService(Context.AUDIO_SERVICE);
     int maximum = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
-    int requested = Math.max(1, maximum / 15);
+    int requested = "minimum".equals(setup) ? 1 : Math.max(1, maximum / 15);
     audio.setStreamVolume(AudioManager.STREAM_MUSIC, requested, 0);
     Bundle status = new Bundle();
     status.putInt("mediaVolumeMaximum", maximum);

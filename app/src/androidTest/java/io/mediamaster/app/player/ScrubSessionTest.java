@@ -50,6 +50,8 @@ public final class ScrubSessionTest {
   private int savedMode;
   private boolean hadEngine;
   private int savedEngine;
+  private boolean hadNativeDecoder;
+  private int savedNativeDecoder;
 
   @Before
   public void permissionsAndPlaybackMode() {
@@ -64,11 +66,14 @@ public final class ScrubSessionTest {
     savedMode = context.getSharedPreferences("player", 0).getInt("playback_mode", 0);
     hadEngine = context.getSharedPreferences("player", 0).contains("engine_choice");
     savedEngine = context.getSharedPreferences("player", 0).getInt("engine_choice", 0);
+    hadNativeDecoder = context.getSharedPreferences("player", 0).contains("native_decoder_mode");
+    savedNativeDecoder = context.getSharedPreferences("player", 0).getInt("native_decoder_mode", 0);
     context
         .getSharedPreferences("player", 0)
         .edit()
         .putInt("playback_mode", PlaybackOrder.SEQUENTIAL)
         .putInt("engine_choice", 1)
+        .putInt("native_decoder_mode", NativeDecoderPolicy.AUTO)
         .commit();
   }
 
@@ -80,6 +85,8 @@ public final class ScrubSessionTest {
           context.getSharedPreferences("player", 0).edit().putInt("playback_mode", savedMode);
       if (hadEngine) restore.putInt("engine_choice", savedEngine);
       else restore.remove("engine_choice");
+      if (hadNativeDecoder) restore.putInt("native_decoder_mode", savedNativeDecoder);
+      else restore.remove("native_decoder_mode");
       restore.commit();
     }
   }
@@ -359,11 +366,10 @@ public final class ScrubSessionTest {
                   VideoPage.class.getDeclaredMethod("startVlc", long.class, long.class);
               fallback.setAccessible(true);
               fallback.invoke(page, page.generation, 4200L);
-              assertNull(page.exo);
-              assertNotNull(page.vlc);
-              assertEquals(0, page.vlc.getVolume());
+              assertSelectionIsPendingOnValidatedDevice(page, original);
               return position;
             });
+    await(() -> onMain(() -> page.exo == null && page.vlc != null), 20000);
     MediaPlayer replacement = onMain(() -> page.vlc);
     awaitVlcState(
         page,
@@ -476,21 +482,22 @@ public final class ScrubSessionTest {
     launch("04_Portrait_Loop.mp4");
     VideoPage page = onMain(this::current);
     pauseAndSeek(page, 1000);
-    MediaPlayer replacement =
-        onMain(
-            () -> {
-              page.beginScrub();
-              page.scrubTo(4200);
-              Method fallback =
-                  VideoPage.class.getDeclaredMethod("startVlc", long.class, long.class);
-              fallback.setAccessible(true);
-              fallback.invoke(page, page.generation, 4200L);
-              assertNotNull(page.vlc);
-              // Commit in the same UI callback, before asynchronous warmup/seekable events.
-              // A device may already be seekable; either path must retain an explicit zero.
-              page.endScrub(0, true);
-              return page.vlc;
-            });
+    ExoPlayer original = onMain(() -> page.exo);
+    onMain(
+        () -> {
+          page.beginScrub();
+          page.scrubTo(4200);
+          Method fallback = VideoPage.class.getDeclaredMethod("startVlc", long.class, long.class);
+          fallback.setAccessible(true);
+          fallback.invoke(page, page.generation, 4200L);
+          assertSelectionIsPendingOnValidatedDevice(page, original);
+          // Keep this in the same callback: header selection has not replaced the old Exo
+          // input yet on validated devices. Other devices may already be warming VLC.
+          page.endScrub(0, true);
+          return null;
+        });
+    await(() -> onMain(() -> page.exo == null && page.vlc != null), 20000);
+    MediaPlayer replacement = onMain(() -> page.vlc);
     awaitVlcState(
         page,
         replacement,
@@ -516,6 +523,80 @@ public final class ScrubSessionTest {
           assertEquals(0, replacement.getVolume());
           return null;
         });
+  }
+
+  @Test
+  public void cancellingDuringVlcHeaderSelectionKeepsTheGestureOrigin() throws Exception {
+    launch("04_Portrait_Loop.mp4");
+    VideoPage page = onMain(this::current);
+    pauseAndSeek(page, 1000);
+    ExoPlayer original = onMain(() -> page.exo);
+    long origin =
+        onMain(
+            () -> {
+              long at = page.position();
+              page.beginScrub();
+              page.scrubTo(4200);
+              Method fallback =
+                  VideoPage.class.getDeclaredMethod("startVlc", long.class, long.class);
+              fallback.setAccessible(true);
+              fallback.invoke(page, page.generation, 4200L);
+              assertSelectionIsPendingOnValidatedDevice(page, original);
+              page.endScrub(4200, false);
+              return at;
+            });
+    awaitPausedFallbackTarget(page, origin);
+  }
+
+  @Test
+  public void directZeroSeekDuringVlcHeaderSelectionOverridesTheOldFallbackPosition()
+      throws Exception {
+    launch("04_Portrait_Loop.mp4");
+    VideoPage page = onMain(this::current);
+    pauseAndSeek(page, 1000);
+    ExoPlayer original = onMain(() -> page.exo);
+    onMain(
+        () -> {
+          Method fallback = VideoPage.class.getDeclaredMethod("startVlc", long.class, long.class);
+          fallback.setAccessible(true);
+          fallback.invoke(page, page.generation, 4200L);
+          assertSelectionIsPendingOnValidatedDevice(page, original);
+          page.seekTo(0);
+          return null;
+        });
+    awaitPausedFallbackTarget(page, 0);
+  }
+
+  private static void assertSelectionIsPendingOnValidatedDevice(
+      VideoPage page, ExoPlayer original) {
+    if (!NativeDecoderPolicy.validatedDevice("reference-device", Build.VERSION.SDK_INT)) return;
+    // Every fixture uses a per-test trialId in its cache/history key and starts on Exo, so AUTO's
+    // first header probe is cold. Its main-thread callback cannot run inside this same UI callback.
+    assertSame(
+        "The old Exo input still owns playback while headers are being read", original, page.exo);
+    assertNull("The async selection callback has not created its native replacement yet", page.vlc);
+  }
+
+  private void awaitPausedFallbackTarget(VideoPage page, long target) throws Exception {
+    await(() -> onMain(() -> page.exo == null && page.vlc != null), 20000);
+    MediaPlayer replacement = onMain(() -> page.vlc);
+    awaitVlcState(
+        page,
+        replacement,
+        () ->
+            onMain(
+                () -> {
+                  assertSame(replacement, page.vlc);
+                  assertEquals(0, replacement.getVolume());
+                  return page.firstFrameReady
+                      && !page.buffering
+                      && !replacement.isPlaying()
+                      && replacement.getTime() >= Math.max(0, target - 200)
+                      && replacement.getTime() <= target + 200;
+                }),
+        20000,
+        "A newer request handled by the old input must survive async native selection: " + target);
+    NativeAudioProbe.assertMuted(instrumentation);
   }
 
   @Test

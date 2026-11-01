@@ -5,6 +5,7 @@ package io.mediamaster.app.player;
  */
 final class NativeDecoderPolicy {
   static final int AUTO = 0, HARDWARE = 1, SOFTWARE = 2;
+  private static final double MAX_SOFTWARE_PIXELS_PER_SECOND = 1920d * 1080 * 30;
 
   static final class Metadata {
     final String mime;
@@ -40,7 +41,12 @@ final class NativeDecoderPolicy {
         && Math.max(metadata.width, metadata.height) <= 1920
         && Math.min(metadata.width, metadata.height) <= 1080
         && metadata.frameRate > 0
-        && metadata.frameRate <= 30
+        && metadata.frameRate <= 60
+        // Smaller high-frame-rate AVC stays within the existing 1080p30 pixel budget.
+        // This is candidate eligibility, not proof of capacity for every GOP/reference structure;
+        // the per-file avoidance history and sustained playback health guard still apply.
+        && metadata.width * (double) metadata.height * metadata.frameRate
+            <= MAX_SOFTWARE_PIXELS_PER_SECOND
         && isEightBitAvcProfile(metadata.avcProfile)
         && !metadata.hdr;
   }

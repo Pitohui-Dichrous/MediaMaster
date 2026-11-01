@@ -1161,7 +1161,7 @@ public final class FeedbackInteractionTest {
   }
 
   @Test
-  public void independentBurstsOverlapAndBoundedReuseCannotClearNewerFeedback() throws Exception {
+  public void newBurstsRetirePreviousFeedbackWithoutResettingOlderFade() throws Exception {
     org.junit.Assume.assumeTrue(ValueAnimator.areAnimatorsEnabled());
     launch(true);
     setPlaying(false);
@@ -1170,21 +1170,23 @@ public final class FeedbackInteractionTest {
     WindowCapture overlapping = null;
     Rect[] stickerAreas = new Rect[2];
     float[][] centers = new float[2][];
-    long[] firstStarted = new long[1];
+    float[][] retiredPose = new float[1][];
+    float[] retiredProgress = new float[1];
+    float[] retiredAlpha = new float[1];
+    ImageView[] third = new ImageView[1];
+    ValueAnimator[] retirement = new ValueAnimator[1];
+    Object[] firstSlot = new Object[1];
     try {
       awaitWindowCopy(baseline);
       ImageView first =
           onMain(
               () -> {
-                firstStarted[0] = SystemClock.uptimeMillis();
                 overlay.showAt(overlay.getWidth() * .3f, overlay.getHeight() * .3f);
                 assertEquals(1, overlay.activeEffectCount());
                 return overlay.latestSticker();
               });
       assertNotNull(first);
       await(() -> onMain(() -> first.getAlpha() >= .98f));
-      // Separate lifetimes even when the device uses a very short animator duration scale.
-      SystemClock.sleep(140);
       ImageView second =
           onMain(
               () -> {
@@ -1196,7 +1198,20 @@ public final class FeedbackInteractionTest {
                   first.getTranslationY(),
                   first.getAlpha()
                 };
+                for (Object slot : (List<?>) read(overlay, "slots")) {
+                  if (read(slot, "sticker") == first) firstSlot[0] = slot;
+                }
+                assertNotNull(firstSlot[0]);
+                retiredPose[0] = java.util.Arrays.copyOf(before, 5);
+                retiredAlpha[0] = first.getAlpha();
+                retiredProgress[0] = (float) read(firstSlot[0], "burstProgress");
+                assertTrue(retiredProgress[0] > 0 && retiredProgress[0] < 1);
                 overlay.showAt(overlay.getWidth() * .7f, overlay.getHeight() * .65f);
+                assertTrue((boolean) read(firstSlot[0], "retiring"));
+                retirement[0] = (ValueAnimator) read(firstSlot[0], "retireAnimator");
+                assertEquals(
+                    "Previous feedback has a short exit", 120, retirement[0].getDuration());
+                assertTrue(retirement[0].isRunning());
                 assertArrayEquals(
                     "A new burst leaves the older sticker's pose and position alone",
                     before,
@@ -1225,12 +1240,28 @@ public final class FeedbackInteractionTest {
                 assertEquals(View.VISIBLE, newest.getVisibility());
                 return newest;
               });
-      await(() -> onMain(() -> second.getAlpha() >= .98f));
       overlapping =
           onMain(
               () -> {
                 assertEquals(2, overlay.activeEffectCount());
-                assertTrue(first.getAlpha() > .5f && second.getAlpha() > .5f);
+                // Advance this test-owned observation to an exit frame without changing global
+                // animation settings or relying on instrumentation waking within a 120ms fade.
+                retirement[0].setCurrentPlayTime(30);
+                float opacity = (float) read(firstSlot[0], "burstOpacity");
+                assertTrue(opacity > 0 && opacity < 1);
+                assertEquals(retiredAlpha[0] * opacity, first.getAlpha(), .0001f);
+                assertEquals(retiredProgress[0], (float) read(firstSlot[0], "burstProgress"), 0);
+                assertArrayEquals(
+                    "The retiring sticker fades in place",
+                    retiredPose[0],
+                    new float[] {
+                      first.getScaleX(),
+                      first.getScaleY(),
+                      first.getRotation(),
+                      first.getTranslationX(),
+                      first.getTranslationY()
+                    },
+                    .0001f);
                 int[] location = new int[2];
                 overlay.getLocationInWindow(location);
                 ImageView[] stickers = {first, second};
@@ -1243,19 +1274,42 @@ public final class FeedbackInteractionTest {
                   bounds.roundOut(stickerAreas[i]);
                 }
                 String diagnostics = stickerGeometryDiagnostics(overlay, stickers, centers);
+                long beforeRetap = retirement[0].getCurrentPlayTime();
+                float alphaBeforeRetap = first.getAlpha();
+                overlay.showAt(overlay.getWidth() * .7f, overlay.getHeight() * .65f);
+                third[0] = overlay.latestSticker();
+                assertNotSame(first, third[0]);
+                assertNotSame(second, third[0]);
+                assertTrue(
+                    "A third like cannot restart an older fade",
+                    retirement[0].getCurrentPlayTime() >= beforeRetap);
+                assertEquals(alphaBeforeRetap, first.getAlpha(), 0);
+                assertEquals(opacity, (float) read(firstSlot[0], "burstOpacity"), 0);
+                assertArrayEquals(
+                    retiredPose[0],
+                    new float[] {
+                      first.getScaleX(),
+                      first.getScaleY(),
+                      first.getRotation(),
+                      first.getTranslationX(),
+                      first.getTranslationY()
+                    },
+                    .0001f);
                 WindowCapture copy = requestFixtureWindowCopy();
                 copy.properties = diagnostics;
                 return copy;
               });
       awaitWindowCopy(overlapping);
       await(() -> onMain(() -> first.getVisibility() != View.VISIBLE));
-      long observedLifetime = SystemClock.uptimeMillis() - firstStarted[0];
+      await(() -> onMain(() -> overlay.activeEffectCount() == 1));
       onMain(
           () -> {
             assertEquals(
                 "Finishing an older burst cannot clear a newer one",
                 View.VISIBLE,
-                second.getVisibility());
+                third[0].getVisibility());
+            assertSame(third[0], overlay.latestSticker());
+            assertFalse((boolean) read(firstSlot[0], "active"));
             assertEquals(1, overlay.activeEffectCount());
             overlay.clear();
             assertEquals(0, overlay.activeEffectCount());
@@ -1266,8 +1320,7 @@ public final class FeedbackInteractionTest {
             assertTrue(overlay.getChildCount() <= 8);
             return null;
           });
-      // Recycle a full pool while its old delayed exits are pending.
-      SystemClock.sleep(Math.round(observedLifetime * .65));
+      // Recycle a full pool while old retire callbacks are still pending.
       View latest =
           onMain(
               () -> {
@@ -1290,20 +1343,20 @@ public final class FeedbackInteractionTest {
                     overlay.getChildDrawingOrder(drawn.length, drawn.length - 1));
                 return overlay.latestSticker();
               });
-      SystemClock.sleep(Math.round(observedLifetime * .5));
+      await(() -> onMain(() -> overlay.activeEffectCount() == 1));
       onMain(
           () -> {
             assertEquals(
                 "Recycled slots ignore their old completion callbacks",
                 View.VISIBLE,
                 latest.getVisibility());
-            assertTrue(latest.getAlpha() > .5f);
-            assertEquals(8, overlay.activeEffectCount());
+            assertTrue(latest.getAlpha() > 0);
+            assertEquals(1, overlay.activeEffectCount());
             overlay.clear();
             assertEquals(0, overlay.activeEffectCount());
             return null;
           });
-      SystemClock.sleep(Math.max(1400, observedLifetime + 300));
+      SystemClock.sleep(1400);
       onMain(
           () -> {
             assertEquals(
@@ -1316,12 +1369,10 @@ public final class FeedbackInteractionTest {
             }
             return null;
           });
-      for (Rect area : stickerAreas) {
-        assertTrue(
-            "Each independently positioned sticker changes pixels in the paused Window",
-            changedPixels(baseline.bitmap, overlapping.bitmap, area)
-                > Math.max(64, area.width() * area.height() / 2000));
-      }
+      int changed = 0;
+      for (Rect area : stickerAreas)
+        changed += changedPixels(baseline.bitmap, overlapping.bitmap, area);
+      assertTrue("The rapid handoff visibly changes the paused Window", changed > 64);
       saveFixtureWindowEvidence(overlapping.bitmap, "multi-sticker-window.png");
       saveFixtureTextEvidence(overlapping.properties, "multi-sticker-properties.txt");
       for (int i = 0; i < centers.length; i++) {
@@ -1375,6 +1426,18 @@ public final class FeedbackInteractionTest {
         assertTrue("Active particle frames contain visible geometry", visible > 0);
         assertTrue("The burst contains several colors", colors.size() >= 3);
       }
+      long previousAlpha = Long.MAX_VALUE;
+      for (float opacity : new float[] {1, .5f, 0}) {
+        frame.eraseColor(Color.TRANSPARENT);
+        painter.draw(canvas, 128, 128, 96, .4f, opacity);
+        frame.getPixels(pixels, 0, 256, 0, 0, 256, 256);
+        long alpha = 0;
+        for (int pixel : pixels) alpha += Color.alpha(pixel);
+        assertTrue("Retirement fades the existing particle geometry", alpha < previousAlpha);
+        if (opacity > 0) assertTrue(alpha > 0);
+        else assertEquals("Completed retirement leaves no particles", 0, alpha);
+        previousAlpha = alpha;
+      }
       for (float progress : new float[] {0, 1, 2}) {
         frame.eraseColor(Color.TRANSPARENT);
         painter.draw(canvas, 128, 128, 96, progress);
@@ -1425,6 +1488,20 @@ public final class FeedbackInteractionTest {
             assertEquals(1, sticker.getScaleX(), 0);
             assertEquals(1, sticker.getScaleY(), 0);
             assertEquals(0, sticker.getRotation(), 0);
+            overlay.showAt(overlay.getWidth() * .7f, overlay.getHeight() * .65f);
+            assertEquals(
+                "Static feedback replaces the old confirmation immediately",
+                1,
+                overlay.activeEffectCount());
+            View latest = overlay.latestSticker();
+            assertEquals(1, latest.getAlpha(), 0);
+            assertEquals(1, latest.getScaleX(), 0);
+            assertEquals(1, latest.getScaleY(), 0);
+            assertEquals(0, latest.getRotation(), 0);
+            for (int i = 0; i < overlay.getChildCount(); i++) {
+              View child = overlay.getChildAt(i);
+              if (child != latest) assertEquals(View.INVISIBLE, child.getVisibility());
+            }
             return null;
           });
       await(() -> onMain(() -> overlay.activeEffectCount() == 0));

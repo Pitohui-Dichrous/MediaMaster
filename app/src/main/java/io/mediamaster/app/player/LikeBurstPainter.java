@@ -39,7 +39,12 @@ final class LikeBurstPainter {
    * and an antialiasing margin. This method allocates nothing and submits at most ten lines.
    */
   void draw(Canvas canvas, float cx, float cy, float radius, float progress) {
+    draw(canvas, cx, cy, radius, progress, 1f);
+  }
+
+  void draw(Canvas canvas, float cx, float cy, float radius, float progress, float fadeOpacity) {
     if (!(progress > 0 && progress < 1 && radius > 0)
+        || !(fadeOpacity > 0)
         || !Float.isFinite(radius)
         || !Float.isFinite(cx)
         || !Float.isFinite(cy)) return;
@@ -47,7 +52,7 @@ final class LikeBurstPainter {
     float opacity =
         EASE_OUT.getInterpolation(unit(progress / .08f))
             * (1 - EASE_OUT.getInterpolation(unit((progress - .78f) / .22f)));
-    int alpha = Math.round(255 * opacity);
+    int alpha = Math.round(255 * opacity * unit(fadeOpacity));
     if (alpha == 0) return;
     for (int i = 0; i < X.length; i++) {
       float width = radius * .038f * WIDTH[i];

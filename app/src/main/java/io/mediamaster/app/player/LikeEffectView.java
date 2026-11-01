@@ -1,5 +1,7 @@
 package io.mediamaster.app.player;
 
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
 import android.animation.ValueAnimator;
 import android.content.Context;
 import android.graphics.Bitmap;
@@ -15,7 +17,7 @@ import io.mediamaster.app.R;
 import java.util.ArrayList;
 import java.util.function.BooleanSupplier;
 
-/** Bounded, independent, touch-through stickers with expanding confetti bursts. */
+/** Touch-through confetti stickers; a fresh like quickly fades any preceding feedback. */
 public final class LikeEffectView extends FrameLayout {
   static final int MAX_BURSTS = 8;
   private static final PathInterpolator EASE_OUT = new PathInterpolator(.23f, 1f, .32f, 1f);
@@ -71,6 +73,7 @@ public final class LikeEffectView extends FrameLayout {
   /** x and y share the containing player root's coordinates. Each call starts its own feedback. */
   public void showAt(float x, float y) {
     if (getWidth() <= 0 || getHeight() <= 0 || bitmap == null) return;
+    for (int i = 0; i < slots.size(); i++) slots.get(i).retire();
     Slot chosen = null;
     for (int i = 0; i < slots.size(); i++) {
       Slot slot = slots.get(i);
@@ -108,7 +111,8 @@ public final class LikeEffectView extends FrameLayout {
     for (int i = 0; i < slots.size(); i++) {
       Slot slot = slots.get(i);
       if (slot.active && slot.burstProgress < 1)
-        burstPainter.draw(canvas, slot.centerX, slot.centerY, burstRadius, slot.burstProgress);
+        burstPainter.draw(
+            canvas, slot.centerX, slot.centerY, burstRadius, slot.burstProgress, slot.burstOpacity);
     }
   }
 
@@ -183,11 +187,13 @@ public final class LikeEffectView extends FrameLayout {
   private final class Slot {
     final ImageView sticker;
     final ValueAnimator burstAnimator = ValueAnimator.ofFloat(0, 1);
+    final ValueAnimator retireAnimator = ValueAnimator.ofFloat(1, 0);
     final Runnable dismiss = this::fadeOut;
-    boolean active;
-    int generation, burstGeneration;
+    boolean active, retiring;
+    int generation, burstGeneration, retireGeneration;
     long serial;
     float centerX, centerY, restingX, restingY, lean, burstProgress = 1f;
+    float burstOpacity = 1f, retireStartAlpha;
 
     Slot(Context context) {
       sticker = new ImageView(context);
@@ -204,6 +210,22 @@ public final class LikeEffectView extends FrameLayout {
             if (!active || generation != burstGeneration) return;
             burstProgress = (float) animation.getAnimatedValue();
             invalidate();
+          });
+      retireAnimator.setDuration(120);
+      retireAnimator.setInterpolator(EASE_OUT);
+      retireAnimator.addUpdateListener(
+          animation -> {
+            if (!active || !retiring || generation != retireGeneration) return;
+            burstOpacity = (float) animation.getAnimatedValue();
+            sticker.setAlpha(retireStartAlpha * burstOpacity);
+            invalidate();
+          });
+      retireAnimator.addListener(
+          new AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationEnd(Animator animation) {
+              if (active && retiring && generation == retireGeneration) finish();
+            }
           });
     }
 
@@ -295,6 +317,24 @@ public final class LikeEffectView extends FrameLayout {
       pose(generation, 150, .88f, 0, 0, EASE_OUT, this::finish);
     }
 
+    void retire() {
+      if (!active || retiring) return;
+      if (!motionEnabled.getAsBoolean()) {
+        finish();
+        return;
+      }
+      // Hold the exact visible pose and fade from its current opacity. A third like does not
+      // restart this exit or extend the life of a sticker that is already fading.
+      generation++;
+      removeCallbacks(dismiss);
+      sticker.animate().withEndAction(null).cancel();
+      burstAnimator.cancel();
+      retiring = true;
+      retireGeneration = generation;
+      retireStartAlpha = sticker.getAlpha();
+      retireAnimator.start();
+    }
+
     void finish() {
       cancel();
       updateDrawingOrder();
@@ -303,10 +343,13 @@ public final class LikeEffectView extends FrameLayout {
     void cancel() {
       generation++;
       active = false;
+      retiring = false;
       removeCallbacks(dismiss);
       sticker.animate().withEndAction(null).cancel();
       burstAnimator.cancel();
+      retireAnimator.cancel();
       burstProgress = 1;
+      burstOpacity = 1;
       sticker.setVisibility(View.INVISIBLE);
       sticker.setAlpha(0f);
       sticker.setScaleX(1);

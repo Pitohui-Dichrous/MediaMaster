@@ -1,8 +1,8 @@
 package io.mediamaster.app.player;
 
-/** A bounded recent-play score with a seven-day half-life; reads never change the saved record. */
+/** A bounded recent-play score with a three-day half-life; reads never change the saved record. */
 public final class RecentPlaybackPolicy {
-  public static final long HALF_LIFE_MS = 7L * 24 * 60 * 60 * 1000;
+  public static final long HALF_LIFE_MS = 3L * 24 * 60 * 60 * 1000;
   public static final double MAX_SCORE = 63;
 
   private RecentPlaybackPolicy() {}
@@ -16,10 +16,16 @@ public final class RecentPlaybackPolicy {
   public static double decay(double score, long updatedAt, long now) {
     double bounded = sanitizeScore(score);
     if (bounded == 0 || now <= updatedAt) return bounded;
+    return bounded * Math.pow(.5, elapsedHalfLives(updatedAt, now));
+  }
+
+  /** Shared by watching, feedback masses and reversible contributions. */
+  static double elapsedHalfLives(long updatedAt, long now) {
+    if (now <= updatedAt) return 0;
     long difference = now - updatedAt;
     // Ordered timestamps can still overflow signed subtraction across the long boundary.
     double elapsed = difference >= 0 ? difference : (double) now - (double) updatedAt;
-    return bounded * Math.pow(.5, elapsed / HALF_LIFE_MS);
+    return elapsed / HALF_LIFE_MS;
   }
 
   /** Persist the returned score with updatedAt=now, also reanchoring after a clock rollback. */

@@ -74,13 +74,16 @@ public final class PlayerActivity extends Activity {
       EXTRA_INDEX = "index",
       EXTRA_SHUFFLE = "shuffle",
       EXTRA_START_PORTRAIT = "start_portrait",
-      EXTRA_FROM_SEARCH = "from_search";
+      EXTRA_FROM_SEARCH = "from_search",
+      EXTRA_SEARCH_ROUND = "search_round";
   private final Handler handler = new Handler(Looper.getMainLooper());
   private ArrayList<VideoItem> queue = new ArrayList<>();
   private PlaybackOrder order;
   private PlaybackStatsStore playbackStats;
   private final Runnable capacityNotice = this::showCapacityNotice;
   private PlaybackVoteSession voteSession;
+  private boolean searchPlayback;
+  private String searchRound;
   private Object appliedWeightGeneration;
   private PlaybackStatsStore.PreparedWeights queueWeights;
   private boolean weightsLoading;
@@ -210,13 +213,29 @@ public final class PlayerActivity extends Activity {
 
   public static void launch(
       Activity activity, ArrayList<VideoItem> videos, int index, boolean shuffle) {
-    startPlayback(activity, videos, index, shuffle, null, false);
+    startPlayback(activity, videos, index, shuffle, null, null);
   }
 
-  /** Only the directly selected search result receives search-entry feedback rules. */
+  /** Search rules apply to the entire queue and share a round across repeated player launches. */
   public static void launchFromSearch(
       Activity activity, ArrayList<VideoItem> videos, int index, boolean shuffle) {
-    startPlayback(activity, videos, index, shuffle, null, true);
+    launchFromSearch(
+        activity,
+        videos,
+        index,
+        shuffle,
+        null,
+        SearchFeedbackRounds.create(PlaybackStatsStore.get(activity)));
+  }
+
+  public static void launchFromSearch(
+      Activity activity,
+      ArrayList<VideoItem> videos,
+      int index,
+      boolean shuffle,
+      Boolean startPortrait,
+      String searchRound) {
+    startPlayback(activity, videos, index, shuffle, startPortrait, searchRound);
   }
 
   public static void launch(
@@ -225,7 +244,7 @@ public final class PlayerActivity extends Activity {
       int index,
       boolean shuffle,
       boolean startPortrait) {
-    startPlayback(activity, videos, index, shuffle, startPortrait, false);
+    startPlayback(activity, videos, index, shuffle, startPortrait, null);
   }
 
   private static void startPlayback(
@@ -234,7 +253,7 @@ public final class PlayerActivity extends Activity {
       int index,
       boolean shuffle,
       Boolean startPortrait,
-      boolean fromSearch) {
+      String searchRound) {
     if (videos == null || videos.isEmpty()) return;
     String token = QueueStore.put(activity.getApplicationContext(), videos);
     Intent intent =
@@ -242,7 +261,8 @@ public final class PlayerActivity extends Activity {
             .putExtra(EXTRA_QUEUE, token)
             .putExtra(EXTRA_INDEX, index)
             .putExtra(EXTRA_SHUFFLE, shuffle)
-            .putExtra(EXTRA_FROM_SEARCH, fromSearch);
+            .putExtra(EXTRA_FROM_SEARCH, searchRound != null)
+            .putExtra(EXTRA_SEARCH_ROUND, searchRound);
     if (startPortrait != null) intent.putExtra(EXTRA_START_PORTRAIT, startPortrait.booleanValue());
     activity.startActivity(intent);
   }
@@ -280,15 +300,31 @@ public final class PlayerActivity extends Activity {
     int index = state != null ? state.getInt(EXTRA_INDEX) : getIntent().getIntExtra(EXTRA_INDEX, 0);
     playbackStats = PlaybackStatsStore.get(this);
     appliedWeightGeneration = playbackStats.voteGeneration();
+    searchPlayback =
+        state != null
+            ? state.getBoolean(
+                EXTRA_FROM_SEARCH, getIntent().getBooleanExtra(EXTRA_FROM_SEARCH, false))
+            : getIntent().getBooleanExtra(EXTRA_FROM_SEARCH, false);
+    searchRound =
+        state != null
+            ? state.getString(EXTRA_SEARCH_ROUND, getIntent().getStringExtra(EXTRA_SEARCH_ROUND))
+            : getIntent().getStringExtra(EXTRA_SEARCH_ROUND);
+    if (searchPlayback && searchRound == null) {
+      // Legacy entry points did not carry a round. A nonempty restored ID is never recreated:
+      // after process death its unknown scope fails closed instead of awarding a duplicate like.
+      searchRound = SearchFeedbackRounds.create(playbackStats);
+      getIntent().putExtra(EXTRA_SEARCH_ROUND, searchRound);
+    }
     Object retained = getLastNonConfigurationInstance();
     voteSession =
         retained instanceof PlaybackVoteSession
             ? (PlaybackVoteSession) retained
-            : new PlaybackVoteSession(playbackStats);
+            : searchPlayback
+                ? new PlaybackVoteSession(
+                    playbackStats, SearchFeedbackRounds.resolve(playbackStats, searchRound))
+                : new PlaybackVoteSession(playbackStats);
     entryFeedback.restore(
-        state != null
-            ? state.getBoolean("play_entry_from_search", false)
-            : getIntent().getBooleanExtra(EXTRA_FROM_SEARCH, false),
+        searchPlayback,
         state != null ? state.getLong("play_entry_watched_ms", 0) : 0,
         state != null && state.getBoolean("play_entry_recorded", false),
         state != null && state.getBoolean("play_entry_departed", false));
@@ -654,7 +690,7 @@ public final class PlayerActivity extends Activity {
         && !gestureSeeking
         && gestureKind == GESTURE_NONE
         && !pageTransitioning) {
-      setPlaying(!playRequested());
+      if (chromeVisible) setPlaying(!playRequested());
       showChrome();
     }
   }
@@ -942,7 +978,7 @@ public final class PlayerActivity extends Activity {
     stopWatching();
     boolean wasMutating = mutatingPageWindow;
     mutatingPageWindow = true;
-    entryFeedback.start(false);
+    entryFeedback.start(searchPlayback);
     try {
       invalidateCompletion();
       currentPage.setPlayback(false, false, false);
@@ -1282,6 +1318,8 @@ public final class PlayerActivity extends Activity {
     state.putBoolean("play_entry_recorded", watchTracker.recorded());
     state.putLong("play_entry_watched_ms", watchTracker.watchedMs());
     state.putBoolean("play_entry_from_search", entryFeedback.fromSearch());
+    state.putBoolean(EXTRA_FROM_SEARCH, searchPlayback);
+    state.putString(EXTRA_SEARCH_ROUND, searchRound);
     state.putBoolean("play_entry_departed", entryFeedback.departed());
   }
 
@@ -1542,7 +1580,7 @@ public final class PlayerActivity extends Activity {
     // A one-item sequential loop is still the same entry, even for clips shorter than 3 s.
     if (automatic && queue.size() == 1) stopWatching();
     else finishEntry(!automatic);
-    if (!automatic && queue.size() == 1) entryFeedback.start(false);
+    if (!automatic && queue.size() == 1) entryFeedback.start(searchPlayback);
     changeVideo(forward ? order.next(false) : order.previous(), forward ? 1 : -1);
   }
 
@@ -1582,7 +1620,7 @@ public final class PlayerActivity extends Activity {
     stopWatching();
     boolean wasMutating = mutatingPageWindow;
     mutatingPageWindow = true;
-    if (currentPage == null || currentPage.index != index) entryFeedback.start(false);
+    if (currentPage == null || currentPage.index != index) entryFeedback.start(searchPlayback);
     try {
       invalidateCompletion();
       cancelInteractions();
@@ -1761,17 +1799,14 @@ public final class PlayerActivity extends Activity {
       int requested = action == PlaybackEntryFeedbackPolicy.Action.LIKE ? 1 : -1;
       PlaybackVoteSession session = voteSession;
       Object generation = playbackStats.voteGeneration();
-      if (session.applyAutomaticVote(item, requested, generation)) refreshFeedbackUi();
-      else {
+      if (!session.applyAutomaticVote(item, requested, generation)) {
         // A rapid departure may beat initial database hydration. Retry once off the render path,
         // keeping the outgoing item/session and rejecting work superseded by a weight reset.
         playbackStats.prepareWeights(
             java.util.Collections.singletonList(item),
             prepared -> {
               if (prepared == null || playbackStats.voteGeneration() != generation) return;
-              if (session.applyAutomaticVote(item, requested, generation)
-                  && !isFinishing()
-                  && !isDestroyed()) refreshFeedbackUi();
+              session.applyAutomaticVote(item, requested, generation);
             });
       }
       // Inferred preference is quiet: do not interrupt playback with an effect or vibration.
@@ -2025,8 +2060,8 @@ public final class PlayerActivity extends Activity {
             "横滑调进度，短滑微调、长滑加速；松手定位。长按临时两倍速。\n\n"
                 + "全屏：左侧上下调亮度，右侧调音量。\n\n"
                 + "竖屏：当前视频循环，上滑下一条、下滑上一条；切集可选顺序或随机。\n\n"
-                + "全屏单击显示控件，双击播放或暂停；竖屏单击播放或暂停，双击点赞。\n\n"
-                + "同一播放窗口中，每个视频只计一次赞或踩；再次点按取消，重新打开可再次计入。近期赞踩与观看的比例影响随机权重，并以7天为半衰期减弱。\n\n"
+                + "全屏单击显示控件，双击播放或暂停；竖屏隐藏控件时先单击显示，再单击播放或暂停，双击点赞。\n\n"
+                + "同一播放窗口中，每个视频只计一次手动赞或踩；再次点按取消，重新打开可再次计入。近期赞踩与观看的比例影响随机权重，并以3天为半衰期减弱。\n\n"
                 + "手机与展开图标切换模式；旋转键切换方向，长按恢复自动适配。")
         .setPositiveButton("关闭", (dialog, which) -> showChrome())
         .show();

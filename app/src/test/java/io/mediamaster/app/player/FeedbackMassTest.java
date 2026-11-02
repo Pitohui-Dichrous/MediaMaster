@@ -5,7 +5,7 @@ import static org.junit.Assert.*;
 import org.junit.Test;
 
 public final class FeedbackMassTest {
-  private static final long WEEK = RecentPlaybackPolicy.HALF_LIFE_MS;
+  private static final long HALF_LIFE = RecentPlaybackPolicy.HALF_LIFE_MS;
 
   @Test
   public void crossingTheMillionBoundaryRescalesTogetherWithoutAWeightJump() {
@@ -54,7 +54,7 @@ public final class FeedbackMassTest {
   @Test
   public void longDecaySpendsTheCommonExponentBeforeAStandalonePowCouldUnderflow() {
     FeedbackMass huge = FeedbackMass.of(800_000, 600_000, 200_000, 1022);
-    FeedbackMass decayed = huge.decay(0, 1050 * WEEK);
+    FeedbackMass decayed = huge.decay(0, 1050 * HALF_LIFE);
     assertEquals(0, decayed.exponent);
     assertEquals(Math.scalb(800_000.0, -28), decayed.exposure, 0);
     assertEquals(Math.scalb(600_000.0, -28), decayed.likes, 0);
@@ -66,12 +66,13 @@ public final class FeedbackMassTest {
   }
 
   @Test
-  public void weeklyDecayRestoresTheUnitAndNewEventsRegainTheirNaturalSize() {
+  public void threeDayDecayRestoresTheUnitAndNewEventsRegainTheirNaturalSize() {
     FeedbackMass original = FeedbackMass.of(800_000, 600_000, 200_000, 3);
-    FeedbackMass weekOld = original.decay(0, WEEK);
-    assertEquals(original.unit() * 2, weekOld.unit(), 0);
-    assertEquals(unscaled(original.exposure, original) / 2, unscaled(weekOld.exposure, weekOld), 0);
-    FeedbackMass ordinary = original.decay(0, 3 * WEEK);
+    FeedbackMass halfLifeOld = original.decay(0, HALF_LIFE);
+    assertEquals(original.unit() * 2, halfLifeOld.unit(), 0);
+    assertEquals(
+        unscaled(original.exposure, original) / 2, unscaled(halfLifeOld.exposure, halfLifeOld), 0);
+    FeedbackMass ordinary = original.decay(0, 3 * HALF_LIFE);
     assertEquals(0, ordinary.exponent);
     assertEquals(1, ordinary.unit(), 0);
     FeedbackMass nextView = ordinary.addExposure();
@@ -127,7 +128,7 @@ public final class FeedbackMassTest {
     FeedbackMass advanced = voted.addExposure();
     assertTrue(advanced.exponent > baseline.exponent);
     assertEquals(.5, FeedbackMass.convert(1, baseline.exponent, 0, advanced.exponent, 0), 0);
-    long later = WEEK / 4;
+    long later = HALF_LIFE / 4;
     FeedbackMass current = advanced.decay(0, later);
     double contribution = FeedbackMass.convert(1, baseline.exponent, 0, current.exponent, later);
     FeedbackMass undone = current.withVotes(current.likes - contribution, current.dislikes);
@@ -142,7 +143,7 @@ public final class FeedbackMassTest {
   @Test
   public void subnormalTokensRegainPrecisionWhenConvertedToALargerRepresentableUnit() {
     double expected = Math.scalb(Double.MIN_VALUE, 1000) / Math.sqrt(2);
-    double converted = FeedbackMass.convert(Double.MIN_VALUE, 1000, 0, 0, WEEK / 2);
+    double converted = FeedbackMass.convert(Double.MIN_VALUE, 1000, 0, 0, HALF_LIFE / 2);
     assertTrue(converted > 0);
     assertEquals(
         "Fractional decay must be applied after preserving the subnormal significand",
@@ -169,6 +170,23 @@ public final class FeedbackMassTest {
     assertEquals(0, expired.dislikes, 0);
     assertEquals(0, expired.exponent);
     assertEquals(WeightedShuffle.weight(63), FeedbackWeightPolicy.weight(63, expired), 0);
+  }
+
+  @Test
+  public void nearLongBoundariesFeedbackUsesTheSameMillisecondPrecisionAsWatching() {
+    for (long start : new long[] {Long.MIN_VALUE, Long.MAX_VALUE - HALF_LIFE}) {
+      long end = start + HALF_LIFE;
+      FeedbackMass decayed = FeedbackMass.of(8, 6, 2, 0).decay(start, end);
+      assertEquals(RecentPlaybackPolicy.decay(8, start, end), decayed.exposure, 0);
+      assertEquals(4, decayed.exposure, 0);
+      assertEquals(3, decayed.likes, 0);
+      assertEquals(1, decayed.dislikes, 0);
+      assertEquals(.5, FeedbackMass.convert(1, 0, start, 0, end), 0);
+    }
+    long start = Long.MAX_VALUE - 1, end = Long.MAX_VALUE;
+    double expected = RecentPlaybackPolicy.decay(1, start, end);
+    assertTrue(expected < 1);
+    assertEquals(expected, FeedbackMass.convert(1, 0, start, 0, end), 0);
   }
 
   private static double unscaled(double value, FeedbackMass mass) {

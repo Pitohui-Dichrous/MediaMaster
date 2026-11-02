@@ -30,18 +30,17 @@ public class PlaybackEntryFeedbackPolicyTest {
   }
 
   @Test
-  public void quickSkipBoundaryIsStrictAndZeroTimeStillAllowsExplicitSkip() {
+  public void quickSkipRequiresMoreThanHalfASecondAndLessThanOneAndAHalfSeconds() {
     PlaybackEntryFeedbackPolicy policy = policy(false);
-    assertEquals(DISLIKE, policy.depart(true, 0));
-    policy.start(false);
-    policy.update(true, 100);
-    assertEquals(DISLIKE, policy.depart(true, 1599));
-    policy.start(false);
-    policy.update(true, 100);
-    assertEquals(NONE, policy.depart(true, 1600));
-    policy.start(false);
-    policy.update(true, 100);
-    assertEquals(NONE, policy.depart(true, 3100));
+    assertEquals(NONE, policy.depart(true, 0));
+    for (long watched : new long[] {0, 1, 499, 500, 501, 1000, 1499, 1500, 3000}) {
+      policy.start(false);
+      policy.update(true, 100);
+      assertEquals(
+          "Actual watched time: " + watched,
+          watched > 500 && watched < 1500 ? DISLIKE : NONE,
+          policy.depart(true, 100 + watched));
+    }
   }
 
   @Test
@@ -114,15 +113,33 @@ public class PlaybackEntryFeedbackPolicyTest {
   }
 
   @Test
-  public void nextVideoDoesNotInheritSearchExemption() {
+  public void everyEntryInASearchWindowRetainsSearchExemption() {
     PlaybackEntryFeedbackPolicy policy = policy(true);
     policy.update(true, 0);
-    assertEquals(NONE, policy.depart(true, 500));
-    policy.start(false);
-    assertFalse(policy.fromSearch());
+    assertEquals(NONE, policy.depart(true, 1000));
+    policy.start(true);
+    assertTrue(policy.fromSearch());
     assertFalse(policy.departed());
-    policy.update(true, 500);
-    assertEquals(DISLIKE, policy.depart(true, 1000));
+    policy.update(true, 1000);
+    assertEquals(NONE, policy.depart(true, 2000));
+    policy.start(true);
+    policy.update(true, 2000);
+    assertEquals(LIKE, policy.update(true, 5001));
+    assertEquals(NONE, policy.depart(true, 6000));
+  }
+
+  @Test
+  public void onlyEligibleGlanceTimeCountsAcrossPauses() {
+    PlaybackEntryFeedbackPolicy policy = policy(false);
+    policy.update(true, 100);
+    policy.update(false, 400);
+    policy.update(false, 100_000);
+    policy.update(true, 100_000);
+    policy.update(false, 100_201);
+    assertEquals(DISLIKE, policy.depart(true, 900_000));
+    policy.start(false);
+    policy.update(false, 1_000_000);
+    assertEquals(NONE, policy.depart(true, 2_000_000));
   }
 
   @Test
@@ -163,7 +180,7 @@ public class PlaybackEntryFeedbackPolicyTest {
     policy.start(false);
     assertEquals(NONE, policy.update(true, -1));
     assertEquals(NONE, policy.update(true, Long.MAX_VALUE - 1));
-    assertEquals(DISLIKE, policy.depart(true, Long.MAX_VALUE));
+    assertEquals(NONE, policy.depart(true, Long.MAX_VALUE));
   }
 
   private static PlaybackEntryFeedbackPolicy policy(boolean fromSearch) {

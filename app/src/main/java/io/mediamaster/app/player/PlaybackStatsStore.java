@@ -28,6 +28,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.function.LongSupplier;
+import java.util.function.Supplier;
 
 /** Private aggregate play counts. UI queries never open the database or read media files. */
 public final class PlaybackStatsStore {
@@ -317,9 +318,24 @@ public final class PlaybackStatsStore {
     }
   }
 
+  /** Compound manual/inferred changes share this lock and never perform disk I/O here. */
+  <T> T mutateVotes(Supplier<T> mutation) {
+    synchronized (lock) {
+      return mutation.get();
+    }
+  }
+
   /** Reindex only after an owned identity change; no persistent alias list or session registry. */
   Object refreshSessionVotes(
       Map<String, VoteContribution> votes, Map<String, String> aliases, Object observed) {
+    return refreshSessionVotes(votes, aliases, observed, false);
+  }
+
+  Object refreshSessionVotes(
+      Map<String, VoteContribution> votes,
+      Map<String, String> aliases,
+      Object observed,
+      boolean retainConsumed) {
     synchronized (lock) {
       if (resetPending || capacityPending || observed == identityGeneration) return observed;
       Map<String, VoteContribution> updated = new HashMap<>();
@@ -327,16 +343,19 @@ public final class PlaybackStatsStore {
       boolean removedDuplicate = false;
       for (Map.Entry<String, VoteContribution> vote : votes.entrySet()) {
         VoteContribution contribution = vote.getValue();
-        if (!isCurrent(contribution)) continue;
+        if (!isCurrent(contribution)
+            && (!retainConsumed || contribution.generation != voteGeneration)) continue;
         redirected.put(vote.getKey(), contribution.key);
         redirected.put(contribution.originKey, contribution.key);
         VoteContribution existing = updated.get(contribution.key);
         if (existing == null) updated.put(contribution.key, contribution);
         else {
           boolean replace =
-              contribution.order > existing.order
-                  || contribution.order == existing.order
-                      && contribution.originKey.compareTo(existing.originKey) > 0;
+              isCurrent(contribution) && !isCurrent(existing)
+                  || isCurrent(contribution) == isCurrent(existing)
+                      && (contribution.order > existing.order
+                          || contribution.order == existing.order
+                              && contribution.originKey.compareTo(existing.originKey) > 0);
           withdrawContribution(replace ? existing : contribution, now());
           if (replace) updated.put(contribution.key, contribution);
           removedDuplicate = true;
@@ -399,6 +418,7 @@ public final class PlaybackStatsStore {
       if (previous != null && isCurrent(previous)) key = previous.key;
       String origin = previous != null && isCurrent(previous) ? previous.originKey : key;
       Record record = recordFor(key);
+      if (record.deleted) return null;
       if (!record.loaded) {
         requestHydration(record);
         return null;
@@ -478,7 +498,7 @@ public final class PlaybackStatsStore {
     double amount;
     int exponent;
     long updated;
-    boolean valid = true;
+    boolean valid = true, retainConsumed;
 
     VoteContribution(
         String key,
@@ -506,6 +526,7 @@ public final class PlaybackStatsStore {
   public double weight(VideoItem item) {
     synchronized (lock) {
       Record record = recordFor(key(item));
+      if (record.deleted) return 1;
       if (!record.loaded) {
         requestHydration(record);
         return Double.NaN;
@@ -610,6 +631,7 @@ public final class PlaybackStatsStore {
    */
   public void recordPlay(VideoItem item) {
     synchronized (lock) {
+      if (recordFor(key(item)).deleted) return;
       if (resetPending) {
         afterReset.add(() -> recordPlay(item));
         return;
@@ -651,6 +673,7 @@ public final class PlaybackStatsStore {
 
   private void applyView(Record record, long at) {
     record = record.resolve();
+    if (record.deleted) return;
     Entry previous = correctFutureAnchor(record.entry, at);
     long count = previous == null ? 1 : add(previous.count, 1);
     long recordedAt = Math.max(at, add(lastRecordedAt, 1));
@@ -680,6 +703,60 @@ public final class PlaybackStatsStore {
       }
       migrations.add(new String[] {before, after});
       io.execute(this::flushPending);
+    }
+  }
+
+  /**
+   * Remove all aggregate history only after the caller has confirmed that file deletion succeeded.
+   */
+  public void remove(VideoItem item) {
+    synchronized (lock) {
+      Set<String> removed = new HashSet<>();
+      removed.add(key(item));
+      Record target = recordFor(key(item)).resolve();
+      removed.add(target.key);
+      // Include a rename waiting on the serial writer and any live pre-rename queue references.
+      boolean expanded;
+      do {
+        expanded = false;
+        for (String[] move : migrations) {
+          if (removed.contains(move[0]) || removed.contains(move[1])) {
+            expanded |= removed.add(move[0]);
+            expanded |= removed.add(move[1]);
+          }
+        }
+        for (RecordReference reference : retained.values()) {
+          Record record = reference.get();
+          if (record != null && removed.contains(record.resolve().key))
+            expanded |= removed.add(record.key);
+        }
+      } while (expanded);
+      for (String key : removed) {
+        Record record = rawRecord(key);
+        record.deleted = true;
+        record.loaded = true;
+        record.entry = null;
+        record.pending = null;
+        pendingRecords.remove(key);
+        cache(record);
+      }
+      migrations.removeIf(move -> removed.contains(move[0]) || removed.contains(move[1]));
+      for (VoteContribution contribution : new ArrayList<>(activeContributions.keySet())) {
+        if (removed.contains(contribution.key)) {
+          contribution.valid = false;
+          activeContributions.remove(contribution);
+        }
+      }
+      identityGeneration = new Object();
+      Runnable erase =
+          () -> {
+            for (String key : removed) dirty.put(key, null);
+            io.execute(this::flushPending);
+          };
+      // Reset clears dirty entries after its transaction; queue this erase after that point.
+      if (resetPending) afterReset.add(erase);
+      else if (capacityPending) afterCapacity.add(erase);
+      else erase.run();
     }
   }
 
@@ -752,7 +829,7 @@ public final class PlaybackStatsStore {
   private static final class Record {
     final String key;
     Entry entry;
-    boolean loaded, loading;
+    boolean loaded, loading, deleted;
     Record redirect;
     Entry pending;
     double pendingCeiling;
@@ -884,6 +961,7 @@ public final class PlaybackStatsStore {
   }
 
   private void publishLoaded(Record record, Entry entry) {
+    if (record.deleted) return;
     record.loaded = true;
     record.entry = dirty.containsKey(record.key) ? dirty.get(record.key) : entry;
     if (record.entry != null) {
@@ -956,6 +1034,8 @@ public final class PlaybackStatsStore {
       for (String[] migration : queued) {
         Record beforeRecord = migrationRecords.get(migration[0]).resolve();
         Record afterRecord = migrationRecords.get(migration[1]).resolve();
+        if (beforeRecord.deleted || afterRecord.deleted || !migrations.contains(migration))
+          continue;
         if (beforeRecord == afterRecord) {
           afterRecord = new Record(migration[1]);
           afterRecord.loaded = true;
@@ -967,9 +1047,9 @@ public final class PlaybackStatsStore {
           // token, retaining the existing behavior of absent database rows and prepared weights.
           boolean movedCancellation = false;
           for (VoteContribution contribution : activeContributions.keySet()) {
-            if (contribution.vote == 0
-                && contribution.key.equals(migration[0])
-                && isCurrent(contribution)) {
+            if (contribution.key.equals(migration[0])
+                && (contribution.vote == 0 && isCurrent(contribution)
+                    || contribution.retainConsumed && !contribution.valid)) {
               contribution.key = migration[1];
               contribution.record = afterRecord;
               movedCancellation = true;
@@ -1214,7 +1294,9 @@ public final class PlaybackStatsStore {
       for (VoteContribution contribution : new ArrayList<>(activeContributions.keySet())) {
         if (keys.contains(contribution.key)) {
           contribution.valid = false;
-          activeContributions.remove(contribution);
+          // A hidden event remains consumed in its scope even after its aggregate is evicted.
+          // Keep only its weak identity token so a later owned rename can carry that marker too.
+          if (!contribution.retainConsumed) activeContributions.remove(contribution);
         }
       }
       identityGeneration = new Object();

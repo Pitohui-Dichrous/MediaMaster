@@ -32,17 +32,59 @@ public final class FeedbackWeightPolicyTest {
   }
 
   @Test
-  public void sharedSevenDayDecayRestoresTheOrdinaryBaselineAsFeedbackBecomesOld() {
-    long week = RecentPlaybackPolicy.HALF_LIFE_MS;
-    assertEquals(32, FeedbackWeightPolicy.decay(64, 100, 100 + week), 0);
+  public void sharedThreeDayDecayRestoresTheOrdinaryBaselineAsFeedbackBecomesOld() {
+    long halfLife = RecentPlaybackPolicy.HALF_LIFE_MS;
+    assertEquals(32, FeedbackWeightPolicy.decay(64, 100, 100 + halfLife), 0);
     double originalOffset = FeedbackWeightPolicy.weight(63, 64, 64, 0) - .125;
-    double oldScore = RecentPlaybackPolicy.decay(63, 0, 20 * week);
-    double oldMass = FeedbackWeightPolicy.decay(64, 0, 20 * week);
+    double oldScore = RecentPlaybackPolicy.decay(63, 0, 20 * halfLife);
+    double oldMass = FeedbackWeightPolicy.decay(64, 0, 20 * halfLife);
     double oldOffset =
         FeedbackWeightPolicy.weight(oldScore, oldMass, oldMass, 0)
             - WeightedShuffle.weight(oldScore);
     assertTrue(originalOffset > 1);
     assertTrue(oldOffset >= 0 && oldOffset < .00001);
+  }
+
+  @Test
+  public void threeDayClockKeepsWatchingLikesDislikesAndUndoTokensInTheSameUnit() {
+    long start = 1_700_000_000_000L;
+    long threeDays = 3L * 24 * 60 * 60 * 1000;
+    FeedbackMass original = FeedbackMass.of(32, 12, 4, 0);
+    FeedbackMass decayed = original.decay(start, start + threeDays);
+    assertEquals(16, RecentPlaybackPolicy.decay(32, start, start + threeDays), 0);
+    assertEquals(16, decayed.exposure, 0);
+    assertEquals(6, decayed.likes, 0);
+    assertEquals(2, decayed.dislikes, 0);
+    double oldVote = FeedbackMass.convert(1, 0, start, decayed.exponent, start + threeDays);
+    assertEquals(.5, oldVote, 0);
+    FeedbackMass cancelled = decayed.withVotes(decayed.likes - oldVote, decayed.dislikes);
+    assertEquals(5.5, cancelled.likes, 0);
+    assertEquals(decayed.exposure, cancelled.exposure, 0);
+    assertEquals(decayed.dislikes, cancelled.dislikes, 0);
+  }
+
+  @Test
+  public void shorteningMemoryChangesRecoveryTimeWithoutChangingFreshActionStrengthOrBounds() {
+    long day = 24L * 60 * 60 * 1000;
+    double fresh = FeedbackWeightPolicy.weight(8, 8, 4, 1);
+    double afterThreeDays =
+        FeedbackWeightPolicy.weight(
+            RecentPlaybackPolicy.decay(8, 0, 3 * day),
+            FeedbackMass.of(8, 4, 1, 0).decay(0, 3 * day));
+    assertEquals(FeedbackWeightPolicy.weight(4, 4, 2, .5), afterThreeDays, 0);
+    assertEquals(FeedbackWeightPolicy.weight(8, FeedbackMass.of(8, 4, 1, 0)), fresh, 0);
+    for (long age : new long[] {0, day, 3 * day, 30 * day, Long.MAX_VALUE}) {
+      double score = RecentPlaybackPolicy.decay(63, 0, age);
+      for (FeedbackMass feedback :
+          new FeedbackMass[] {
+            FeedbackMass.of(1_000_000, 1_000_000, 0, 0), FeedbackMass.of(1_000_000, 0, 1_000_000, 0)
+          }) {
+        double weight = FeedbackWeightPolicy.weight(score, feedback.decay(0, age));
+        assertTrue(Double.isFinite(weight));
+        assertTrue(weight >= FeedbackWeightPolicy.MIN_WEIGHT);
+        assertTrue(weight <= FeedbackWeightPolicy.MAX_WEIGHT);
+      }
+    }
   }
 
   @Test

@@ -18,6 +18,7 @@ import io.mediamaster.app.media.*;
 import io.mediamaster.app.player.PlaybackStatsStore;
 import io.mediamaster.app.player.PlayerActivity;
 import io.mediamaster.app.player.RandomWeightsDialog;
+import io.mediamaster.app.player.SearchFeedbackRounds;
 import io.mediamaster.app.player.WeightedShuffle;
 import java.text.*;
 import java.util.*;
@@ -53,6 +54,7 @@ public class MainActivity extends Activity {
   private int sort = 0;
   private int renderedDateKind = -1;
   private String query = "";
+  private String searchRound;
   private Parcelable restoredListState;
   private VideoItem pendingItem;
   private String pendingName;
@@ -85,6 +87,7 @@ public class MainActivity extends Activity {
     sort = getPreferences(0).getInt("sort", 0);
     if (state != null) {
       query = state.getString("library_query", "");
+      searchRound = state.getString("library_search_round");
       restoredListState = state.getParcelable("library_scroll");
       fullScanAfterPermission = state.getBoolean("full_scan_after_permission");
     }
@@ -183,6 +186,10 @@ public class MainActivity extends Activity {
           public void beforeTextChanged(CharSequence s, int st, int c, int a) {}
 
           public void onTextChanged(CharSequence s, int st, int before, int c) {
+            if (!searchKey(query).equals(searchKey(s.toString()))) {
+              SearchFeedbackRounds.forget(searchRound);
+              searchRound = null;
+            }
             query = s.toString();
             clear.setVisibility(s.length() == 0 ? View.INVISIBLE : View.VISIBLE);
             filter();
@@ -480,6 +487,7 @@ public class MainActivity extends Activity {
   @Override
   protected void onDestroy() {
     destroyed = true;
+    if (isFinishing()) SearchFeedbackRounds.forget(searchRound);
     if (playbackStats != null) playbackStats.removeCapacityListener(capacityNotice);
     mediaObserver.stop();
     handler.removeCallbacksAndMessages(null);
@@ -804,6 +812,15 @@ public class MainActivity extends Activity {
     open(index, shuffle, false);
   }
 
+  private static String searchKey(String value) {
+    return value.trim().toLowerCase(Locale.ROOT);
+  }
+
+  private String activeSearchRound() {
+    if (searchRound == null) searchRound = SearchFeedbackRounds.create(playbackStats);
+    return searchRound;
+  }
+
   private void open(int index, boolean shuffle, boolean randomEntry) {
     if (visible.isEmpty()) {
       toast("暂无视频");
@@ -814,12 +831,17 @@ public class MainActivity extends Activity {
     search.clearFocus();
     ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE))
         .hideSoftInputFromWindow(search.getWindowToken(), 0);
-    if (randomEntry) {
+    if (!query.trim().isEmpty()) {
+      Boolean portrait =
+          randomEntry
+              ? getSharedPreferences("player", MODE_PRIVATE).getBoolean(RANDOM_START_PORTRAIT, true)
+              : null;
+      PlayerActivity.launchFromSearch(
+          this, new ArrayList<>(visible), index, shuffle, portrait, activeSearchRound());
+    } else if (randomEntry) {
       boolean portrait =
           getSharedPreferences("player", MODE_PRIVATE).getBoolean(RANDOM_START_PORTRAIT, true);
       PlayerActivity.launch(this, new ArrayList<>(visible), index, shuffle, portrait);
-    } else if (!query.trim().isEmpty()) {
-      PlayerActivity.launchFromSearch(this, new ArrayList<>(visible), index, shuffle);
     } else {
       PlayerActivity.launch(this, new ArrayList<>(visible), index, shuffle);
     }
@@ -1292,6 +1314,7 @@ public class MainActivity extends Activity {
   private void persistMutation(VideoItem original, VideoItem replacement, String message) {
     repository.rememberMutation(original, replacement);
     if (replacement != null) playbackStats.migrate(original, replacement);
+    else playbackStats.remove(original);
     List<VideoItem> items = repository.snapshot();
     handler.post(
         () -> {
@@ -1397,6 +1420,7 @@ public class MainActivity extends Activity {
     super.onSaveInstanceState(state);
     state.putBoolean("full_scan_after_permission", fullScanAfterPermission);
     state.putString("library_query", query);
+    state.putString("library_search_round", searchRound);
     if (list != null && list.getLayoutManager() != null)
       state.putParcelable("library_scroll", list.getLayoutManager().onSaveInstanceState());
     if (pendingWaitConsent && pendingItem != null) {

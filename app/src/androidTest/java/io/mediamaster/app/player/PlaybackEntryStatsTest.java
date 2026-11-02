@@ -57,7 +57,7 @@ public final class PlaybackEntryStatsTest {
   private PlayerActivity activity;
   private PlaybackStatsStore store, originalStore;
   private Field singleton;
-  private String databaseName;
+  private String databaseName, searchRoundId;
   private boolean storeInstalled, preferencesSaved;
   private ScopedPlaybackHistory history;
   private final Map<String, Integer> preferences = new HashMap<>();
@@ -198,6 +198,24 @@ public final class PlaybackEntryStatsTest {
   }
 
   @Test
+  public void halfSecondAccidentalOpenIsNotAnExtraDislike() throws Exception {
+    launch(new ArrayList<>(videos.subList(0, 1)));
+    pauseReadyAt(500);
+    finishAndWait();
+    assertFeedback(0, 0, 0);
+    assertEquals(0, store.playCount(videos.get(0)));
+  }
+
+  @Test
+  public void justOverHalfSecondGlanceCreatesAnExtraDislike() throws Exception {
+    launch(new ArrayList<>(videos.subList(0, 1)));
+    pauseReadyAt(501);
+    finishAndWait();
+    assertFeedback(0, 0, 1);
+    assertEquals(0, store.playCount(videos.get(0)));
+  }
+
+  @Test
   public void manualCloseAtExactlyOneAndAHalfSecondsDoesNotDislike() throws Exception {
     launch(new ArrayList<>(videos.subList(0, 1)));
     pauseReadyAt(1500);
@@ -212,6 +230,7 @@ public final class PlaybackEntryStatsTest {
     awaitWatching(3001);
     pauseAndReadWatched();
     assertFeedback(0, 1, 0);
+    assertManualFeedback(0);
     assertEquals(0, store.playCount(videos.get(0)));
     resume();
     await(() -> onMain(() -> current().isPlaying()));
@@ -232,16 +251,119 @@ public final class PlaybackEntryStatsTest {
   }
 
   @Test
-  public void searchExemptionEndsWhenNavigatingToTheNextOrdinaryVideo() throws Exception {
+  public void everyVideoInSearchPlaybackIsExemptAndReceivesOnlyOneExtraLike() throws Exception {
     launch(videos, true);
     pauseReadyAt(1499);
     click("下一条");
     await(() -> onMain(() -> current().index == 1));
-    awaitCount(1, 1);
+    awaitWatching(3001);
     pauseAndReadWatched();
     assertEquals(0, store.playCount(videos.get(0)));
+    assertEquals(0, store.playCount(videos.get(1)));
     assertFeedback(0, 0, 0);
-    assertFeedback(1, 0, 0);
+    assertFeedback(1, 1, 0);
+    assertManualFeedback(0);
+    click("上一条");
+    await(() -> onMain(() -> current().index == 0));
+    awaitWatching(3001);
+    pauseAndReadWatched();
+    assertFeedback(0, 1, 0);
+    click("下一条");
+    await(() -> onMain(() -> current().index == 1));
+    awaitWatching(3001);
+    pauseAndReadWatched();
+    assertFeedback(1, 1, 0);
+    assertEquals(0, store.playCount(videos.get(0)));
+    assertEquals(0, store.playCount(videos.get(1)));
+  }
+
+  @Test
+  public void extraDislikeStaysHiddenAndCanBeCancelledByManualLikeAfterReturning()
+      throws Exception {
+    launch(videos);
+    pauseReadyAt(1000);
+    click("下一条");
+    await(() -> onMain(() -> current().index == 1));
+    pauseReadyAt(1500);
+    assertFeedback(0, 0, 1);
+    click("上一条");
+    await(() -> onMain(() -> current().index == 0));
+    pauseReadyAt(1000);
+    assertManualFeedback(0);
+    click("点赞");
+    assertManualFeedback(1);
+    assertFeedback(0, 1, 0);
+    click("取消点赞");
+    assertManualFeedback(0);
+    assertFeedback(0, 0, 0);
+    click("下一条");
+    await(() -> onMain(() -> current().index == 1));
+    pauseReadyAt(1500);
+    assertFeedback(0, 0, 0);
+  }
+
+  @Test
+  public void manualLikeAddsSeparatelyToHiddenSearchLikeAndCancelsOnlyItsOwnMass()
+      throws Exception {
+    launch(videos, true);
+    awaitWatching(3001);
+    pauseAndReadWatched();
+    assertManualFeedback(0);
+    assertFeedback(0, 1, 0);
+    click("点赞");
+    assertManualFeedback(1);
+    assertFeedback(0, 2, 0);
+    click("取消点赞");
+    assertManualFeedback(0);
+    assertFeedback(0, 1, 0);
+    assertEquals(0, store.playCount(videos.get(0)));
+  }
+
+  @Test
+  public void searchRoundDeduplicatesReopenedPlayersAndRetainsManualDislikeCancellation()
+      throws Exception {
+    launch(videos, true);
+    awaitWatching(3001);
+    pauseAndReadWatched();
+    assertFeedback(0, 1, 0);
+    finishAndWait();
+    launch(videos, true);
+    awaitWatching(3001);
+    pauseAndReadWatched();
+    assertManualFeedback(0);
+    assertFeedback(0, 1, 0);
+    click("点踩");
+    assertManualFeedback(-1);
+    assertFeedback(0, 0, 1);
+    finishAndWait();
+    launch(videos, true);
+    awaitWatching(3001);
+    pauseAndReadWatched();
+    assertManualFeedback(0);
+    assertFeedback(0, 0, 1);
+    assertEquals(0, store.playCount(videos.get(0)));
+    finishAndWait();
+    searchRoundId = null;
+    launch(videos, true);
+    awaitWatching(3001);
+    pauseAndReadWatched();
+    assertFeedback(0, 1, 1);
+    assertEquals(0, store.playCount(videos.get(0)));
+  }
+
+  @Test
+  public void unknownRestoredSearchRoundKeepsExemptionWithoutDuplicatingExtraLikes()
+      throws Exception {
+    searchRoundId = "restored-unavailable-round-" + UUID.randomUUID();
+    launch(videos, true);
+    awaitWatching(3001);
+    pauseAndReadWatched();
+    assertFeedback(0, 0, 0);
+    assertEquals(0, store.playCount(videos.get(0)));
+    assertManualFeedback(0);
+    click("点赞");
+    assertFeedback(0, 1, 0);
+    assertManualFeedback(1);
   }
 
   @Test
@@ -591,12 +713,24 @@ public final class PlaybackEntryStatsTest {
   }
 
   private void launch(ArrayList<VideoItem> items, boolean fromSearch) {
+    if (fromSearch && searchRoundId == null) searchRoundId = SearchFeedbackRounds.create(store);
     activity =
         rule.launchActivity(
             new Intent(context, PlayerActivity.class)
                 .putExtra("queue", QueueStore.put(context, items))
                 .putExtra("index", 0)
-                .putExtra("from_search", fromSearch));
+                .putExtra("from_search", fromSearch)
+                .putExtra("search_round", fromSearch ? searchRoundId : null));
+  }
+
+  private void assertManualFeedback(int expected) throws Exception {
+    onMain(
+        () -> {
+          assertEquals(expected, ((PlaybackVoteSession) read("voteSession")).vote(current().item));
+          assertEquals(expected == 1, ((View) read("likeButton")).isSelected());
+          assertEquals(expected == -1, ((View) read("dislikeButton")).isSelected());
+          return null;
+        });
   }
 
   /** Freeze a real prepared page at an exact logical boundary, not a scheduler-dependent sleep. */
@@ -637,7 +771,7 @@ public final class PlaybackEntryStatsTest {
         assertEquals(0, likes, 0);
         assertEquals(0, dislikes, 0);
       } else {
-        // Seven-day decay can run between assertions; a second full vote is still unambiguous.
+        // Three-day decay can run between assertions; a second full vote is still unambiguous.
         assertEquals(likes, Math.scalb(row.getDouble(0), row.getInt(2)), 0.0001);
         assertEquals(dislikes, Math.scalb(row.getDouble(1), row.getInt(2)), 0.0001);
       }

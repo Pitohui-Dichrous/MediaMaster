@@ -2,6 +2,7 @@ package io.mediamaster.app.player;
 
 /** Converts one entry's qualified viewing into one statistical action at each boundary. */
 public final class PlaybackEntryFeedbackPolicy {
+  public static final long GLANCE_MIN_MS = 500;
   public static final long QUICK_SKIP_MS = 1500;
 
   public enum Action {
@@ -19,7 +20,7 @@ public final class PlaybackEntryFeedbackPolicy {
     this.tracker = tracker;
   }
 
-  /** Only the video directly opened from search is special; subsequent entries start with false. */
+  /** Every entry inherits its playback window's source; search remains special when navigating. */
   public void start(boolean fromSearch) {
     restore(fromSearch, 0, false, false);
   }
@@ -41,15 +42,18 @@ public final class PlaybackEntryFeedbackPolicy {
   /**
    * Call only when the current entry really leaves, never just because playback is suspended.
    * Natural completion and error recovery can qualify viewing but cannot create a quick-skip vote.
-   * The playback-window vote session separately enforces manual precedence and per-video limits.
+   * The separate extra-feedback scope enforces manual overrides and per-video limits.
    */
   public Action depart(boolean userInitiated, long elapsedRealtimeMs) {
     if (departed) return Action.NONE;
     Action settled = update(false, elapsedRealtimeMs);
     departed = true;
     if (settled != Action.NONE) return settled;
-    if (userInitiated && !fromSearch && !tracker.recorded() && tracker.watchedMs() < QUICK_SKIP_MS)
-      return Action.DISLIKE;
+    if (userInitiated
+        && !fromSearch
+        && !tracker.recorded()
+        && tracker.watchedMs() > GLANCE_MIN_MS
+        && tracker.watchedMs() < QUICK_SKIP_MS) return Action.DISLIKE;
     return Action.NONE;
   }
 

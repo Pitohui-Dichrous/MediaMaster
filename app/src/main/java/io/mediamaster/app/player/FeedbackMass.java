@@ -114,9 +114,7 @@ public final class FeedbackMass {
   }
 
   private static double halfLives(long updated, long now) {
-    return now <= updated
-        ? 0
-        : ((double) now - (double) updated) / RecentPlaybackPolicy.HALF_LIFE_MS;
+    return RecentPlaybackPolicy.elapsedHalfLives(updated, now);
   }
 
   private static double scale(double value, double power) {

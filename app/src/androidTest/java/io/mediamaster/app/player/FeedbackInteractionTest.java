@@ -234,6 +234,58 @@ public final class FeedbackInteractionTest {
   }
 
   @Test
+  public void hiddenPortraitSingleTapRevealsControlsBeforePausing() throws Exception {
+    launch(true);
+    setPlaying(true);
+    onMain(
+        () -> {
+          invoke(player, "setChrome", new Class<?>[] {boolean.class}, false);
+          return null;
+        });
+    tap();
+    awaitTapConfirmation();
+    assertTrue("The first tap must not interrupt video", playRequested());
+    assertTrue(onMain(() -> (boolean) read(player, "chromeVisible")));
+    assertVote(0);
+    tap();
+    awaitTapConfirmation();
+    assertFalse("A subsequent single tap with controls visible pauses", playRequested());
+  }
+
+  @Test
+  public void hiddenPortraitSingleTapDoesNotResumePausedVideo() throws Exception {
+    launch(true);
+    setPlaying(false);
+    onMain(
+        () -> {
+          invoke(player, "setChrome", new Class<?>[] {boolean.class}, false);
+          return null;
+        });
+    tap();
+    awaitTapConfirmation();
+    assertFalse(playRequested());
+    assertTrue(onMain(() -> (boolean) read(player, "chromeVisible")));
+    tap();
+    awaitTapConfirmation();
+    assertTrue(playRequested());
+  }
+
+  @Test
+  public void hiddenPortraitDoubleTapStillLikesWithoutPausing() throws Exception {
+    launch(true);
+    setPlaying(true);
+    onMain(
+        () -> {
+          invoke(player, "setChrome", new Class<?>[] {boolean.class}, false);
+          return null;
+        });
+    doubleTap();
+    awaitTapConfirmation();
+    assertVote(1);
+    assertTrue("Double-tap recognition cannot leak a pause", playRequested());
+  }
+
+  @Test
   public void portraitDoubleTapLikesWithoutPlaybackToggleOrStackedWeight() throws Exception {
     double baseline = seedModerateExposure();
     launch(true);

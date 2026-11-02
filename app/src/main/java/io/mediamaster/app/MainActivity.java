@@ -818,6 +818,8 @@ public class MainActivity extends Activity {
       boolean portrait =
           getSharedPreferences("player", MODE_PRIVATE).getBoolean(RANDOM_START_PORTRAIT, true);
       PlayerActivity.launch(this, new ArrayList<>(visible), index, shuffle, portrait);
+    } else if (!query.trim().isEmpty()) {
+      PlayerActivity.launchFromSearch(this, new ArrayList<>(visible), index, shuffle);
     } else {
       PlayerActivity.launch(this, new ArrayList<>(visible), index, shuffle);
     }

@@ -307,7 +307,7 @@ public final class PlaybackStatsStore {
       return contribution.valid
           && contribution.generation == voteGeneration
           && contribution.record.resolve().loaded
-          && contribution.record.resolve().entry != null;
+          && (contribution.record.resolve().entry != null || contribution.vote == 0);
     }
   }
 
@@ -385,8 +385,16 @@ public final class PlaybackStatsStore {
 
   /** Apply/undo one live window's actual mass atomically; no permanent selected state is stored. */
   VoteContribution applyVote(String key, VoteContribution previous, int requested) {
+    return applyVote(key, previous, requested, null);
+  }
+
+  VoteContribution applyVote(
+      String key, VoteContribution previous, int requested, Object expectedGeneration) {
     if (requested < -1 || requested > 1) throw new IllegalArgumentException("Invalid vote");
     synchronized (lock) {
+      // The Activity/session precheck is insufficient: a reset can complete between that check
+      // and this mutation. Inferred events must be checked atomically against the database state.
+      if (expectedGeneration != null && expectedGeneration != voteGeneration) return null;
       if (!canAcceptVote()) return null;
       if (previous != null && isCurrent(previous)) key = previous.key;
       String origin = previous != null && isCurrent(previous) ? previous.originKey : key;
@@ -397,6 +405,18 @@ public final class PlaybackStatsStore {
       }
       long now = now();
       Entry entry = correctFutureAnchor(record.entry, now);
+      if (entry == null && requested == 0) {
+        // Remember a window's explicit cancellation without recreating an evicted aggregate or
+        // spending database capacity on a video with no history. A zero token still follows owned
+        // renames and is invalidated by a weight reset, just like a nonzero contribution.
+        long changed = Math.max(now, add(lastRecordedAt, 1));
+        lastRecordedAt = changed;
+        VoteContribution cancelled =
+            new VoteContribution(
+                key, origin, 0, 0, 0, now, changed, voteGeneration, record.resolve());
+        activeContributions.put(cancelled, Boolean.TRUE);
+        return cancelled;
+      }
       FeedbackMass mass = massAt(entry, now);
       if (previous != null && isCurrent(previous) && previous.key.equals(key)) {
         double removal = contributionAt(previous, mass.exponent, now);
@@ -942,7 +962,22 @@ public final class PlaybackStatsStore {
           retained.put(migration[1], new RecordReference(afterRecord, collectedRecords));
         }
         Entry before = correctFutureAnchor(beforeRecord.entry, now);
-        if (before == null) continue;
+        if (before == null) {
+          // A neutral, session-only cancellation has no aggregate to migrate. Move only its
+          // token, retaining the existing behavior of absent database rows and prepared weights.
+          boolean movedCancellation = false;
+          for (VoteContribution contribution : activeContributions.keySet()) {
+            if (contribution.vote == 0
+                && contribution.key.equals(migration[0])
+                && isCurrent(contribution)) {
+              contribution.key = migration[1];
+              contribution.record = afterRecord;
+              movedCancellation = true;
+            }
+          }
+          if (movedCancellation) identityGeneration = new Object();
+          continue;
+        }
         counts.remove(migration[0]);
         Entry after = correctFutureAnchor(afterRecord.entry, now);
         FeedbackMass merged = massAt(before, now).merge(massAt(after, now));

@@ -36,6 +36,7 @@ import android.view.MotionEvent;
 import android.view.VelocityTracker;
 import android.view.View;
 import android.view.ViewConfiguration;
+import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
@@ -72,7 +73,8 @@ public final class PlayerActivity extends Activity {
   private static final String EXTRA_QUEUE = "queue",
       EXTRA_INDEX = "index",
       EXTRA_SHUFFLE = "shuffle",
-      EXTRA_START_PORTRAIT = "start_portrait";
+      EXTRA_START_PORTRAIT = "start_portrait",
+      EXTRA_FROM_SEARCH = "from_search";
   private final Handler handler = new Handler(Looper.getMainLooper());
   private ArrayList<VideoItem> queue = new ArrayList<>();
   private PlaybackOrder order;
@@ -84,6 +86,8 @@ public final class PlayerActivity extends Activity {
   private boolean weightsLoading;
   private final ArrayList<Runnable> weightWaiters = new ArrayList<>();
   private final PlaybackWatchTracker watchTracker = new PlaybackWatchTracker();
+  private final PlaybackEntryFeedbackPolicy entryFeedback =
+      new PlaybackEntryFeedbackPolicy(watchTracker);
   private boolean mutatingPageWindow, resumed, watchStateSaved;
   private boolean navigationPending;
   private int navigationRequestGeneration;
@@ -91,7 +95,8 @@ public final class PlayerActivity extends Activity {
   private FrameLayout root, videoStage;
   private PlayerView exoView;
   private VLCVideoLayout vlcView;
-  private LinearLayout topBar, bottomBar;
+  private PlayerTopBar topBar;
+  private LinearLayout bottomBar, feedbackButtons, controlActions;
   private TextView title, subtitle, currentTime, totalTime, previewTime, hudValue;
   private ImageView previewImage, hudIcon;
   private LinearLayout seekPreview, gestureHud;
@@ -205,7 +210,13 @@ public final class PlayerActivity extends Activity {
 
   public static void launch(
       Activity activity, ArrayList<VideoItem> videos, int index, boolean shuffle) {
-    startPlayback(activity, videos, index, shuffle, null);
+    startPlayback(activity, videos, index, shuffle, null, false);
+  }
+
+  /** Only the directly selected search result receives search-entry feedback rules. */
+  public static void launchFromSearch(
+      Activity activity, ArrayList<VideoItem> videos, int index, boolean shuffle) {
+    startPlayback(activity, videos, index, shuffle, null, true);
   }
 
   public static void launch(
@@ -214,7 +225,7 @@ public final class PlayerActivity extends Activity {
       int index,
       boolean shuffle,
       boolean startPortrait) {
-    startPlayback(activity, videos, index, shuffle, startPortrait);
+    startPlayback(activity, videos, index, shuffle, startPortrait, false);
   }
 
   private static void startPlayback(
@@ -222,14 +233,16 @@ public final class PlayerActivity extends Activity {
       ArrayList<VideoItem> videos,
       int index,
       boolean shuffle,
-      Boolean startPortrait) {
+      Boolean startPortrait,
+      boolean fromSearch) {
     if (videos == null || videos.isEmpty()) return;
     String token = QueueStore.put(activity.getApplicationContext(), videos);
     Intent intent =
         new Intent(activity, PlayerActivity.class)
             .putExtra(EXTRA_QUEUE, token)
             .putExtra(EXTRA_INDEX, index)
-            .putExtra(EXTRA_SHUFFLE, shuffle);
+            .putExtra(EXTRA_SHUFFLE, shuffle)
+            .putExtra(EXTRA_FROM_SEARCH, fromSearch);
     if (startPortrait != null) intent.putExtra(EXTRA_START_PORTRAIT, startPortrait.booleanValue());
     activity.startActivity(intent);
   }
@@ -272,9 +285,13 @@ public final class PlayerActivity extends Activity {
         retained instanceof PlaybackVoteSession
             ? (PlaybackVoteSession) retained
             : new PlaybackVoteSession(playbackStats);
-    watchTracker.restore(
+    entryFeedback.restore(
+        state != null
+            ? state.getBoolean("play_entry_from_search", false)
+            : getIntent().getBooleanExtra(EXTRA_FROM_SEARCH, false),
         state != null ? state.getLong("play_entry_watched_ms", 0) : 0,
-        state != null && state.getBoolean("play_entry_recorded", false));
+        state != null && state.getBoolean("play_entry_recorded", false),
+        state != null && state.getBoolean("play_entry_departed", false));
     order = new PlaybackOrder(queue.size(), index, mode, new Random(), i -> queueWeights.weight(i));
     ensureQueueWeights(null);
     sensitivity = getSharedPreferences("player", MODE_PRIVATE).getFloat("seek_sensitivity", 1f);
@@ -369,30 +386,24 @@ public final class PlayerActivity extends Activity {
     likeEffect = new LikeEffectView(this);
     root.addView(likeEffect, new FrameLayout.LayoutParams(-1, -1));
 
-    topBar = new LinearLayout(this);
-    topBar.setGravity(Gravity.CENTER_VERTICAL);
-    topBar.setPadding(dp(8), dp(4), dp(8), dp(4));
     ImageButton back = icon(PlayerIcons.BACK, "返回", 48, TEXT);
     back.setOnClickListener(v -> finish());
-    topBar.addView(back);
     title = text(15, TEXT);
     title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
     title.setMaxLines(1);
     title.setEllipsize(TextUtils.TruncateAt.END);
     title.setPadding(dp(8), 0, dp(8), 0);
-    topBar.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
     subtitle = text(12, MUTED);
     subtitle.setSingleLine(true);
-    subtitle.setMaxWidth(dp(64));
-    subtitle.setEllipsize(TextUtils.TruncateAt.MIDDLE);
     subtitle.setPadding(dp(4), 0, dp(8), 0);
-    topBar.addView(subtitle);
+    feedbackButtons = new LinearLayout(this);
+    feedbackButtons.setGravity(Gravity.CENTER_VERTICAL);
     likeButton = feedbackButton("点赞");
     likeButton.setOnClickListener(v -> toggleFeedback(1));
-    topBar.addView(likeButton);
+    feedbackButtons.addView(likeButton);
     dislikeButton = feedbackButton("点踩");
     dislikeButton.setOnClickListener(v -> toggleFeedback(-1));
-    topBar.addView(dislikeButton);
+    feedbackButtons.addView(dislikeButton);
     rotateButton = icon(PlayerIcons.ROTATE, "旋转", 48, TEXT);
     rotateButton.setContentDescription("旋转画面，长按恢复自动方向");
     rotateButton.setOnClickListener(v -> toggleOrientation());
@@ -402,10 +413,10 @@ public final class PlayerActivity extends Activity {
           adaptOrientation(videoWidth(), videoHeight());
           return true;
         });
-    topBar.addView(rotateButton);
     ImageButton more = icon(PlayerIcons.MORE, "播放设置", 48, TEXT);
     more.setOnClickListener(v -> showSettings());
-    topBar.addView(more);
+    topBar = new PlayerTopBar(this, back, title, subtitle, feedbackButtons, rotateButton, more);
+    topBar.setPadding(dp(8), dp(4), dp(8), dp(4));
     root.addView(topBar, new FrameLayout.LayoutParams(-1, -2, Gravity.TOP));
 
     bottomBar = new LinearLayout(this);
@@ -503,8 +514,10 @@ public final class PlayerActivity extends Activity {
           }
           return false;
         });
-    LinearLayout controls = new LinearLayout(this);
-    controls.setGravity(Gravity.CENTER);
+    controlActions = new LinearLayout(this);
+    controlActions.setGravity(Gravity.CENTER_VERTICAL);
+    LinearLayout transport = new LinearLayout(this);
+    transport.setGravity(Gravity.CENTER);
     modeButton = icon(PlayerIcons.REPEAT, "播放模式", 48, TEXT);
     modeButton.setOnClickListener(v -> cycleMode());
     modeButton.setOnLongClickListener(
@@ -512,11 +525,10 @@ public final class PlayerActivity extends Activity {
           choosePlaybackMode();
           return true;
         });
-    controls.addView(modeButton);
-    space(controls);
+    controlActions.addView(modeButton);
     ImageButton previous = icon(PlayerIcons.PREVIOUS, "上一条", 48, TEXT);
     previous.setOnClickListener(v -> navigateRelative(false));
-    controls.addView(previous);
+    transport.addView(previous);
     playButton = icon(PlayerIcons.PAUSE, "暂停", 56, TEXT);
     playButton.setPadding(dp(14), dp(14), dp(14), dp(14));
     playButton.setBackground(ripple(0x33272637));
@@ -527,15 +539,13 @@ public final class PlayerActivity extends Activity {
         });
     LinearLayout.LayoutParams playParams = new LinearLayout.LayoutParams(dp(56), dp(56));
     playParams.setMargins(dp(8), 0, dp(8), 0);
-    controls.addView(playButton, playParams);
+    transport.addView(playButton, playParams);
     ImageButton next = icon(PlayerIcons.NEXT, "下一条", 48, TEXT);
     next.setOnClickListener(v -> navigateRelative(true));
-    controls.addView(next);
-    space(controls);
+    transport.addView(next);
     portraitButton = icon(PlayerIcons.PORTRAIT_MODE, "竖屏播放", 48, TEXT);
     portraitButton.setOnClickListener(v -> setPortraitMode(!portraitMode));
-    controls.addView(portraitButton);
-    bottomBar.addView(controls);
+    bottomBar.addView(new PlayerControlBar(this, controlActions, transport, portraitButton));
     root.addView(bottomBar, new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM));
 
     seekPreview = new LinearLayout(this);
@@ -828,6 +838,12 @@ public final class PlayerActivity extends Activity {
 
   private void updatePresentationUi() {
     if (portraitButton == null) return;
+    ViewGroup feedbackParent = portraitMode ? topBar : controlActions;
+    if (feedbackButtons.getParent() != feedbackParent) {
+      ((ViewGroup) feedbackButtons.getParent()).removeView(feedbackButtons);
+      if (portraitMode) topBar.addView(feedbackButtons, 3);
+      else controlActions.addView(feedbackButtons);
+    }
     portraitButton.setImageDrawable(
         new PlayerIcons(portraitMode ? PlayerIcons.FULLSCREEN : PlayerIcons.PORTRAIT_MODE, TEXT));
     portraitButton.setContentDescription(portraitMode ? "全屏播放" : "竖屏播放");
@@ -907,7 +923,7 @@ public final class PlayerActivity extends Activity {
           // Incoming already owns a prepared decoder and rendered first frame. Never reopen it
           // here.
           if (chosen != 0) {
-            stopWatching();
+            finishEntry(true);
             if (chosen > 0) order.next(false);
             else order.previous();
             adoptPreparedPage(chosen);
@@ -926,7 +942,7 @@ public final class PlayerActivity extends Activity {
     stopWatching();
     boolean wasMutating = mutatingPageWindow;
     mutatingPageWindow = true;
-    watchTracker.reset();
+    entryFeedback.start(false);
     try {
       invalidateCompletion();
       currentPage.setPlayback(false, false, false);
@@ -1187,7 +1203,8 @@ public final class PlayerActivity extends Activity {
 
   @Override
   protected void onPause() {
-    stopWatching();
+    if (isFinishing()) finishEntry(true);
+    else stopWatching();
     cancelTapRecognition();
     if (likeEffect != null) likeEffect.clear();
     resumed = false;
@@ -1225,6 +1242,13 @@ public final class PlayerActivity extends Activity {
     super.onDestroy();
   }
 
+  @Override
+  public void finish() {
+    // Explicit Back/close is a departure; backgrounding and recreation are not.
+    finishEntry(true);
+    super.finish();
+  }
+
   private void showCapacityNotice() {
     if (resumed && !isFinishing() && !isDestroyed() && playbackStats.consumeCapacityNotice())
       Toast.makeText(this, R.string.playback_database_full, Toast.LENGTH_LONG).show();
@@ -1257,6 +1281,8 @@ public final class PlayerActivity extends Activity {
     state.putBoolean("portrait_mode", portraitMode);
     state.putBoolean("play_entry_recorded", watchTracker.recorded());
     state.putLong("play_entry_watched_ms", watchTracker.watchedMs());
+    state.putBoolean("play_entry_from_search", entryFeedback.fromSearch());
+    state.putBoolean("play_entry_departed", entryFeedback.departed());
   }
 
   @Override
@@ -1513,8 +1539,10 @@ public final class PlayerActivity extends Activity {
           });
       return;
     }
-    stopWatching();
-    if (!automatic && queue.size() == 1) watchTracker.reset();
+    // A one-item sequential loop is still the same entry, even for clips shorter than 3 s.
+    if (automatic && queue.size() == 1) stopWatching();
+    else finishEntry(!automatic);
+    if (!automatic && queue.size() == 1) entryFeedback.start(false);
     changeVideo(forward ? order.next(false) : order.previous(), forward ? 1 : -1);
   }
 
@@ -1554,7 +1582,7 @@ public final class PlayerActivity extends Activity {
     stopWatching();
     boolean wasMutating = mutatingPageWindow;
     mutatingPageWindow = true;
-    if (currentPage == null || currentPage.index != index) watchTracker.reset();
+    if (currentPage == null || currentPage.index != index) entryFeedback.start(false);
     try {
       invalidateCompletion();
       cancelInteractions();
@@ -1711,13 +1739,42 @@ public final class PlayerActivity extends Activity {
   }
 
   private void updateWatchTime(boolean eligible) {
-    if (watchTracker.update(eligible, SystemClock.elapsedRealtime())
-        && playbackStats != null
-        && currentPage != null
-        && currentPage.item != null) {
-      // A navigation callback may already have advanced the order. The settling interval still
-      // belongs to the page on screen, never the incoming index or a paused preload neighbor.
-      playbackStats.recordPlay(currentPage.item);
+    applyEntryFeedback(entryFeedback.update(eligible, SystemClock.elapsedRealtime()));
+  }
+
+  private void finishEntry(boolean userInitiated) {
+    if (order == null || currentPage == null || currentPage.item == null) return;
+    applyEntryFeedback(
+        entryFeedback.depart(
+            userInitiated && !currentPage.failed && !handlingEnd, SystemClock.elapsedRealtime()));
+  }
+
+  private void applyEntryFeedback(PlaybackEntryFeedbackPolicy.Action action) {
+    if (action == PlaybackEntryFeedbackPolicy.Action.NONE
+        || playbackStats == null
+        || currentPage == null
+        || currentPage.item == null) return;
+    // Settle against the outgoing page, never a preloaded neighbor or an advanced queue index.
+    VideoItem item = currentPage.item;
+    if (action == PlaybackEntryFeedbackPolicy.Action.RECORD_PLAY) playbackStats.recordPlay(item);
+    else if (voteSession != null) {
+      int requested = action == PlaybackEntryFeedbackPolicy.Action.LIKE ? 1 : -1;
+      PlaybackVoteSession session = voteSession;
+      Object generation = playbackStats.voteGeneration();
+      if (session.applyAutomaticVote(item, requested, generation)) refreshFeedbackUi();
+      else {
+        // A rapid departure may beat initial database hydration. Retry once off the render path,
+        // keeping the outgoing item/session and rejecting work superseded by a weight reset.
+        playbackStats.prepareWeights(
+            java.util.Collections.singletonList(item),
+            prepared -> {
+              if (prepared == null || playbackStats.voteGeneration() != generation) return;
+              if (session.applyAutomaticVote(item, requested, generation)
+                  && !isFinishing()
+                  && !isDestroyed()) refreshFeedbackUi();
+            });
+      }
+      // Inferred preference is quiet: do not interrupt playback with an effect or vibration.
     }
   }
 
@@ -2129,10 +2186,6 @@ public final class PlayerActivity extends Activity {
     ImageButton button = icon(PlayerIcons.PLAY, label, 48, TEXT);
     button.setPadding(dp(12), dp(12), dp(12), dp(12));
     return button;
-  }
-
-  private void space(LinearLayout row) {
-    row.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1));
   }
 
   private TextView text(int size, int color) {

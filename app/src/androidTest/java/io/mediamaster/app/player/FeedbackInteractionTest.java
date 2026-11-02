@@ -844,10 +844,20 @@ public final class FeedbackInteractionTest {
           int target = Math.round(48 * context.getResources().getDisplayMetrics().density);
           assertTrue(like.getWidth() >= target && like.getHeight() >= target);
           assertTrue(dislike.getWidth() >= target && dislike.getHeight() >= target);
-          assertTrue(counter.getRight() <= like.getLeft());
           assertTrue(like.getRight() <= dislike.getLeft());
-          if (rotationVisible) assertTrue(dislike.getRight() <= rotate.getLeft());
-          assertTrue(dislike.getRight() <= bar.getWidth() - bar.getPaddingRight());
+          View feedback = (View) like.getParent();
+          assertSame(feedback, dislike.getParent());
+          if (rotationVisible) {
+            ViewGroup actions = (ViewGroup) read(player, "controlActions");
+            View mode = (View) read(player, "modeButton");
+            assertSame(actions, feedback.getParent());
+            assertTrue(mode.getRight() <= feedback.getLeft());
+            assertTrue(counter.getRight() <= rotate.getLeft());
+          } else {
+            assertSame(bar, feedback.getParent());
+            assertTrue(counter.getRight() <= feedback.getLeft());
+          }
+          assertTrue(dislike.getRight() <= feedback.getWidth());
           return null;
         });
   }

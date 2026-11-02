@@ -9,6 +9,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.database.Cursor;
+import android.database.sqlite.SQLiteDatabase;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -163,6 +164,119 @@ public final class PlaybackEntryStatsTest {
   }
 
   @Test
+  public void quickManualNavigationAndRepeatedCloseContributeOnlyOneDislikePerVideo()
+      throws Exception {
+    launch(videos);
+    pauseReadyAt(1499);
+    click("下一条");
+    await(() -> onMain(() -> current().index == 1));
+    pauseReadyAt(1500);
+    assertFeedback(0, 0, 1);
+    assertEquals(0, store.playCount(videos.get(0)));
+    click("上一条");
+    await(() -> onMain(() -> current().index == 0));
+    pauseReadyAt(1499);
+    onMain(
+        () -> {
+          activity.finish();
+          activity.finish();
+          return null;
+        });
+    await(() -> onMain(() -> activity.isDestroyed()));
+    assertFeedback(0, 0, 1);
+    assertFeedback(1, 0, 0);
+    assertEquals(0, store.playCount(videos.get(0)));
+  }
+
+  @Test
+  public void manualCloseBelowOneAndAHalfSecondsCreatesOneDislike() throws Exception {
+    launch(new ArrayList<>(videos.subList(0, 1)));
+    pauseReadyAt(1499);
+    finishAndWait();
+    assertFeedback(0, 0, 1);
+    assertEquals(0, store.playCount(videos.get(0)));
+  }
+
+  @Test
+  public void manualCloseAtExactlyOneAndAHalfSecondsDoesNotDislike() throws Exception {
+    launch(new ArrayList<>(videos.subList(0, 1)));
+    pauseReadyAt(1500);
+    finishAndWait();
+    assertFeedback(0, 0, 0);
+    assertEquals(0, store.playCount(videos.get(0)));
+  }
+
+  @Test
+  public void searchViewingOverThreeSecondsLikesOnceWithoutRecordingAPlay() throws Exception {
+    launch(videos, true);
+    awaitWatching(3001);
+    pauseAndReadWatched();
+    assertFeedback(0, 1, 0);
+    assertEquals(0, store.playCount(videos.get(0)));
+    resume();
+    await(() -> onMain(() -> current().isPlaying()));
+    updateAndReadWatched();
+    finishAndWait();
+    assertFeedback(0, 1, 0);
+    assertEquals(0, store.playCount(videos.get(0)));
+    assertEquals(0, store.playCount(videos.get(1)));
+  }
+
+  @Test
+  public void closingSearchResultQuicklyDoesNotDislikeOrRecordAPlay() throws Exception {
+    launch(new ArrayList<>(videos.subList(0, 1)), true);
+    pauseReadyAt(1499);
+    finishAndWait();
+    assertFeedback(0, 0, 0);
+    assertEquals(0, store.playCount(videos.get(0)));
+  }
+
+  @Test
+  public void searchExemptionEndsWhenNavigatingToTheNextOrdinaryVideo() throws Exception {
+    launch(videos, true);
+    pauseReadyAt(1499);
+    click("下一条");
+    await(() -> onMain(() -> current().index == 1));
+    awaitCount(1, 1);
+    pauseAndReadWatched();
+    assertEquals(0, store.playCount(videos.get(0)));
+    assertFeedback(0, 0, 0);
+    assertFeedback(1, 0, 0);
+  }
+
+  @Test
+  public void backgroundingAQuickEntryDoesNotCreateADislike() throws Exception {
+    launch(videos);
+    pauseReadyAt(1499);
+    onMain(
+        () -> {
+          assertTrue(
+              "Move only this test's playback task to the background",
+              activity.moveTaskToBack(true));
+          return null;
+        });
+    await(() -> onMain(() -> !(boolean) read("resumed") && !(boolean) read("started")));
+    assertFeedback(0, 0, 0);
+    assertEquals(0, store.playCount(videos.get(0)));
+    assertEquals(1499, updateAndReadWatched());
+  }
+
+  @Test
+  public void searchSourceAndPartialViewingSurviveRecreationWithoutQuickDislike() throws Exception {
+    launch(videos, true);
+    pauseReadyAt(1000);
+    recreateActivity();
+    assertEquals(1000, updateAndReadWatched());
+    assertFeedback(0, 0, 0);
+    assertEquals(0, store.playCount(videos.get(0)));
+    resume();
+    awaitWatching(3001);
+    pauseAndReadWatched();
+    assertFeedback(0, 1, 0);
+    assertEquals(0, store.playCount(videos.get(0)));
+  }
+
+  @Test
   public void nativePlaybackCountsOnlyQualifiedViewingAcrossPauseAndResume() throws Exception {
     assertTrue(
         context.getSharedPreferences("player", 0).edit().putInt("engine_choice", 2).commit());
@@ -195,6 +309,7 @@ public final class PlaybackEntryStatsTest {
     SystemClock.sleep(3200);
     assertEquals(watched, updateAndReadWatched());
     assertEquals(0, store.playCount(videos.get(0)));
+    assertFeedback(0, 0, 0);
     onMain(
         () -> {
           invoke("setPlaying", new Class<?>[] {boolean.class}, true);
@@ -208,6 +323,7 @@ public final class PlaybackEntryStatsTest {
         held,
         updateAndReadWatched());
     assertEquals(0, store.playCount(videos.get(0)));
+    assertFeedback(0, 0, 0);
     onMain(
         () -> {
           invoke("endPlayerScrub", new Class<?>[] {long.class, boolean.class}, 1500L, true);
@@ -223,9 +339,11 @@ public final class PlaybackEntryStatsTest {
     long watched = pauseAndReadWatched();
     recreateActivity();
     assertEquals(watched, updateAndReadWatched());
+    assertFeedback(0, 0, 0);
     SystemClock.sleep(3200);
     assertEquals(watched, updateAndReadWatched());
     assertEquals(0, store.playCount(videos.get(0)));
+    assertFeedback(0, 0, 0);
     resume();
     awaitCount(0, 1);
     assertEquals(3001, updateAndReadWatched());
@@ -428,6 +546,21 @@ public final class PlaybackEntryStatsTest {
   }
 
   @Test
+  public void singleItemAutomaticWrapKeepsPartialViewingAndSearchSource() throws Exception {
+    launch(new ArrayList<>(videos.subList(0, 1)), true);
+    pauseReadyAt(1000);
+    onMain(
+        () -> {
+          invoke("navigateRelative", new Class<?>[] {boolean.class, boolean.class}, true, true);
+          return null;
+        });
+    awaitWatching(3001);
+    pauseAndReadWatched();
+    assertEquals(0, store.playCount(videos.get(0)));
+    assertFeedback(0, 1, 0);
+  }
+
+  @Test
   public void failedMediaNeverCountsAsPlayback() throws Exception {
     VideoItem invalid =
         new VideoItem(
@@ -454,11 +587,61 @@ public final class PlaybackEntryStatsTest {
   }
 
   private void launch(ArrayList<VideoItem> items) {
+    launch(items, false);
+  }
+
+  private void launch(ArrayList<VideoItem> items, boolean fromSearch) {
     activity =
         rule.launchActivity(
             new Intent(context, PlayerActivity.class)
                 .putExtra("queue", QueueStore.put(context, items))
-                .putExtra("index", 0));
+                .putExtra("index", 0)
+                .putExtra("from_search", fromSearch));
+  }
+
+  /** Freeze a real prepared page at an exact logical boundary, not a scheduler-dependent sleep. */
+  private void pauseReadyAt(long watchedMs) throws Exception {
+    pauseAndReadWatched();
+    await(() -> onMain(() -> current().firstFrameReady && !current().failed));
+    onMain(
+        () -> {
+          ((PlaybackWatchTracker) read("watchTracker")).restore(watchedMs, false);
+          return null;
+        });
+  }
+
+  private void finishAndWait() throws Exception {
+    onMain(
+        () -> {
+          activity.finish();
+          return null;
+        });
+    await(() -> onMain(() -> activity.isDestroyed()));
+  }
+
+  private void assertFeedback(int index, double likes, double dislikes) throws Exception {
+    store.awaitIdle();
+    assertTrue(
+        "Only inspect the disposable test database",
+        databaseName.startsWith("test_playback_entries_"));
+    try (SQLiteDatabase database =
+            SQLiteDatabase.openDatabase(
+                context.getDatabasePath(databaseName).getAbsolutePath(),
+                null,
+                SQLiteDatabase.OPEN_READONLY);
+        Cursor row =
+            database.rawQuery(
+                "SELECT likes,dislikes,mass_exponent FROM plays WHERE media_key=?",
+                new String[] {PlaybackStatsStore.key(videos.get(index))})) {
+      if (!row.moveToFirst()) {
+        assertEquals(0, likes, 0);
+        assertEquals(0, dislikes, 0);
+      } else {
+        // Seven-day decay can run between assertions; a second full vote is still unambiguous.
+        assertEquals(likes, Math.scalb(row.getDouble(0), row.getInt(2)), 0.0001);
+        assertEquals(dislikes, Math.scalb(row.getDouble(1), row.getInt(2)), 0.0001);
+      }
+    }
   }
 
   private void click(String label) throws Exception {

@@ -35,10 +35,45 @@ public final class PlaybackVoteSession {
     if (requested < -1 || requested > 1) throw new IllegalArgumentException("Invalid vote");
     if (!store.canAcceptVote()) return false;
     int previous = vote(item);
-    if (previous == requested) return true;
+    // A zero contribution is also a deliberate cancellation. Retain its token so a later
+    // automatic event cannot put back feedback that the user explicitly cleared.
+    if (previous == requested && votes.containsKey(resolve(PlaybackStatsStore.key(item))))
+      return true;
+    return apply(item, requested);
+  }
+
+  /**
+   * Apply at most one automatic decision in this window. Any existing choice, including a cancelled
+   * one, takes precedence. Automatic feedback has the same reversible, decaying mass as a button
+   * vote; it never creates a persistent selected-state flag.
+   *
+   * @return true only when a new contribution was accepted; false is a silent no-op/retry later.
+   */
+  public synchronized boolean applyAutomaticVote(VideoItem item, int requested) {
+    return applyAutomaticVote(item, requested, store.voteGeneration());
+  }
+
+  /** Reject an inferred event superseded by a reset, including a reset racing this call. */
+  public synchronized boolean applyAutomaticVote(
+      VideoItem item, int requested, Object expectedGeneration) {
+    if (requested != -1 && requested != 1)
+      throw new IllegalArgumentException("Automatic vote must be like or dislike");
+    if (expectedGeneration == null || expectedGeneration != store.voteGeneration()) return false;
+    if (!store.canAcceptVote()) return false;
+    vote(item); // Reconcile reset generations, removed records and owned rename aliases first.
+    if (votes.containsKey(resolve(PlaybackStatsStore.key(item)))) return false;
+    return apply(item, requested, expectedGeneration);
+  }
+
+  private boolean apply(VideoItem item, int requested) {
+    return apply(item, requested, null);
+  }
+
+  private boolean apply(VideoItem item, int requested, Object expectedGeneration) {
     String original = PlaybackStatsStore.key(item);
     String key = resolve(original);
-    PlaybackStatsStore.VoteContribution applied = store.applyVote(key, votes.get(key), requested);
+    PlaybackStatsStore.VoteContribution applied =
+        store.applyVote(key, votes.get(key), requested, expectedGeneration);
     if (applied == null) return false;
     if (applied.generation != generation) {
       votes.clear();

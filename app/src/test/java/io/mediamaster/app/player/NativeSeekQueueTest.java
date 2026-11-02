@@ -6,6 +6,21 @@ import org.junit.Test;
 
 public class NativeSeekQueueTest {
   @Test
+  public void finalCommitTracksTheActualRequestThroughDeduplicationAndReplacement() {
+    NativeSeekQueue queue = new NativeSeekQueue();
+    NativeSeekQueue.Request preview = queue.offer(1000, false);
+    assertSame(preview, queue.take(20));
+    NativeSeekQueue.Request superseded = queue.offer(2000, false);
+    assertSame("Commit can match an in-flight preview", preview, queue.offer(1000, false));
+    assertFalse(queue.hasPending());
+    NativeSeekQueue.Request committed = queue.offer(3000, false);
+    assertNotSame(superseded, committed);
+    assertSame(committed, queue.offer(3000, false));
+    assertTrue(queue.acknowledge(preview.id));
+    assertSame(committed, queue.take(50));
+  }
+
+  @Test
   public void firstRequestIsImmediateAndHealthyAcknowledgementDoesNotAddADebounce() {
     NativeSeekQueue queue = new NativeSeekQueue();
     queue.offer(4200, false);

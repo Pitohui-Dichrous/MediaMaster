@@ -19,7 +19,7 @@ public class NativeDecoderPolicyTest {
   }
 
   @Test
-  public void defaultNativeFallbackAdmitsCommonStreamsThroughFullHdSixtyInEitherOrientation() {
+  public void defaultNativeFallbackAdmitsOrdinaryFormatsInEitherOrientation() {
     String[] codecs = {
       "video/avc",
       "video/hevc",
@@ -32,19 +32,62 @@ public class NativeDecoderPolicyTest {
     int[] profiles = {8, 1, -1, 1, 1, 1, -1};
     for (int i = 0; i < codecs.length; i++) {
       assertTrue(codecs[i], automatic(media(codecs[i], 1920, 1080, 60, profiles[i], false)));
-      assertTrue(codecs[i], automatic(media(codecs[i], 1080, 1920, 59.94, profiles[i], false)));
+      assertTrue(codecs[i], automatic(media(codecs[i], 2160, 3840, 119.88, profiles[i], false)));
     }
   }
 
   @Test
-  public void defaultDoesNotRoundOverBudgetDimensionsOrRatesDown() {
-    assertFalse(automatic(media("video/avc", 1920, 1080, Math.nextUp(60d), 8, false)));
-    assertFalse(automatic(media("video/avc", 1921, 1080, 30, 8, false)));
-    assertFalse(automatic(media("video/avc", 1440, 1440, 30, 8, false)));
-    assertFalse(automatic(media("video/avc", 3840, 2160, 30, 8, false)));
+  public void ordinaryHighRateAndLargerShortGopHeadersAreAdmittedWhenTheirBuffersFit() {
+    assertTrue(automatic(media("video/avc", 1920, 1080, 120, 8, false)));
+    assertTrue(automatic(media("video/avc", 1440, 1440, 30, 8, false)));
+    assertTrue(automatic(media("video/avc", 3840, 2160, 60, 8, false)));
+  }
+
+  @Test
+  public void malformedHeadersAndOverflowingBufferEstimatesCannotStartAutomaticSoftware() {
     for (double fps : new double[] {0, -1, Double.NaN, Double.POSITIVE_INFINITY})
       assertFalse(automatic(media("video/avc", 640, 360, fps, 8, false)));
     assertFalse(automatic(media("video/avc", 0, 1080, 30, 8, false)));
+    assertFalse(
+        NativeDecoderPolicy.useSoftware(
+            NativeDecoderPolicy.AUTO,
+            false,
+            media("video/avc", Integer.MAX_VALUE, Integer.MAX_VALUE, 30, 8, false),
+            new NativeDecoderPolicy.Resources(Long.MAX_VALUE, 0, false, false)));
+  }
+
+  @Test
+  public void sameFourKStreamFollowsLiveMemoryHeadroomInBothProcessWidths() {
+    NativeDecoderPolicy.Metadata video = media("video/avc", 3840, 2160, 120, 8, false);
+    long reserve = 128 * MIB;
+    long admission = reserve + 32 * MIB + 3840L * 2160 * 48;
+    for (boolean wide : new boolean[] {false, true}) {
+      assertTrue(
+          NativeDecoderPolicy.useSoftware(
+              NativeDecoderPolicy.AUTO,
+              false,
+              video,
+              new NativeDecoderPolicy.Resources(admission, reserve, false, false, wide)));
+      assertFalse(
+          NativeDecoderPolicy.useSoftware(
+              NativeDecoderPolicy.AUTO,
+              false,
+              video,
+              new NativeDecoderPolicy.Resources(admission - 1, reserve, false, false, wide)));
+    }
+  }
+
+  @Test
+  public void narrowAddressSpaceStillBoundsAutomaticPerDecoderBufferAdmission() {
+    NativeDecoderPolicy.Metadata large = media("video/avc", 7680, 4320, 60, 8, false);
+    long available = 4 * 1024 * MIB;
+    NativeDecoderPolicy.Resources narrow =
+        new NativeDecoderPolicy.Resources(available, 128 * MIB, false, false, false);
+    NativeDecoderPolicy.Resources wide =
+        new NativeDecoderPolicy.Resources(available, 128 * MIB, false, false, true);
+    assertFalse(NativeDecoderPolicy.useSoftware(NativeDecoderPolicy.AUTO, false, large, narrow));
+    assertTrue(NativeDecoderPolicy.useSoftware(NativeDecoderPolicy.AUTO, false, large, wide));
+    assertTrue(NativeDecoderPolicy.useSoftware(NativeDecoderPolicy.SOFTWARE, false, large, narrow));
   }
 
   @Test

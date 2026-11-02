@@ -19,14 +19,15 @@ final class NativeSeekQueue {
   /**
    * New intent replaces old pending work; an accurate final request cannot be lost to fast seek.
    */
-  void offer(long positionMs, boolean fast) {
+  Request offer(long positionMs, boolean fast) {
     long target = Math.max(0, positionMs);
     if (submitted != null && submitted.positionMs == target && (!submitted.fast || fast)) {
       pending = null;
-      return;
+      return submitted;
     }
-    if (pending != null && pending.positionMs == target && pending.fast == fast) return;
+    if (pending != null && pending.positionMs == target && pending.fast == fast) return pending;
     pending = new Request(++serial, target, fast);
+    return pending;
   }
 
   /** The first request is immediate. A timer alone never permits another decoder flush. */

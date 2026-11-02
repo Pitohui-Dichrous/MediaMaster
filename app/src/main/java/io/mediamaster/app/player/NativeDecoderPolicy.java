@@ -5,6 +5,9 @@ final class NativeDecoderPolicy {
   static final int AUTO = 0, HARDWARE = 1, SOFTWARE = 2;
   static final int COMPATIBLE = 3, NONE = -1;
   private static final long MIB = 1024 * 1024L;
+  // A 32-bit player can also have two preloaded neighbors, native libraries and frame surfaces.
+  // System-wide free RAM is not all addressable by one decoder in that process.
+  private static final long MAX_32_BIT_DECODER_BYTES = 512 * MIB;
 
   static final class Metadata {
     final String mime;
@@ -37,17 +40,27 @@ final class NativeDecoderPolicy {
 
   static final class Resources {
     final long availableBytes, lowMemoryThresholdBytes;
-    final boolean lowMemory, severeThermalPressure;
+    final boolean lowMemory, severeThermalPressure, process64Bit;
 
     Resources(
         long availableBytes,
         long thresholdBytes,
         boolean lowMemory,
         boolean severeThermalPressure) {
+      this(availableBytes, thresholdBytes, lowMemory, severeThermalPressure, true);
+    }
+
+    Resources(
+        long availableBytes,
+        long thresholdBytes,
+        boolean lowMemory,
+        boolean severeThermalPressure,
+        boolean process64Bit) {
       this.availableBytes = availableBytes;
       this.lowMemoryThresholdBytes = thresholdBytes;
       this.lowMemory = lowMemory;
       this.severeThermalPressure = severeThermalPressure;
+      this.process64Bit = process64Bit;
     }
   }
 
@@ -63,10 +76,8 @@ final class NativeDecoderPolicy {
     if (mode == HARDWARE || avoidSoftware || metadata == null) return false;
     return metadata.width > 0
         && metadata.height > 0
-        && Math.max(metadata.width, metadata.height) <= 1920
-        && Math.min(metadata.width, metadata.height) <= 1080
         && metadata.frameRate > 0
-        && metadata.frameRate <= 60
+        && Double.isFinite(metadata.frameRate)
         && !metadata.hdr
         && isOrdinaryEightBitStream(metadata)
         && hasMemoryAndThermalHeadroom(metadata, resources);
@@ -143,6 +154,7 @@ final class NativeDecoderPolicy {
     long pixels = (long) metadata.width * metadata.height;
     if (pixels <= 0 || pixels > (Long.MAX_VALUE - fixedBytes) / bytesPerPixel) return false;
     long workingBytes = fixedBytes + pixels * bytesPerPixel;
+    if (!resources.process64Bit && workingBytes > MAX_32_BIT_DECODER_BYTES) return false;
     long reserve = Math.max(64 * MIB, resources.lowMemoryThresholdBytes);
     return resources.availableBytes > reserve && resources.availableBytes - reserve >= workingBytes;
   }

@@ -1718,7 +1718,7 @@ public final class PlayerActivity extends Activity {
     boolean resume = playRequested();
     boolean completing = handlingEnd;
     invalidateCompletion();
-    currentPage.seekTo(GestureSeek.targetMs(0, at, duration()));
+    currentPage.seekTo(GestureSeek.targetMs(0, at, duration()), true);
     // VLC closes its native playback gate when reporting EOF. A deliberate rewind supersedes
     // that completion and restores the user's earlier play/pause choice.
     if (completing && vlc != null) applyCurrentPlayback(resume);

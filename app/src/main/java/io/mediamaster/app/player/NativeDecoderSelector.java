@@ -184,7 +184,8 @@ final class NativeDecoderSelector {
         // Thermal reporting is optional; no device identity is used as a substitute.
       }
     }
-    return new NativeDecoderPolicy.Resources(available, threshold, lowMemory, thermalPressure);
+    return new NativeDecoderPolicy.Resources(
+        available, threshold, lowMemory, thermalPressure, android.os.Process.is64Bit());
   }
 
   private static final class Request implements Runnable {
